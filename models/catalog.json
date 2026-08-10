@@ -1,0 +1,403 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-24T06:49:20.152Z",
+  "modelCount": 11,
+  "models": [
+    {
+      "id": "black",
+      "label": "Bugatti Atlantic",
+      "category": "car",
+      "source": "black-car.glb",
+      "mobileAsset": "black-car.mobile.json",
+      "sourceSha256": "a8f7d129b157ea4eaa6fe85e6cd23cdce625d0a48e01f17c28acc7d7b069ffba",
+      "sourceBytes": 19233344,
+      "sourceYawDegrees": 0,
+      "targetLengthMeters": 4.85,
+      "paintColor": "#101820",
+      "bounds": {
+        "min": [
+          -0.01042612171710755,
+          0.0000029682400189113244,
+          -0.02340991921551705
+        ],
+        "max": [
+          0.01042612171710755,
+          0.012627209142732411,
+          0.02426742022631867
+        ]
+      },
+      "sourceStats": {
+        "primitives": 1437,
+        "triangles": 273420,
+        "vertices": 228652
+      },
+      "optimizedStats": {
+        "drawCalls": 5,
+        "triangles": 54955,
+        "vertices": 20311,
+        "clusterSize": 0.002518
+      },
+      "mobileBytes": 1732429
+    },
+    {
+      "id": "white",
+      "label": "BMW M8",
+      "category": "car",
+      "source": "white-car.glb",
+      "mobileAsset": "white-car.mobile.json",
+      "sourceSha256": "45b07634f696b1307e0e1320ee668011c9a135a7dcd0683ab2779d4561ded2da",
+      "sourceBytes": 16100820,
+      "sourceYawDegrees": 0,
+      "targetLengthMeters": 4.87,
+      "paintColor": "#F4F6F8",
+      "bounds": {
+        "min": [
+          -0.010757859704840333,
+          -0.00006987014658904047,
+          -0.024346138886821134
+        ],
+        "max": [
+          0.010757859704840333,
+          0.013687732211774606,
+          0.024322409086173558
+        ]
+      },
+      "sourceStats": {
+        "primitives": 920,
+        "triangles": 225932,
+        "vertices": 176163
+      },
+      "optimizedStats": {
+        "drawCalls": 5,
+        "triangles": 54966,
+        "vertices": 18099,
+        "clusterSize": 0.003481
+      },
+      "mobileBytes": 1634510
+    },
+    {
+      "id": "gallardo",
+      "label": "Lamborghini Gallardo",
+      "category": "car",
+      "source": "2009_lamborghini_gallardo_lp560-4_spyder.glb",
+      "mobileAsset": "gallardo.mobile.json",
+      "sourceSha256": "012d55fcc8f1810cc332125a700d1929d18a54b5852919142863bb76573695f6",
+      "sourceBytes": 9149780,
+      "sourceYawDegrees": 0,
+      "targetLengthMeters": 4.35,
+      "paintColor": "#F2B705",
+      "bounds": {
+        "min": [
+          -0.010859489198189463,
+          -0.0012527794110898769,
+          -0.021843268383072267
+        ],
+        "max": [
+          0.010859499927025286,
+          0.01054082012457802,
+          0.021843268383072267
+        ]
+      },
+      "sourceStats": {
+        "primitives": 851,
+        "triangles": 101422,
+        "vertices": 96495
+      },
+      "optimizedStats": {
+        "drawCalls": 5,
+        "triangles": 54936,
+        "vertices": 38695,
+        "clusterSize": 0.000517
+      },
+      "mobileBytes": 2673368
+    },
+    {
+      "id": "audi-r8",
+      "label": "Audi R8 LMS",
+      "category": "car",
+      "source": "2015_audi_r8_lms_ultra.glb",
+      "mobileAsset": "audi-r8.mobile.json",
+      "sourceSha256": "bb905168cdfc2e0b7faac2f07098309af9fcd0788c996ef6139c2f09f08ebe0b",
+      "sourceBytes": 2254480,
+      "sourceYawDegrees": 0,
+      "targetLengthMeters": 4.62,
+      "paintColor": "#DCE4EA",
+      "bounds": {
+        "min": [
+          -4.162069797515867,
+          -2.7907400131225613,
+          -8.622400283813478
+        ],
+        "max": [
+          4.2302498817443865,
+          2.2923099994659424,
+          10.277500152587889
+        ]
+      },
+      "sourceStats": {
+        "primitives": 30,
+        "triangles": 25415,
+        "vertices": 25838
+      },
+      "optimizedStats": {
+        "drawCalls": 4,
+        "triangles": 24487,
+        "vertices": 22173,
+        "clusterSize": 0.030984
+      },
+      "mobileBytes": 1385212
+    },
+    {
+      "id": "porsche-cayman",
+      "label": "Porsche 718 Cayman",
+      "category": "car",
+      "source": "2018_porsche_718_cayman_gts.glb",
+      "mobileAsset": "porsche-cayman.mobile.json",
+      "sourceSha256": "2422cf2145addd0062bcd328e4d02abd446de6291e220b1e670c56827ba17e8c",
+      "sourceBytes": 5702060,
+      "sourceYawDegrees": 0,
+      "targetLengthMeters": 4.39,
+      "paintColor": "#E8EEF2",
+      "bounds": {
+        "min": [
+          -0.009938649909079444,
+          -0.00003247186441463412,
+          -0.02212177942421034
+        ],
+        "max": [
+          0.00998597003550894,
+          0.012906425604825633,
+          0.02167357873156117
+        ]
+      },
+      "sourceStats": {
+        "primitives": 489,
+        "triangles": 70387,
+        "vertices": 60884
+      },
+      "optimizedStats": {
+        "drawCalls": 5,
+        "triangles": 54847,
+        "vertices": 41927,
+        "clusterSize": 0.000191
+      },
+      "mobileBytes": 2733126
+    },
+    {
+      "id": "porsche-spyder",
+      "label": "Porsche 718 Spyder",
+      "category": "car",
+      "source": "2020_porsche_718_spyder.glb",
+      "mobileAsset": "porsche-spyder.mobile.json",
+      "sourceSha256": "5fab6a63c35a3f37240974c89e1076d6406ccfa5cd2e33b329bdae5019973880",
+      "sourceBytes": 8565744,
+      "sourceYawDegrees": 0,
+      "targetLengthMeters": 4.43,
+      "paintColor": "#40A8E0",
+      "bounds": {
+        "min": [
+          -0.009947439130510115,
+          -0.00003247186441463412,
+          -0.022251030499442014
+        ],
+        "max": [
+          0.009985967571170573,
+          0.012345664245378724,
+          0.022032047049758682
+        ]
+      },
+      "sourceStats": {
+        "primitives": 390,
+        "triangles": 131869,
+        "vertices": 107469
+      },
+      "optimizedStats": {
+        "drawCalls": 4,
+        "triangles": 54940,
+        "vertices": 35778,
+        "clusterSize": 0.000788
+      },
+      "mobileBytes": 2547945
+    },
+    {
+      "id": "concept",
+      "label": "Concept Car",
+      "category": "car",
+      "source": "model.glb",
+      "mobileAsset": "concept.mobile.json",
+      "sourceSha256": "1afc9a41405f8f6b483ec74aa9766ca98fecd5a069649b814bf8723ff66cd0ac",
+      "sourceBytes": 28258260,
+      "sourceYawDegrees": 0,
+      "targetLengthMeters": 4.55,
+      "paintColor": "#C7D2DC",
+      "bounds": {
+        "min": [
+          -0.9100291267685634,
+          -0.7248387924676081,
+          -2.0968444969622624
+        ],
+        "max": [
+          0.9097203475533888,
+          0.7251612243175032,
+          2.097351175583526
+        ]
+      },
+      "sourceStats": {
+        "primitives": 1,
+        "triangles": 933241,
+        "vertices": 504728
+      },
+      "optimizedStats": {
+        "drawCalls": 1,
+        "triangles": 54996,
+        "vertices": 386,
+        "clusterSize": 6.62698
+      },
+      "mobileBytes": 626756
+    },
+    {
+      "id": "sports-bike",
+      "label": "Red Sport Bike",
+      "category": "bike",
+      "source": "sports_bike.glb",
+      "mobileAsset": "sports-bike.mobile.json",
+      "sourceSha256": "50f957bd04b5bf921edd07ba2c89c21c6a832f313f94cfec7d898a99e8c8ed0c",
+      "sourceBytes": 41409232,
+      "sourceYawDegrees": 180,
+      "targetLengthMeters": 2.12,
+      "paintColor": "#D62828",
+      "bounds": {
+        "min": [
+          -0.41982182187016076,
+          -0.0002190581223609489,
+          -1.0782904645600049
+        ],
+        "max": [
+          0.41982224221320613,
+          1.1321515318810724,
+          1.0246044908684722
+        ]
+      },
+      "sourceStats": {
+        "primitives": 29,
+        "triangles": 641501,
+        "vertices": 511134
+      },
+      "optimizedStats": {
+        "drawCalls": 4,
+        "triangles": 133853,
+        "vertices": 27703,
+        "clusterSize": 0.151145
+      },
+      "mobileBytes": 3275692
+    },
+    {
+      "id": "suzuki-gsx",
+      "label": "Suzuki GSX 750",
+      "category": "bike",
+      "source": "suzuki_gsx_750_bike.glb",
+      "mobileAsset": "suzuki-gsx.mobile.json",
+      "sourceSha256": "d7039132f7167eade329156b1d3dff56e9b49757788884afeafb18179c63923f",
+      "sourceBytes": 15637956,
+      "sourceYawDegrees": 180,
+      "targetLengthMeters": 2.05,
+      "paintColor": "#C8161D",
+      "bounds": {
+        "min": [
+          -0.4354900121688841,
+          -0.0038561452378654826,
+          -1.2014301083592387
+        ],
+        "max": [
+          0.43549001216888444,
+          1.2827073435452303,
+          1.0846170023079467
+        ]
+      },
+      "sourceStats": {
+        "primitives": 51,
+        "triangles": 403396,
+        "vertices": 329113
+      },
+      "optimizedStats": {
+        "drawCalls": 3,
+        "triangles": 108805,
+        "vertices": 28111,
+        "clusterSize": 0.145998
+      },
+      "mobileBytes": 2977663
+    },
+    {
+      "id": "street-bike",
+      "label": "Naked Street Bike",
+      "category": "bike",
+      "source": "three_cylinder_naked_street_bike.glb",
+      "mobileAsset": "street-bike.mobile.json",
+      "sourceSha256": "bb70158773f5fde9eecabddb1fc9968d69e389561add8e931902265cfaf119c6",
+      "sourceBytes": 19968812,
+      "sourceYawDegrees": 180,
+      "targetLengthMeters": 2.08,
+      "paintColor": "#1D2733",
+      "bounds": {
+        "min": [
+          -61.49751183265452,
+          -0.36464616804789785,
+          -166.00943723384182
+        ],
+        "max": [
+          61.497521995539245,
+          183.33010897259888,
+          167.349317771508
+        ]
+      },
+      "sourceStats": {
+        "primitives": 574,
+        "triangles": 565535,
+        "vertices": 380044
+      },
+      "optimizedStats": {
+        "drawCalls": 5,
+        "triangles": 171429,
+        "vertices": 27021,
+        "clusterSize": 25.714254
+      },
+      "mobileBytes": 3911429
+    },
+    {
+      "id": "truck",
+      "label": "Long-Haul Truck",
+      "category": "truck",
+      "source": "truck.glb",
+      "mobileAsset": "truck.mobile.json",
+      "sourceSha256": "debcf201db8b0004c26e991adb453f7f223b7608e203ecb55c825d5ef8e26d7d",
+      "sourceBytes": 1326748,
+      "sourceYawDegrees": 0,
+      "targetLengthMeters": 12.2,
+      "paintColor": "#E6EEF5",
+      "bounds": {
+        "min": [
+          -1.7259118875402604,
+          -2.292521610192707,
+          -7.914611684462419
+        ],
+        "max": [
+          1.7233251694128024,
+          2.2201807846183863,
+          7.992025324260958
+        ]
+      },
+      "sourceStats": {
+        "primitives": 40,
+        "triangles": 36332,
+        "vertices": 26425
+      },
+      "optimizedStats": {
+        "drawCalls": 5,
+        "triangles": 36332,
+        "vertices": 26425,
+        "clusterSize": 0
+      },
+      "mobileBytes": 1719234
+    }
+  ]
+}

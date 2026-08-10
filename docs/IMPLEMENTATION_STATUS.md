@@ -1,0 +1,190 @@
+# Vehiclemoment Tracker - Implementation Status
+
+## Stack Position
+
+The existing mobile project remains on Expo SDK 54 with expo-router. The brief
+names React Native CLI, but replacing the app shell would recreate the project.
+Expo Prebuild/development builds are the path for native MapLibre, SecureStore,
+FCM/APNs and payment modules.
+
+Backend remains Java Spring Boot with Spring Security JWT, JPA, MySQL, Flyway,
+OpenAPI and tenant-scoped APIs.
+
+## Mobile Implemented
+
+- Startup gate, native splash hold, company-code resolution, cached branding,
+  login, secure token storage and refresh-token rotation.
+- Permission-filtered drawer with Home, vehicles, fleet map, events, geofences,
+  reports, commands, management and settings.
+- Dashboard with status doughnut, status cards, refresh/retry/empty states and
+  filtered vehicle-list navigation.
+- Vehicle list with debounced search, pagination merge de-duplication,
+  pull-to-refresh and profile navigation.
+- Device profile with current status, assignment data, live-track/report/command
+  actions and driver call action.
+- Full fleet map with MapLibre native/WebView fallback, bottom card sync,
+  fit-all and refresh controls.
+- Demo-style individual live tracking with route playback controls, speed/status
+  surfaces and robust MapLibre fallback handling.
+- Events screen with paginated events and audited acknowledge mutation.
+- Geofence screen with circle-geofence creation and persisted list.
+- Reports screen with server-side report job creation and CSV download into the
+  Expo document directory.
+- Command centre with per-button loading, idempotency keys and destructive
+  command confirmation.
+- Management hub for GPS devices, users, projects, drivers, groups and audit log.
+- Settings screen backed by `/api/settings`.
+- Demo mode handlers for every mobile endpoint above.
+
+## Backend Implemented
+
+- Tenant resolution and white-label configuration.
+- Auth login/refresh/logout with JWT access token, refresh-token rotation,
+  single-session option, login rate limiting, FCM-token persistence and audit.
+- Backend permission model for Super Admin, Admin and Driver with granular flags.
+- Dashboard summary and tenant-scoped device list/profile.
+- Device create/update/soft-delete with IMEI uniqueness, tenant-owned references,
+  one active tracker per vehicle, expiry validation and audit.
+- Tenant-scoped CRUD/list APIs for users, projects, drivers and groups.
+- Events API with filtering and acknowledge audit.
+- Geofence API for circle/polygon/polyline coordinate payloads and assignment
+  validation.
+- Device command API with rate limiting, idempotency and destructive confirmation.
+- Report job API with tenant history-window enforcement and CSV content endpoint.
+- Per-user settings API.
+- Audit list API.
+- Flyway V2 migration for events, geofences, notification rules, commands,
+  reports, report schedules, fuel readings, settings, billing transactions and
+  payments.
+
+## REST API List
+
+- `POST /api/tenant/resolve`
+- `GET /api/tenant/{companyCode}/config`
+- `POST /api/auth/login`
+- `POST /api/auth/refresh`
+- `POST /api/auth/logout`
+- `GET /api/dashboard/summary`
+- `GET /api/devices`
+- `GET /api/devices/{id}`
+- `POST /api/devices`
+- `PUT /api/devices/{id}`
+- `DELETE /api/devices/{id}`
+- `GET|POST|PUT|DELETE /api/projects`
+- `GET|POST|PUT|DELETE /api/users`
+- `GET|POST|PUT|DELETE /api/drivers`
+- `GET|POST|PUT|DELETE /api/groups`
+- `GET /api/events`
+- `POST /api/events`
+- `PATCH /api/events/{id}/acknowledge`
+- `GET|POST|PUT|DELETE /api/geofences`
+- `GET /api/commands`
+- `POST /api/commands`
+- `GET /api/reports`
+- `POST /api/reports`
+- `GET /api/reports/{id}/content`
+- `GET /api/settings`
+- `PUT /api/settings`
+- `GET /api/audit`
+
+## Environment Templates
+
+Frontend: `.env.example`
+
+Backend: `../glivt/.env.example`
+
+Never put Geoapify, Firebase Admin, Razorpay secret, JWT secret or database
+credentials in the mobile app.
+
+## Setup Notes
+
+Android:
+
+- Use package `com.vehiclemoment.tracker`.
+- Run `npx expo prebuild` before native builds.
+- Put `google-services.json` in the Android app after Firebase project setup.
+- Keep clear-text traffic disabled for production.
+
+iOS:
+
+- Use bundle identifier `com.vehiclemoment.tracker`.
+- Run `npx expo prebuild` before native builds.
+- Add `GoogleService-Info.plist` after Firebase project setup.
+- Configure APNs key/certificate in Firebase for push delivery.
+
+Geoapify:
+
+- Set `EXPO_PUBLIC_GEOAPIFY_API_KEY`.
+- Restrict the key by app/domain where supported.
+- Without a key, the app uses OpenFreeMap fallback styles.
+
+Razorpay:
+
+- Keep `EXPO_PUBLIC_RAZORPAY_ENABLED=false` until native SDK and backend order
+  verification are enabled.
+- Store `RAZORPAY_KEY_SECRET` only on the backend.
+- Create orders and verify signatures only on the backend.
+
+Firebase:
+
+- Store Firebase Admin credentials only on the backend.
+- Mobile config files belong in native Android/iOS projects generated by prebuild.
+- FCM/APNs notification handlers still need a native development build.
+
+## Demo Login
+
+Frontend demo mode:
+
+- `EXPO_PUBLIC_DEMO_MODE=true`
+- Company code: `DEMO`
+- Username: `admin`
+- Password: any non-empty value
+
+Backend demo seed:
+
+- `APP_SEED_DEMO=true`
+- Company code: `DEMO`
+- Users: `superadmin`, `admin`, `driver`
+- Password: `Admin@12345`
+
+## Verification
+
+- Backend: `.\mvnw.cmd test` - passed, 15 tests.
+- Frontend: `npx.cmd tsc --noEmit` - passed.
+- Frontend: `npx.cmd expo lint` - passed.
+- Frontend Android JS export: `npx.cmd expo export --platform android` - passed.
+- Backend package: `.\mvnw.cmd package -DskipTests` - passed.
+
+## Known Limitations
+
+- Native FCM/APNs handlers, Razorpay native checkout and QR/barcode camera scan
+  require Expo prebuild/dev-client integration and provider credentials.
+- WebSocket/SSE live-position streaming is not yet wired; current app uses RTK
+  Query polling/demo playback.
+- Advanced map drawing/editing for polygon and route-corridor geofences is not
+  yet an interactive map editor.
+- Report calculations currently generate a safe CSV device export foundation;
+  full route/fuel/mileage/trip calculations still need aggregation services.
+- No original APK credentials, backend URLs, package names, source code or
+  proprietary artwork were reused.
+
+## Build Commands
+
+Frontend:
+
+```bash
+npm install
+npx expo start -c
+npx expo prebuild
+npx expo run:android
+npx expo run:ios
+npx expo export --platform android
+```
+
+Backend:
+
+```bash
+.\mvnw.cmd test
+.\mvnw.cmd package
+java -jar target/glivt-0.0.1-SNAPSHOT.jar
+```
