@@ -177,7 +177,7 @@ export default function AppLayout() {
           headerStyle: {
             borderBottomLeftRadius: 20,
             borderBottomRightRadius: 20,
-            backgroundColor: c.pageBackground,
+            backgroundColor: 'transparent',
             elevation: 8,
             shadowColor: c.shadowColor,
             shadowOffset: { width: 0, height: 4 },

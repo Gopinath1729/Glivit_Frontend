@@ -20,7 +20,7 @@ import { useAcknowledgeEventMutation, useGetEventsQuery } from '@/src/services/o
 import { useAppDispatch, useAppSelector, useHasPermission } from '@/src/store/hooks';
 import { markNotificationsRead } from '@/src/store/notificationsSlice';
 import { useTheme } from '@/src/theme/ThemeProvider';
-import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
+import { radius, spacing, typography, type ThemeColors, hexToRgba } from '@/src/theme/tokens';
 import type { EventDto } from '@/src/types/api';
 
 type Notification = {
@@ -311,7 +311,7 @@ export function NotificationCenter({ tint = '#EAF3FB' }: { tint?: string }) {
                     accessibilityRole="button"
                     onPress={() => onOpen(item)}
                     style={[styles.row, !item.read && styles.rowUnread]}>
-                    <View style={[styles.rowIcon, { backgroundColor: `${item.tone}22` }]}>
+                    <View style={[styles.rowIcon, { backgroundColor: hexToRgba(item.tone, 0.13) }]}>
                       <MaterialCommunityIcons color={item.tone} name={item.icon} size={20} />
                     </View>
                     <View style={styles.rowBody}>

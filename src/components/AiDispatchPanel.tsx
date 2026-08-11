@@ -10,7 +10,7 @@ import {
   type RankedVehicleDto,
 } from '@/src/services/aiApi';
 import { useTheme } from '@/src/theme/ThemeProvider';
-import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
+import { radius, spacing, typography, type ThemeColors, hexToRgba } from '@/src/theme/tokens';
 
 type Props = {
   origin: { latitude: number; longitude: number } | null;
@@ -136,7 +136,7 @@ export function AiDispatchPanel({ origin, destination, onConfirmDispatch }: Prop
 
       {result ? (
         <View style={styles.results}>
-          <View style={[styles.modeBadge, { borderColor: `${modeColor}55`, backgroundColor: `${modeColor}18` }]}>
+          <View style={[styles.modeBadge, { borderColor: hexToRgba(modeColor, 0.33), backgroundColor: hexToRgba(modeColor, 0.09) }]}>
             <Text style={[styles.modeText, { color: modeColor }]}>
               {result.mode === 'FULL_AI' ? 'AI ranking' : 'Distance-only ranking (AI unavailable)'}
             </Text>
@@ -219,8 +219,8 @@ const makeStyles = (c: ThemeColors) =>
     },
     action: {
       alignItems: 'center',
-      backgroundColor: `${c.primary}18`,
-      borderColor: `${c.primary}55`,
+      backgroundColor: hexToRgba(c.primary, 0.09),
+      borderColor: hexToRgba(c.primary, 0.33),
       borderRadius: radius.md,
       borderWidth: StyleSheet.hairlineWidth * 2,
       paddingVertical: spacing.sm,
@@ -253,8 +253,8 @@ const makeStyles = (c: ThemeColors) =>
     reason: { color: c.textMuted, fontSize: 11 },
     confirmBtn: {
       alignItems: 'center',
-      backgroundColor: `${c.primary}18`,
-      borderColor: `${c.primary}55`,
+      backgroundColor: hexToRgba(c.primary, 0.09),
+      borderColor: hexToRgba(c.primary, 0.33),
       borderRadius: radius.sm,
       borderWidth: StyleSheet.hairlineWidth * 2,
       minWidth: 84,
@@ -263,7 +263,7 @@ const makeStyles = (c: ThemeColors) =>
     },
     confirmText: { color: c.primary, fontSize: typography.caption, fontWeight: '800' },
     ineligiblePill: {
-      backgroundColor: `${c.textMuted}18`,
+      backgroundColor: hexToRgba(c.textMuted, 0.09),
       borderRadius: radius.pill,
       paddingHorizontal: spacing.sm,
       paddingVertical: 3,

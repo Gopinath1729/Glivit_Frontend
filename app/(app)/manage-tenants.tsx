@@ -32,7 +32,7 @@ import {
 } from '@/src/store/hooks';
 import { store } from '@/src/store/store';
 import { useTheme } from '@/src/theme/ThemeProvider';
-import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
+import { radius, spacing, typography, type ThemeColors, hexToRgba } from '@/src/theme/tokens';
 import type { TenantCreateRequest, TenantSummary, TenantUpdateRequest } from '@/src/types/api';
 
 /**
@@ -382,7 +382,7 @@ function TenantRow({
       </View>
 
       <View style={styles.cardBottom}>
-        <View style={[styles.statusPill, { backgroundColor: `${statusColor}22`, borderColor: `${statusColor}55` }]}>
+        <View style={[styles.statusPill, { backgroundColor: hexToRgba(statusColor, 0.13), borderColor: hexToRgba(statusColor, 0.33) }]}>
           <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
           <Text style={[styles.statusText, { color: statusColor }]}>{status}</Text>
         </View>

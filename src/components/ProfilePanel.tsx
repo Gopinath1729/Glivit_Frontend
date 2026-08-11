@@ -98,7 +98,7 @@ export function ProfilePanel({ visible, onClose }: ProfilePanelProps) {
           </Pressable>
 
           <LinearGradient
-            colors={[c.primaryGreen, c.darkGreen]}
+            colors={['#0F172A', '#16A34A']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
             style={styles.header}
@@ -107,9 +107,7 @@ export function ProfilePanel({ visible, onClose }: ProfilePanelProps) {
               {profileUri ? (
                 <Image source={{ uri: profileUri }} style={styles.avatar} contentFit="cover" />
               ) : (
-                <View style={styles.avatarPlaceholder}>
-                  <Text style={styles.avatarInitials}>{initials}</Text>
-                </View>
+                <View style={styles.avatarPlaceholder} />
               )}
             </View>
             <Text style={styles.name}>{displayName}</Text>
@@ -119,34 +117,34 @@ export function ProfilePanel({ visible, onClose }: ProfilePanelProps) {
           <View style={styles.menu}>
             {user?.role === 'SUPER_ADMIN' && (
               <Pressable style={styles.menuItem} onPress={() => { onClose(); router.push('/manage-tenants' as never); }}>
-                <MaterialCommunityIcons name="office-building-cog" size={24} color={c.primaryGreen} />
+                <MaterialCommunityIcons name="office-building-cog" size={24} color="#0F172A" />
                 <Text style={styles.menuItemText}>Switch Tenant</Text>
               </Pressable>
             )}
 
             <View style={styles.menuItem}>
-              <MaterialCommunityIcons name="theme-light-dark" size={24} color={c.primaryGreen} />
+              <MaterialCommunityIcons name="theme-light-dark" size={24} color="#0F172A" />
               <Text style={styles.menuItemText}>Dark Mode</Text>
               <Switch 
                 value={mode === 'dark'} 
                 onValueChange={(val) => setMode(val ? 'dark' : 'light')} 
-                trackColor={{ true: c.primaryGreen, false: c.borderStrong }} 
+                trackColor={{ true: '#0F172A', false: '#CBD5E1' }} 
                 thumbColor={c.white}
               />
             </View>
 
             <Pressable style={styles.menuItem} onPress={() => { onClose(); router.push('/timeline' as never); }}>
-              <MaterialCommunityIcons name="chart-timeline-variant" size={24} color={c.primaryGreen} />
+              <MaterialCommunityIcons name="chart-timeline-variant" size={24} color="#0F172A" />
               <Text style={styles.menuItemText}>Your Timeline</Text>
             </Pressable>
 
             <View style={styles.menuItem}>
-              <MaterialCommunityIcons name="navigation-variant-outline" size={24} color={c.primaryGreen} />
+              <MaterialCommunityIcons name="navigation-variant-outline" size={24} color="#0F172A" />
               <Text style={styles.menuItemText}>Auto Follow Vehicle</Text>
               <Switch 
                 value={autoFollowVehicle} 
                 onValueChange={setAutoFollowVehicle} 
-                trackColor={{ true: c.primaryGreen, false: c.borderStrong }} 
+                trackColor={{ true: '#0F172A', false: '#CBD5E1' }} 
                 thumbColor={c.white}
               />
             </View>

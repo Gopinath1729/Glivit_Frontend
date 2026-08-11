@@ -266,15 +266,17 @@ export default function AllVehiclesMapScreen() {
 
   const selectById = useCallback(
     (id: string | number) => {
-      const device = located.find((candidate) => String(candidate.id) === String(id));
-      if (!device) return;
-      router.push({ pathname: '/device-profile', params: { id: String(device.id) } });
+      const device = located.find((candidate) => String(candidate.id) === String(id))
+        || rawDevices.find((candidate) => String(candidate.id) === String(id));
+      const targetId = device ? device.id : id;
+      if (targetId == null) return;
+      router.push({ pathname: '/device-profile', params: { id: String(targetId) } });
     },
-    [located, router]
+    [located, rawDevices, router]
   );
 
-  const clearSelection = useCallback(() => {}, []);
-  const handleVisibleIdsChange = useCallback((visibleIds: string[]) => {}, []);
+  const clearSelection = useCallback(() => { }, []);
+  const handleVisibleIdsChange = useCallback((visibleIds: string[]) => { }, []);
 
   const openLiveTrack = (item: DeviceSummary) =>
     router.push({ pathname: '/live-track', params: { deviceId: String(item.id), name: item.name, subtitle: item.address ?? '' } });
@@ -396,6 +398,24 @@ export default function AllVehiclesMapScreen() {
           </Animated.View>
         </>
       ) : null}
+
+      <Animated.View
+        style={[
+          styles.aiFabLabel,
+          {
+            bottom: 68 + (insets.bottom > 0 ? insets.bottom : 8) + 16 + 8,
+            transform: [{ translateY: aiFabTranslateY }],
+          },
+        ]}
+      >
+        <Pressable
+          accessibilityRole="button"
+          onPress={() => router.push('/ai-chat')}
+          style={styles.aiFabLabelContainer}
+        >
+          <Text style={styles.aiFabLabelText}>Ask Glivt Sentinel</Text>
+        </Pressable>
+      </Animated.View>
 
       <Animated.View
         style={[
@@ -1028,6 +1048,29 @@ const makeStyles = (c: ThemeColors) =>
       shadowRadius: 6,
       elevation: 6,
       zIndex: 45,
+    },
+    aiFabLabel: {
+      position: 'absolute',
+      right: spacing.md + 56 + spacing.sm,
+      zIndex: 45,
+    },
+    aiFabLabelContainer: {
+      backgroundColor: c.cardBackground,
+      borderColor: c.border,
+      borderWidth: 1,
+      borderRadius: radius.pill,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 8,
+      shadowColor: c.shadowColor,
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.22,
+      shadowRadius: 6,
+      elevation: 6,
+    },
+    aiFabLabelText: {
+      color: c.textPrimary,
+      fontSize: typography.caption,
+      fontWeight: '800',
     },
     legendChip: { alignItems: 'center', flexDirection: 'column', gap: 4 },
     legendTopRow: { alignItems: 'center', flexDirection: 'row', gap: 6 },

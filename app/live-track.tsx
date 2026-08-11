@@ -31,6 +31,7 @@ import {
   DEFAULT_MAP_PREFERENCES,
 } from '@/src/services/mapPreferencesStorage';
 
+import { StatusPill } from '@/src/components/ui/StatusPill';
 import {
   Fleet3DOverlay,
   type Fleet3DOverlayMarker,
@@ -611,7 +612,7 @@ export default function VehicleTrackerScreen() {
   const vehicleCoordinate = useMemo<Coordinate>(
     () =>
       sample
-         ? { latitude: sample.latitude, longitude: sample.longitude }
+        ? { latitude: sample.latitude, longitude: sample.longitude }
         : route[0] ?? { latitude: 0, longitude: 0 },
     [sample, route]
   );
@@ -2089,13 +2090,12 @@ export default function VehicleTrackerScreen() {
       {
         active: mapPreferences.mapType !== 'standard',
         icon: mapPreferences.mapType === 'standard' ? 'layers-outline' : 'satellite-variant',
-        label: `Map type: ${
-          mapPreferences.mapType === 'satellite'
-            ? 'Satellite'
-            : mapPreferences.mapType === 'terrain'
-              ? 'Terrain'
-              : 'Default'
-        }`,
+        label: `Map type: ${mapPreferences.mapType === 'satellite'
+          ? 'Satellite'
+          : mapPreferences.mapType === 'terrain'
+            ? 'Terrain'
+            : 'Default'
+          }`,
         onPress: cycleMapType,
       },
       {
@@ -2386,12 +2386,13 @@ export default function VehicleTrackerScreen() {
             onPress={openVehiclePicker}
             style={styles.headerTextBlock}>
             <View style={styles.headerTitleRow}>
-              <Text numberOfLines={1} style={styles.headerTitle}>
+              <Text numberOfLines={1} style={[styles.headerTitle, { flexShrink: 1 }]}>
                 {vehicleName}
               </Text>
               {fleet.length > 1 ? (
                 <MaterialCommunityIcons color={BRAND.greenGlow} name="chevron-down" size={18} />
               ) : null}
+              <StatusPill state={status} />
             </View>
             <Text numberOfLines={1} style={styles.headerSubtitle}>
               {currentAddress}

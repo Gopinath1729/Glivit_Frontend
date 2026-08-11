@@ -54,27 +54,23 @@ export const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
         const currentCoord = (coordinateRef.current as any).__getValue();
         const nextLat = currentCoord.latitude + (target.latitude - currentCoord.latitude) * damp;
         const nextLng = currentCoord.longitude + (target.longitude - currentCoord.longitude) * damp;
-        
-        coordinateRef.current.timing({
+
+        coordinateRef.current.setValue({
           latitude: nextLat,
           longitude: nextLng,
           latitudeDelta: 0,
           longitudeDelta: 0,
-          duration: 33, // Target ~30fps 
-          useNativeDriver: false,
-        } as any).start();
+        });
       } else if (target && !target.moving) {
         // Snap to target if stopped
-        coordinateRef.current.timing({
+        coordinateRef.current.setValue({
           latitude: target.latitude,
           longitude: target.longitude,
           latitudeDelta: 0,
           longitudeDelta: 0,
-          duration: 100,
-          useNativeDriver: false,
-        } as any).start();
+        });
       }
-      
+
       rafRef.current = requestAnimationFrame(loop);
     };
     rafRef.current = requestAnimationFrame(loop);
@@ -90,7 +86,7 @@ export const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
   const markerSize = isSelected ? 76 : 60;
   // If threeFailed is false, we just use opacity 0 so it's a touch target.
   // If true, it falls back to 2D image marker which we don't bother rotating seamlessly.
-  
+
   const [tracksView, setTracksView] = useState(true);
   useEffect(() => {
     setTracksView(true);
@@ -98,18 +94,20 @@ export const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
     return () => clearTimeout(timer);
   }, [threeFailed, device.state, isSelected]);
 
+  const transparentImage = { uri: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=' };
+
   return (
     <AnimatedNativeMarker
       coordinate={coordinateRef.current}
       anchor={{ x: 0.5, y: 0.5 }}
       flat={false}
-      opacity={threeFailed ? 1 : 0}
       tracksViewChanges={threeFailed ? tracksView : false}
       onPress={(e: any) => {
         e.stopPropagation();
         onSelect(device.id);
       }}
       zIndex={isSelected ? 50 : 20}
+      image={!threeFailed ? transparentImage : undefined}
     >
       {threeFailed ? (
         <Vehicle3DMarker

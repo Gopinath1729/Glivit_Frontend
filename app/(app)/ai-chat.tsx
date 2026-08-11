@@ -163,8 +163,8 @@ export default function AiChatScreen() {
   return (
     <KeyboardAvoidingView
       style={styles.screen}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top + 60 : 0}>
+      behavior="padding"
+      keyboardVerticalOffset={insets.top + 60}>
       <FlatList
         ref={listRef}
         style={styles.messageList}

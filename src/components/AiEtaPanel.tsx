@@ -6,7 +6,7 @@ import { Card } from '@/src/components/ui/Card';
 import { apiErrorMessage } from '@/src/services/apiError';
 import { usePredictEtaMutation, type EtaResponseDto } from '@/src/services/aiApi';
 import { useTheme } from '@/src/theme/ThemeProvider';
-import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
+import { radius, spacing, typography, type ThemeColors, hexToRgba } from '@/src/theme/tokens';
 
 type Props = {
   vehicleId: number;
@@ -128,7 +128,7 @@ export function AiEtaPanel({ vehicleId, origin, destination, currentSpeedKph }: 
             }
           />
 
-          <View style={[styles.sourceBadge, { borderColor: `${modeColor}55`, backgroundColor: `${modeColor}18` }]}>
+          <View style={[styles.sourceBadge, { borderColor: hexToRgba(modeColor, 0.33), backgroundColor: hexToRgba(modeColor, 0.09) }]}>
             <Text style={[styles.sourceText, { color: modeColor }]}>
               {result.mode === 'FULL_AI' ? 'AI prediction' : 'Rule-engine estimate'}
             </Text>
@@ -175,8 +175,8 @@ const makeStyles = (c: ThemeColors) =>
     muted: { color: c.textMuted, fontSize: typography.caption, lineHeight: 17 },
     action: {
       alignItems: 'center',
-      backgroundColor: `${c.primary}18`,
-      borderColor: `${c.primary}55`,
+      backgroundColor: hexToRgba(c.primary, 0.09),
+      borderColor: hexToRgba(c.primary, 0.33),
       borderRadius: radius.md,
       borderWidth: StyleSheet.hairlineWidth * 2,
       paddingVertical: spacing.sm,

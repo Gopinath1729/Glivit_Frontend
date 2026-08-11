@@ -8,7 +8,7 @@ import { apiErrorMessage } from '@/src/services/apiError';
 import { useGetAiDiagnosticsQuery } from '@/src/services/aiApi';
 import { useAppSelector } from '@/src/store/hooks';
 import { useTheme } from '@/src/theme/ThemeProvider';
-import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
+import { radius, spacing, typography, type ThemeColors, hexToRgba } from '@/src/theme/tokens';
 
 /**
  * AI stack diagnostics — SUPER_ADMIN only.
@@ -87,7 +87,7 @@ export function AiDiagnosticsPanel() {
             <MaterialCommunityIcons name="refresh" size={18} color={c.primary} />
           </Pressable>
         </View>
-        <View style={[styles.modeBadge, { backgroundColor: `${modeColor}22`, borderColor: `${modeColor}55` }]}>
+        <View style={[styles.modeBadge, { backgroundColor: hexToRgba(modeColor, 0.13), borderColor: hexToRgba(modeColor, 0.33) }]}>
           <Text style={[styles.modeText, { color: modeColor }]}>{d.mode}</Text>
         </View>
         {d.mode !== 'FULL_AI' && (

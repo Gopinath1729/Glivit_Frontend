@@ -13,6 +13,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -61,10 +62,12 @@ type FormValues = z.infer<typeof schema>;
 
 export default function LoginScreen() {
   const insets = useSafeAreaInsets();
+  const { height: screenHeight } = useWindowDimensions();
+  const isSmallScreen = screenHeight < 750;
   const router = useRouter();
   const dispatch = useAppDispatch();
   const { colors: c } = useTheme();
-  const styles = React.useMemo(() => makeStyles(c), [c]);
+  const styles = React.useMemo(() => makeStyles(c, isSmallScreen), [c, isSmallScreen]);
   const tenant = useAppSelector((s) => s.auth.tenantConfig);
   const companyCode = useAppSelector((s) => s.auth.companyCode);
   const [login, { isLoading }] = useLoginMutation();
@@ -221,98 +224,110 @@ export default function LoginScreen() {
         <View style={styles.roadLineOne} />
         <View style={styles.roadLineTwo} />
       </View>
-      <SafeAreaView edges={['bottom']} style={styles.flex}>
-        <ScrollView
-          contentContainerStyle={[
-            styles.content,
-            { paddingTop: insets.top + spacing.xl, paddingBottom: spacing.xl },
-          ]}
-          keyboardShouldPersistTaps="handled">
-          <View style={styles.logo}>
-            {tenant?.logoUrl ? (
-              <Image contentFit="contain" source={{ uri: tenant.logoUrl }} style={styles.logoImage} />
-            ) : (
-              <GlivtLogo size={72} />
-            )}
-          </View>
-          <View style={styles.heroCopy}>
-            <View style={styles.liveEyebrow}>
-              <View style={styles.liveDot} />
-              <Text style={styles.eyebrowText}>FLEET COMMAND ACCESS</Text>
-            </View>
-            <Text style={styles.appName}>Welcome back</Text>
-            <Text style={styles.heroSubtitle}>
-              Sign in to monitor every vehicle, route and alert in real time.
-            </Text>
-          </View>
-
-          <View style={styles.form}>
-            <View style={styles.formHeadingRow}>
-              <View style={styles.formIcon}>
-                <MaterialCommunityIcons color="#2BE6A6" name="shield-lock-outline" size={21} />
+      <SafeAreaView edges={['top', 'bottom']} style={styles.flex}>
+        <View style={styles.contentContainer}>
+          
+          <View style={styles.upperGroup}>
+            <View style={styles.headerGroup}>
+              <View style={styles.logo}>
+                {tenant?.logoUrl ? (
+                  <Image contentFit="contain" source={{ uri: tenant.logoUrl }} style={styles.logoImage} />
+                ) : (
+                  <GlivtLogo size={isSmallScreen ? 40 : 56} />
+                )}
               </View>
-              <View style={styles.formHeadingCopy}>
-                <Text style={styles.formTitle}>Secure sign in</Text>
-                <Text numberOfLines={1} style={styles.formSubtitle}>
-                  {tenant?.name ?? 'Glivt Fleet Management'}
-                </Text>
-              </View>
-              <View style={styles.companyBadge}>
-                <Text numberOfLines={1} style={styles.companyBadgeText}>
-                  {companyCode ?? '-'}
+              <View style={styles.heroCopy}>
+                <View style={styles.liveEyebrow}>
+                  <View style={styles.liveDot} />
+                  <Text style={styles.eyebrowText}>FLEET COMMAND ACCESS</Text>
+                </View>
+                <Text style={styles.appName}>Welcome back</Text>
+                <Text style={styles.heroSubtitle}>
+                  Sign in to monitor every vehicle, route and alert in real time.
                 </Text>
               </View>
             </View>
-            <View style={styles.formRule} />
-            <Controller
-              control={control}
-              name="username"
-              render={({ field: { onChange, onBlur, value } }) => (
-                <TextField
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  error={errors.username?.message}
-                  label="Username"
-                  onBlur={onBlur}
-                  onChangeText={onChange}
-                  placeholder="Username"
-                  value={value}
+
+            <View style={styles.mainGroup}>
+              <View style={styles.form}>
+                <View style={styles.formHeadingRow}>
+                  <View style={styles.formIcon}>
+                    <MaterialCommunityIcons color="#2BE6A6" name="shield-lock-outline" size={21} />
+                  </View>
+                  <View style={styles.formHeadingCopy}>
+                    <Text style={styles.formTitle}>Secure sign in</Text>
+                    <Text numberOfLines={1} style={styles.formSubtitle}>
+                      {tenant?.name ?? 'Glivt Fleet Management'}
+                    </Text>
+                  </View>
+                  <View style={styles.companyBadge}>
+                    <Text numberOfLines={1} style={styles.companyBadgeText}>
+                      {companyCode ?? '-'}
+                    </Text>
+                  </View>
+                </View>
+                <View style={styles.formRule} />
+                <Controller
+                  control={control}
+                  name="username"
+                  render={({ field: { onChange, onBlur, value } }) => (
+                    <TextField
+                      autoCapitalize="none"
+                      autoCorrect={false}
+                      error={errors.username?.message}
+                      label="Username"
+                      onBlur={onBlur}
+                      onChangeText={onChange}
+                      placeholder="Username"
+                      value={value}
+                    />
+                  )}
                 />
-              )}
-            />
-            <View style={styles.gap} />
-            <Controller
-              control={control}
-              name="password"
-              render={({ field: { onChange, onBlur, value } }) => (
-                <TextField
-                  error={errors.password?.message}
-                  label="Password"
-                  onBlur={onBlur}
-                  onChangeText={onChange}
-                  placeholder="Password"
-                  secure
-                  value={value}
-                  onSubmitEditing={onSubmit}
-                  returnKeyType="go"
+                <View style={styles.gap} />
+                <Controller
+                  control={control}
+                  name="password"
+                  render={({ field: { onChange, onBlur, value } }) => (
+                    <TextField
+                      error={errors.password?.message}
+                      label="Password"
+                      onBlur={onBlur}
+                      onChangeText={onChange}
+                      placeholder="Password"
+                      secure
+                      value={value}
+                      onSubmitEditing={onSubmit}
+                      returnKeyType="go"
+                    />
+                  )}
                 />
-              )}
-            />
 
-            {formError ? <Text style={styles.formError}>{formError}</Text> : null}
+                {formError ? <Text style={styles.formError}>{formError}</Text> : null}
 
-            <View style={styles.submit}>
-              <Button
-                disabled={anyLoginLoading}
-                label="Login"
-                color="#D1FAE5"
-                textColor="#0F172A"
-                loading={isLoading}
-                onPress={onSubmit}
-              />
-            </View>
+                <View style={styles.submit}>
+                  <Button
+                    disabled={anyLoginLoading}
+                    label="Login"
+                    color="#D1FAE5"
+                    textColor="#0F172A"
+                    loading={isLoading}
+                    onPress={onSubmit}
+                  />
+                </View>
 
-            {showDemoLogin ? (
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() =>
+                    Alert.alert(
+                      'Forgot Password',
+                      'Please contact your service provider to reset your password.'
+                    )
+                  }
+                  style={styles.link}>
+                  <Text style={styles.linkText}>Forgot Password?</Text>
+                </Pressable>
+              </View>
+
               <>
                 {demoError ? (
                   <Text style={styles.demoEndpointText}>
@@ -321,85 +336,45 @@ export default function LoginScreen() {
                 ) : null}
                 <Button
                   disabled={anyLoginLoading}
-                  icon="shield-crown-outline"
-                  label={demoError ? 'Retry Super Admin Demo' : 'Super Admin Demo'}
+                  icon="shield-outline"
+                  label={demoError ? 'Retry Super Admin' : 'Super Admin'}
                   loading={isDemoLoading || isResolvingDemoTenant}
                   onPress={onDemoLogin}
-                  style={styles.demoLogin}
-                  variant="secondary"
+                  style={styles.superAdminBtn}
+                  textColor="#2BE6A6"
                 />
-                <View style={styles.demoRoleRow}>
-                  <Button
-                    disabled={anyLoginLoading}
-                    icon="shield-account-outline"
-                    label="Admin Demo"
-                    loading={isAdminDemoLoading}
-                    onPress={() => void onRoleDemoLogin('admin')}
-                    style={styles.demoRoleBtn}
-                    variant="secondary"
-                  />
-                  <Button
-                    disabled={anyLoginLoading}
-                    icon="account-badge-outline"
-                    label="Driver Demo"
-                    loading={isDriverDemoLoading}
-                    onPress={() => void onRoleDemoLogin('driver')}
-                    style={styles.demoRoleBtn}
-                    variant="secondary"
-                  />
-                </View>
               </>
-            ) : null}
+            </View>
+          </View>
 
+          <View style={styles.footerGroup}>
             <Pressable
               accessibilityRole="button"
-              onPress={() =>
-                Alert.alert(
-                  'Forgot Password',
-                  'Please contact your service provider to reset your password.'
-                )
-              }
-              style={styles.link}>
-              <Text style={styles.linkText}>Forgot Password?</Text>
+              accessibilityState={{ disabled: anyLoginLoading }}
+              disabled={anyLoginLoading}
+              onPress={clearCompanyCode}
+              style={[styles.clearCode, anyLoginLoading && styles.clearCodeDisabled]}>
+              <Text style={styles.clearCodeText}>
+                Company code: <Text style={styles.clearCodeStrong}>{companyCode ?? '-'}</Text> | Change
+              </Text>
             </Pressable>
+            <View style={styles.securityNote}>
+              <MaterialCommunityIcons
+                color="rgba(255,255,255,0.48)"
+                name="lock-check-outline"
+                size={13}
+              />
+              <Text style={styles.securityNoteText}>Encrypted tenant-secured session</Text>
+            </View>
           </View>
 
-          <Pressable accessibilityRole="button" onPress={contactProvider} style={styles.contactCard}>
-            <View style={styles.contactIcon}>
-              <MaterialCommunityIcons color="#2BE6A6" name="headset" size={20} />
-            </View>
-            <View style={styles.contactCopy}>
-              <Text style={styles.contactText}>Need help signing in?</Text>
-              <Text style={styles.contactSubtext}>Contact your service provider</Text>
-            </View>
-            <MaterialCommunityIcons color="rgba(255,255,255,0.62)" name="chevron-right" size={20} />
-          </Pressable>
-
-          <Pressable
-            accessibilityRole="button"
-            accessibilityState={{ disabled: anyLoginLoading }}
-            disabled={anyLoginLoading}
-            onPress={clearCompanyCode}
-            style={[styles.clearCode, anyLoginLoading && styles.clearCodeDisabled]}>
-            <Text style={styles.clearCodeText}>
-              Company code: <Text style={styles.clearCodeStrong}>{companyCode ?? '-'}</Text> | Change
-            </Text>
-          </Pressable>
-          <View style={styles.securityNote}>
-            <MaterialCommunityIcons
-              color="rgba(255,255,255,0.48)"
-              name="lock-check-outline"
-              size={13}
-            />
-            <Text style={styles.securityNoteText}>Encrypted tenant-secured session</Text>
-          </View>
-        </ScrollView>
+        </View>
       </SafeAreaView>
     </KeyboardAvoidingView>
   );
 }
 
-const makeStyles = (c: ThemeColors) =>
+const makeStyles = (c: ThemeColors, isSmallScreen: boolean) =>
   StyleSheet.create({
     flex: { flex: 1, backgroundColor: c.loginBackground },
     ambient: {
@@ -445,21 +420,40 @@ const makeStyles = (c: ThemeColors) =>
       top: '41%',
       transform: [{ rotate: '-12deg' }],
     },
-    content: {
+    contentContainer: {
+      flex: 1,
       alignItems: 'center',
-      flexGrow: 1,
-      justifyContent: 'center',
+      justifyContent: 'space-between',
       paddingHorizontal: spacing.xl,
+      paddingTop: isSmallScreen ? 5 : 15,
+      paddingBottom: isSmallScreen ? 5 : 15,
+      width: '100%',
+    },
+    upperGroup: {
+      alignItems: 'center',
+      width: '100%',
+    },
+    headerGroup: {
+      alignItems: 'center',
+      width: '100%',
+    },
+    mainGroup: {
+      alignItems: 'center',
+      width: '100%',
+    },
+    footerGroup: {
+      alignItems: 'center',
+      width: '100%',
     },
     logo: {
       alignItems: 'center',
-      minHeight: 76,
+      minHeight: isSmallScreen ? 40 : 60,
       justifyContent: 'center',
     },
-    logoImage: { height: 72, width: 230 },
+    logoImage: { height: isSmallScreen ? 36 : 56, width: isSmallScreen ? 115 : 180 },
     heroCopy: {
       alignItems: 'center',
-      marginTop: spacing.lg,
+      marginTop: isSmallScreen ? 4 : spacing.lg,
       maxWidth: 390,
     },
     liveEyebrow: {
@@ -469,9 +463,9 @@ const makeStyles = (c: ThemeColors) =>
       borderRadius: radius.pill,
       borderWidth: 1,
       flexDirection: 'row',
-      gap: 7,
-      paddingHorizontal: 11,
-      paddingVertical: 6,
+      gap: isSmallScreen ? 4 : 7,
+      paddingHorizontal: isSmallScreen ? 6 : 11,
+      paddingVertical: isSmallScreen ? 3 : 6,
     },
     liveDot: {
       backgroundColor: '#2BE6A6',
@@ -491,27 +485,27 @@ const makeStyles = (c: ThemeColors) =>
     },
     appName: {
       color: c.white,
-      fontSize: 31,
+      fontSize: isSmallScreen ? 20 : 31,
       fontWeight: '900',
       letterSpacing: -0.6,
-      marginTop: spacing.md,
+      marginTop: isSmallScreen ? 2 : spacing.md,
     },
     heroSubtitle: {
       color: 'rgba(226,239,247,0.68)',
-      fontSize: typography.body,
-      lineHeight: 21,
-      marginTop: 7,
+      fontSize: isSmallScreen ? 11 : typography.body,
+      lineHeight: isSmallScreen ? 14 : 21,
+      marginTop: isSmallScreen ? 2 : 4,
       textAlign: 'center',
     },
     form: {
       backgroundColor: 'rgba(10, 20, 32, 0.92)',
       borderColor: 'rgba(255,255,255,0.13)',
-      borderRadius: 24,
+      borderRadius: isSmallScreen ? 16 : 24,
       borderWidth: 1,
       elevation: 8,
       maxWidth: 470,
-      marginTop: spacing.xl,
-      padding: 20,
+      marginTop: isSmallScreen ? 8 : spacing.xl,
+      padding: isSmallScreen ? 10 : 20,
       shadowColor: '#02070D',
       shadowOffset: { width: 0, height: 18 },
       shadowOpacity: 0.36,
@@ -559,17 +553,17 @@ const makeStyles = (c: ThemeColors) =>
     formRule: {
       backgroundColor: 'rgba(255,255,255,0.08)',
       height: 1,
-      marginBottom: spacing.lg,
-      marginTop: spacing.md,
+      marginBottom: isSmallScreen ? 8 : spacing.lg,
+      marginTop: isSmallScreen ? 4 : spacing.md,
     },
-    gap: { height: spacing.md },
+    gap: { height: isSmallScreen ? 6 : spacing.md },
     formError: {
       color: c.danger,
       fontSize: typography.label,
       marginTop: spacing.md,
       textAlign: 'center',
     },
-    submit: { marginTop: spacing.lg },
+    submit: { marginTop: isSmallScreen ? 8 : spacing.lg },
     demoEndpointText: {
       color: 'rgba(226,239,247,0.66)',
       fontSize: 10,
@@ -577,16 +571,15 @@ const makeStyles = (c: ThemeColors) =>
       marginTop: spacing.sm,
       textAlign: 'center',
     },
-    demoLogin: { marginTop: spacing.sm },
-    demoRoleRow: {
-      flexDirection: 'row',
-      gap: spacing.sm,
-      marginTop: spacing.sm,
+    superAdminBtn: {
+      marginTop: isSmallScreen ? 0 : 2,
+      borderColor: '#2BE6A6',
+      borderWidth: 1.5,
+      backgroundColor: 'transparent',
+      maxWidth: 470,
+      width: '100%',
     },
-    demoRoleBtn: {
-      flex: 1,
-    },
-    link: { alignSelf: 'center', marginTop: spacing.md, padding: spacing.xs },
+    link: { alignSelf: 'center', marginTop: isSmallScreen ? 4 : spacing.md, padding: spacing.xs },
     linkText: { color: '#69D9F3', fontSize: typography.label, fontWeight: '700' },
     contactCard: {
       alignItems: 'center',
@@ -597,8 +590,8 @@ const makeStyles = (c: ThemeColors) =>
       flexDirection: 'row',
       gap: 11,
       maxWidth: 470,
-      marginTop: spacing.lg,
-      padding: 12,
+      marginTop: isSmallScreen ? 8 : spacing.lg,
+      padding: isSmallScreen ? 8 : 12,
       width: '100%',
     },
     contactIcon: {
@@ -616,7 +609,7 @@ const makeStyles = (c: ThemeColors) =>
       fontSize: 10,
       marginTop: 2,
     },
-    clearCode: { marginTop: spacing.md, padding: spacing.sm },
+    clearCode: { marginTop: isSmallScreen ? 2 : spacing.md, padding: spacing.sm },
     clearCodeDisabled: { opacity: 0.45 },
     clearCodeText: { color: 'rgba(255,255,255,0.64)', fontSize: typography.caption },
     clearCodeStrong: { color: c.white, fontWeight: '800' },
@@ -624,7 +617,7 @@ const makeStyles = (c: ThemeColors) =>
       alignItems: 'center',
       flexDirection: 'row',
       gap: 5,
-      marginTop: 2,
+      marginTop: isSmallScreen ? 0 : 2,
     },
     securityNoteText: {
       color: 'rgba(255,255,255,0.4)',

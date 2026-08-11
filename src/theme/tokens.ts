@@ -135,26 +135,51 @@ export const schemes: Record<Scheme, ThemeColors> = {
   dark: darkColors,
 };
 
+// Centralized status colors to render consistently on all devices and ignore platform/system theme overrides
+export const CENTRALIZED_STATUS_COLORS = {
+  RUNNING: '#22C55E',
+  MOVING: '#22C55E',
+  STOPPED: '#EF4444',
+  IDLE: '#F59E0B',
+  INACTIVE: '#94A3B8',
+  OFFLINE: '#6B7280',
+  NO_DATA: '#475569',
+  EXPIRED: '#334155',
+  SUSPENDED: '#334155',
+  IMMOBILISED: '#EF4444',
+  GPS_INVALID: '#F59E0B',
+  POWER_DISCONNECTED: '#F59E0B',
+  HEALTHY: '#22C55E',
+  WARNING: '#F59E0B',
+  CRITICAL: '#EF4444',
+  MAINTENANCE: '#3B82F6',
+  TOTAL: '#3B82F6',
+  SUCCESS: '#22C55E',
+  DANGER: '#EF4444',
+} as const;
+
+/** Converts a hex color code (e.g. #EF4444) to standard rgba format for consistent cross-platform rendering. */
+export function hexToRgba(hex: string, alpha: number): string {
+  const cleanHex = (hex ?? '').trim().replace('#', '');
+  if (cleanHex.length === 3) {
+    const r = parseInt(cleanHex[0] + cleanHex[0], 16);
+    const g = parseInt(cleanHex[1] + cleanHex[1], 16);
+    const b = parseInt(cleanHex[2] + cleanHex[2], 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+  if (cleanHex.length === 6) {
+    const r = parseInt(cleanHex.substring(0, 2), 16);
+    const g = parseInt(cleanHex.substring(2, 4), 16);
+    const b = parseInt(cleanHex.substring(4, 6), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+  return hex;
+}
+
 /** Vehicle/device state colours, resolved per scheme. White text sits on top. */
 export function stateColorsFor(colors: ThemeColors): Record<string, string> {
   return {
-    RUNNING: colors.primaryGreen,
-    MOVING: colors.primaryGreen,
-    STOPPED: '#EF4444',
-    IDLE: '#F59E0B',
-    INACTIVE: colors.textMuted,
-    OFFLINE: '#6B7280',
-    NO_DATA: colors === darkColors ? '#475569' : '#94A3B8',
-    EXPIRED: colors === darkColors ? '#334155' : '#64748B',
-    SUSPENDED: colors === darkColors ? '#334155' : '#64748B',
-    IMMOBILISED: '#EF4444',
-    GPS_INVALID: '#F59E0B',
-    POWER_DISCONNECTED: '#F59E0B',
-    HEALTHY: colors.primaryGreen,
-    WARNING: '#F59E0B',
-    CRITICAL: '#EF4444',
-    MAINTENANCE: colors.secondary,
-    TOTAL: colors.secondary,
+    ...CENTRALIZED_STATUS_COLORS,
   };
 }
 

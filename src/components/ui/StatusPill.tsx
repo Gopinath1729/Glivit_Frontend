@@ -2,15 +2,25 @@ import React, { useMemo } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { useTheme } from '@/src/theme/ThemeProvider';
-import { radius, spacing, typography } from '@/src/theme/tokens';
+import { radius, spacing, typography, hexToRgba } from '@/src/theme/tokens';
 
 /** Coloured status badge shared by list rows, cards and the live-track header. */
 export function StatusPill({ state }: { state: string }) {
   const { stateColors } = useTheme();
   const styles = useMemo(() => makeStyles(), []);
-  const color = stateColors[state] ?? stateColors.NO_DATA;
+  
+  const color = useMemo(() => {
+    const normalized = (state ?? '').trim().toUpperCase();
+    const colorKey = 
+      normalized === 'ENGINE CUT' || normalized === 'LOCKED' ? 'IMMOBILISED' :
+      normalized === 'GPS ERROR' ? 'GPS_INVALID' :
+      normalized === 'LOW ACCURACY' ? 'IDLE' :
+      normalized;
+    return stateColors[colorKey] ?? stateColors[state] ?? stateColors.NO_DATA;
+  }, [state, stateColors]);
+
   return (
-    <View style={[styles.pill, { backgroundColor: `${color}22`, borderColor: `${color}55` }]}>
+    <View style={[styles.pill, { backgroundColor: hexToRgba(color, 0.13), borderColor: hexToRgba(color, 0.33) }]}>
       <View style={[styles.dot, { backgroundColor: color }]} />
       <Text style={[styles.text, { color }]}>{formatState(state)}</Text>
     </View>

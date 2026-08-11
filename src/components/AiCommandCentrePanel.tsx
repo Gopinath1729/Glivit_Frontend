@@ -34,7 +34,7 @@ import {
 } from '@/src/services/aiApi';
 import { useAiEventStream } from '@/src/services/aiEventStream';
 import { useTheme } from '@/src/theme/ThemeProvider';
-import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
+import { radius, spacing, typography, type ThemeColors, hexToRgba } from '@/src/theme/tokens';
 
 const SEVERITIES = ['ALL', 'CRITICAL', 'HIGH', 'MEDIUM', 'LOW'] as const;
 
@@ -278,16 +278,20 @@ function EventRow({
   // Feedback feeds evaluation reports only; it never retrains a model or moves
   // a production threshold on its own.
   const onFeedback = async (isCorrect: boolean) => {
-    setFeedbackGiven(isCorrect);
-    try {
-      await submitFeedback({
-        aiEventId: event.id,
-        featureType: 'AI_EVENT',
-        isCorrect,
-      }).unwrap();
-    } catch (err) {
-      setFeedbackGiven(null);
-      Alert.alert('Feedback not saved', apiErrorMessage(err, 'Could not record your feedback.'));
+    const nextState = feedbackGiven === isCorrect ? null : isCorrect;
+    const prevState = feedbackGiven;
+    setFeedbackGiven(nextState);
+    if (nextState !== null) {
+      try {
+        await submitFeedback({
+          aiEventId: event.id,
+          featureType: 'AI_EVENT',
+          isCorrect: nextState,
+        }).unwrap();
+      } catch (err) {
+        setFeedbackGiven(prevState);
+        Alert.alert('Feedback not saved', apiErrorMessage(err, 'Could not record your feedback.'));
+      }
     }
   };
 
@@ -299,7 +303,7 @@ function EventRow({
           <Text numberOfLines={1} style={styles.eventType}>
             {formatType(event.eventType)}
           </Text>
-          <View style={[styles.badge, { backgroundColor: `${severityColor}22`, borderColor: `${severityColor}55` }]}>
+          <View style={[styles.badge, { backgroundColor: hexToRgba(severityColor, 0.13), borderColor: hexToRgba(severityColor, 0.33) }]}>
             <Text style={[styles.badgeText, { color: severityColor }]}>{event.severity}</Text>
           </View>
         </View>
@@ -666,7 +670,7 @@ function MetricDetailView({
                     <Text style={styles.cardTitle}>{item.vehicleName || 'Vehicle'}</Text>
                     <Text style={styles.cardRegNumber}>{item.name}</Text>
                   </View>
-                  <View style={[styles.badge, { backgroundColor: `${statusColor}22`, borderColor: `${statusColor}55` }]}>
+                  <View style={[styles.badge, { backgroundColor: hexToRgba(statusColor, 0.13), borderColor: hexToRgba(statusColor, 0.33) }]}>
                     <Text style={[styles.badgeText, { color: statusColor }]}>{item.state}</Text>
                   </View>
                 </View>
@@ -685,7 +689,7 @@ function MetricDetailView({
               <View style={styles.detailCard}>
                 <View style={styles.cardHeader}>
                   <Text style={styles.cardTitle}>{item.vehicleName || `Vehicle #${item.vehicleId}`}</Text>
-                  <View style={[styles.badge, { backgroundColor: `${riskColor}22`, borderColor: `${riskColor}55` }]}>
+                  <View style={[styles.badge, { backgroundColor: hexToRgba(riskColor, 0.13), borderColor: hexToRgba(riskColor, 0.33) }]}>
                     <Text style={[styles.badgeText, { color: riskColor }]}>{item.riskLevel}</Text>
                   </View>
                 </View>
@@ -714,7 +718,7 @@ function MetricDetailView({
                 <View style={styles.detailCard}>
                   <View style={styles.cardHeader}>
                     <Text style={styles.cardTitle}>{item.driverName}</Text>
-                    <View style={[styles.badge, { backgroundColor: `${c.textMuted}22`, borderColor: `${c.textMuted}55` }]}>
+                    <View style={[styles.badge, { backgroundColor: hexToRgba(c.textMuted, 0.13), borderColor: hexToRgba(c.textMuted, 0.33) }]}>
                       <Text style={[styles.badgeText, { color: c.textMuted }]}>Not scored</Text>
                     </View>
                   </View>
@@ -732,7 +736,7 @@ function MetricDetailView({
               <View style={styles.detailCard}>
                 <View style={styles.cardHeader}>
                   <Text style={styles.cardTitle}>{item.driverName}</Text>
-                  <View style={[styles.badge, { backgroundColor: `${riskColor}22`, borderColor: `${riskColor}55` }]}>
+                  <View style={[styles.badge, { backgroundColor: hexToRgba(riskColor, 0.13), borderColor: hexToRgba(riskColor, 0.33) }]}>
                     <Text style={[styles.badgeText, { color: riskColor }]}>
                       {Number(item.overallScore).toFixed(0)}/100 · {item.grade}
                     </Text>
@@ -877,7 +881,7 @@ const makeStyles = (c: ThemeColors) =>
       width: 34,
     },
     ackedPill: {
-      backgroundColor: `${c.textMuted}18`,
+      backgroundColor: hexToRgba(c.textMuted, 0.09),
       borderRadius: radius.pill,
       paddingHorizontal: spacing.sm,
       paddingVertical: 3,

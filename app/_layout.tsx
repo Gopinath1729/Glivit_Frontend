@@ -1,4 +1,5 @@
 import { Stack, useSegments } from 'expo-router';
+import { ThemeProvider as NavigationThemeProvider, DefaultTheme, DarkTheme } from '@react-navigation/native';
 import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect } from 'react';
@@ -102,19 +103,37 @@ function TenantSwitchGate() {
 
 function RootNavigator() {
   const { bootstrapped } = useAuth();
+  const { isDark, colors: c } = useTheme();
 
   if (!bootstrapped) return null;
 
+  const baseTheme = isDark ? DarkTheme : DefaultTheme;
+  const navTheme = {
+    ...baseTheme,
+    dark: isDark,
+    colors: {
+      ...baseTheme.colors,
+      primary: c.primary,
+      background: c.pageBackground,
+      card: c.cardBackground,
+      text: c.textPrimary,
+      border: c.border,
+      notification: c.danger,
+    },
+  };
+
   return (
-    <Stack screenOptions={{ headerShown: false, animation: 'fade' }}>
-      <Stack.Screen name="index" />
-      <Stack.Screen name="company-code" />
-      <Stack.Screen name="login" />
-      <Stack.Screen name="device-profile" />
-      <Stack.Screen name="live-track" />
-      <Stack.Screen name="trip-playback" />
-      <Stack.Screen name="(app)" />
-    </Stack>
+    <NavigationThemeProvider value={navTheme}>
+      <Stack screenOptions={{ headerShown: false, animation: 'fade' }}>
+        <Stack.Screen name="index" />
+        <Stack.Screen name="company-code" />
+        <Stack.Screen name="login" />
+        <Stack.Screen name="device-profile" />
+        <Stack.Screen name="live-track" />
+        <Stack.Screen name="trip-playback" />
+        <Stack.Screen name="(app)" />
+      </Stack>
+    </NavigationThemeProvider>
   );
 }
 

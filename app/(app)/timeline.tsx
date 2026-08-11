@@ -7,7 +7,7 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Card } from '@/src/components/ui/Card';
 import { DateRangePicker, type DateRange } from '@/src/components/ui/DateRangePicker';
 import { useTheme } from '@/src/theme/ThemeProvider';
-import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
+import { radius, spacing, typography, type ThemeColors, hexToRgba } from '@/src/theme/tokens';
 import { useAppSelector } from '@/src/store/hooks';
 
 export default function TimelineAnalyticsScreen() {
@@ -185,7 +185,7 @@ function StatCard({ icon, title, value, color }: { icon: string; title: string; 
 
   return (
     <View style={styles.statCard}>
-      <View style={[styles.statIconContainer, { backgroundColor: `${color}15` }]}>
+      <View style={[styles.statIconContainer, { backgroundColor: hexToRgba(color, 0.08) }]}>
         <MaterialCommunityIcons name={icon as any} size={20} color={color} />
       </View>
       <View style={styles.statInfo}>

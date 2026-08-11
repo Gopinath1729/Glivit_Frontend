@@ -22,7 +22,7 @@ import { useGetAllDevicesQuery, useGetDeviceQuery } from '@/src/services/devices
 import { useGetCommandsQuery, useSubmitCommandMutation } from '@/src/services/operationsApi';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import type { CommandDto, DeviceDetail, DeviceSummary } from '@/src/types/api';
-import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
+import { radius, spacing, typography, type ThemeColors, hexToRgba } from '@/src/theme/tokens';
 
 type CommandTone = 'safe' | 'danger';
 
@@ -421,7 +421,7 @@ function ActivityRow({ command, devices }: { command: CommandDto; devices: Devic
         ) : null}
       </View>
       <View style={styles.activityRight}>
-        <View style={[styles.statusBadge, { backgroundColor: `${tone}1F`, borderColor: `${tone}55` }]}>
+        <View style={[styles.statusBadge, { backgroundColor: hexToRgba(tone, 0.12), borderColor: hexToRgba(tone, 0.33) }]}>
           <View style={[styles.statusDot, { backgroundColor: tone }]} />
           <Text numberOfLines={1} style={[styles.statusText, { color: tone }]}>
             {command.status}

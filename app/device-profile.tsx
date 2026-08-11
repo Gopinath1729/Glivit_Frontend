@@ -75,7 +75,7 @@ export default function DeviceProfileScreen() {
           colors={['rgba(17, 26, 38, 0.4)', 'rgba(17, 26, 38, 0.95)']}
           style={StyleSheet.absoluteFillObject}
         />
-        
+
         <Pressable accessibilityRole="button" onPress={() => router.back()} style={styles.back}>
           <MaterialCommunityIcons color={c.white} name="arrow-left" size={24} />
         </Pressable>
@@ -86,7 +86,7 @@ export default function DeviceProfileScreen() {
             <MaterialCommunityIcons color={c.white} name="refresh" size={22} />
           )}
         </Pressable>
-        
+
         <LinearGradient
           colors={[c.primaryGreen, c.darkGreen]}
           start={{ x: 0, y: 0 }}
@@ -95,7 +95,7 @@ export default function DeviceProfileScreen() {
         >
           <MaterialCommunityIcons color={c.white} name="car-connected" size={40} />
         </LinearGradient>
-        
+
         <Text numberOfLines={1} style={styles.name}>{data.name}</Text>
         <Text numberOfLines={1} style={styles.subtitle}>IMEI {data.imei} | {data.model ?? data.category}</Text>
         <StatusPill state={data.state} />

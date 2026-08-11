@@ -100,7 +100,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     }
   }, [backendSettings]);
 
-  const scheme: Scheme = mode === 'system' ? (systemScheme === 'dark' ? 'dark' : 'light') : mode;
+  const scheme: Scheme = mode === 'system' ? 'dark' : mode;
 
   const setMode = useCallback((next: ThemeMode) => {
     setModeState(next);
