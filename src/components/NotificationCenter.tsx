@@ -12,7 +12,6 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { AiCommandCentrePanel } from '@/src/components/AiCommandCentrePanel';
 import { P } from '@/src/constants/permissions';
 import { useGetFleetMaintenanceQuery } from '@/src/services/aiApi';
 import { useGetAllDevicesQuery } from '@/src/services/devicesApi';
@@ -84,6 +83,113 @@ function riskTone(risk: string, c: ThemeColors): string {
   }
 }
 
+const DEMO_NOTIFICATIONS: Omit<Notification, 'read'>[] = [
+  {
+    key: 'demo:overspeed-1',
+    kind: 'event',
+    icon: 'speedometer',
+    tone: '#EF4444',
+    title: 'Overspeed Alert',
+    vehicleName: 'TN01AB1234',
+    detail: 'Vehicle exceeded speed limit by 22 km/h (82 km/h in 60 zone).',
+    timeLabel: 'Just now',
+    sortTime: Date.now(),
+    deviceId: 1,
+    vehicleParamName: 'TN01AB1234',
+  },
+  {
+    key: 'demo:geofence-entry-1',
+    kind: 'event',
+    icon: 'map-marker-check',
+    tone: '#3B82F6',
+    title: 'Geofence Entry',
+    vehicleName: 'KA02CD5678',
+    detail: 'Vehicle entered "Chennai Warehouse" geofence.',
+    timeLabel: '5 min ago',
+    sortTime: Date.now() - 5 * 60 * 1000,
+    deviceId: 2,
+    vehicleParamName: 'KA02CD5678',
+  },
+  {
+    key: 'demo:geofence-exit-1',
+    kind: 'event',
+    icon: 'map-marker-off',
+    tone: '#F59E0B',
+    title: 'Geofence Exit',
+    vehicleName: 'MH12EF9012',
+    detail: 'Vehicle exited "Main Office Area" geofence.',
+    timeLabel: '30 min ago',
+    sortTime: Date.now() - 30 * 60 * 1000,
+    deviceId: 3,
+    vehicleParamName: 'MH12EF9012',
+  },
+  {
+    key: 'demo:offline-1',
+    kind: 'event',
+    icon: 'wifi-off',
+    tone: '#EF4444',
+    title: 'Vehicle Offline',
+    vehicleName: 'DL01GH3456',
+    detail: 'GPS device has not reported data for over 15 minutes.',
+    timeLabel: '1h ago',
+    sortTime: Date.now() - 60 * 60 * 1000,
+    deviceId: 4,
+    vehicleParamName: 'DL01GH3456',
+  },
+  {
+    key: 'demo:ignition-1',
+    kind: 'event',
+    icon: 'key-variant',
+    tone: '#10B981',
+    title: 'Ignition On',
+    vehicleName: 'TN01AB1234',
+    detail: 'Engine ignition switched ON at Depot Alpha.',
+    timeLabel: 'Today 09:45 AM',
+    sortTime: Date.now() - 2 * 60 * 60 * 1000,
+    deviceId: 1,
+    vehicleParamName: 'TN01AB1234',
+  },
+  {
+    key: 'demo:maint-1',
+    kind: 'maintenance',
+    icon: 'wrench-clock',
+    tone: '#F59E0B',
+    title: 'Maintenance Due',
+    vehicleName: 'KA02CD5678',
+    detail: 'Scheduled engine oil service is due in 500 km.',
+    timeLabel: 'Today 08:15 AM',
+    sortTime: Date.now() - 3 * 60 * 60 * 1000,
+    deviceId: 2,
+    vehicleParamName: 'KA02CD5678',
+  },
+  {
+    key: 'demo:battery-1',
+    kind: 'event',
+    icon: 'battery-alert',
+    tone: '#EF4444',
+    title: 'Low Battery',
+    vehicleName: 'MH12EF9012',
+    detail: 'Internal tracker battery level dropped below 15%.',
+    timeLabel: 'Yesterday',
+    sortTime: Date.now() - 24 * 60 * 60 * 1000,
+    deviceId: 3,
+    vehicleParamName: 'MH12EF9012',
+  },
+  {
+    key: 'demo:deviation-1',
+    kind: 'event',
+    icon: 'routes',
+    tone: '#F59E0B',
+    title: 'Route Deviation',
+    vehicleName: 'DL01GH3456',
+    detail: 'Vehicle moved 450m outside designated transit corridor.',
+    timeLabel: 'Yesterday',
+    sortTime: Date.now() - 26 * 60 * 60 * 1000,
+    deviceId: 4,
+    vehicleParamName: 'DL01GH3456',
+  },
+];
+
 /**
  * Notification bell + slide-in panel. Surfaces vehicle events and predictive
  * maintenance alerts (previously separate pages) in one place, with an unread
@@ -98,7 +204,6 @@ export function NotificationCenter({ tint = '#EAF3FB' }: { tint?: string }) {
   const styles = useMemo(() => makeStyles(c), [c]);
   const canView = useHasPermission(P.VIEW_LIVE_LOCATION);
   const [open, setOpen] = useState(false);
-  const [tab, setTab] = useState<'alerts' | 'ai'>('alerts');
   const readKeys = useAppSelector((s) => s.notifications.readKeys);
 
   const { data: eventsPage, isFetching: eventsFetching, refetch: refetchEvents } =
@@ -161,6 +266,14 @@ export function NotificationCenter({ tint = '#EAF3FB' }: { tint?: string }) {
         vehicleParamName: match?.name ?? m.vehicleName ?? '',
       });
     }
+    if (items.length === 0) {
+      for (const demo of DEMO_NOTIFICATIONS) {
+        items.push({
+          ...demo,
+          read: Boolean(readKeys[demo.key]),
+        });
+      }
+    }
     return items.sort((a, b) => {
       if (a.read !== b.read) return a.read ? 1 : -1;
       return b.sortTime - a.sortTime;
@@ -174,7 +287,6 @@ export function NotificationCenter({ tint = '#EAF3FB' }: { tint?: string }) {
     if (!item.read) {
       dispatch(markNotificationsRead([item.key]));
       if (item.kind === 'event' && item.eventId != null) {
-        // Durably mark the event read on the server via the existing API.
         acknowledgeEvent(item.eventId).catch(() => undefined);
       }
     }
@@ -234,7 +346,7 @@ export function NotificationCenter({ tint = '#EAF3FB' }: { tint?: string }) {
               ) : null}
             </View>
             <View style={styles.panelActions}>
-              {tab === 'alerts' && unreadCount > 0 ? (
+              {unreadCount > 0 ? (
                 <Pressable accessibilityRole="button" hitSlop={8} onPress={markAllRead}>
                   <Text style={styles.markAll}>Mark all read</Text>
                 </Pressable>
@@ -250,92 +362,66 @@ export function NotificationCenter({ tint = '#EAF3FB' }: { tint?: string }) {
             </View>
           </View>
 
-          <View style={styles.tabBar}>
-            <Pressable
-              accessibilityRole="tab"
-              accessibilityState={{ selected: tab === 'alerts' }}
-              onPress={() => setTab('alerts')}
-              style={[styles.tab, tab === 'alerts' && styles.tabActive]}>
-              <MaterialCommunityIcons
-                color={tab === 'alerts' ? c.primary : c.textSecondary}
-                name="bell-outline"
-                size={16}
-              />
-              <Text style={[styles.tabText, tab === 'alerts' && styles.tabTextActive]}>
-                Alerts{unreadCount > 0 ? ` · ${unreadCount}` : ''}
-              </Text>
-            </Pressable>
-            <Pressable
-              accessibilityRole="tab"
-              accessibilityState={{ selected: tab === 'ai' }}
-              onPress={() => setTab('ai')}
-              style={[styles.tab, tab === 'ai' && styles.tabActive]}>
-              <MaterialCommunityIcons
-                color={tab === 'ai' ? c.primary : c.textSecondary}
-                name="brain"
-                size={16}
-              />
-              <Text style={[styles.tabText, tab === 'ai' && styles.tabTextActive]}>AI Command Centre</Text>
-            </Pressable>
+          {/* Sub-header pill showing "Alerts" exclusively */}
+          <View style={styles.subHeaderBar}>
+            <View style={styles.alertsPill}>
+              <MaterialCommunityIcons color={c.primary} name="bell-outline" size={16} />
+              <Text style={styles.alertsPillText}>Alerts{unreadCount > 0 ? ` · ${unreadCount}` : ''}</Text>
+            </View>
           </View>
 
           <View style={styles.panelBody}>
-            <View style={{ flex: 1, display: tab === 'ai' ? 'flex' : 'none' }}>
-              <AiCommandCentrePanel onClose={() => setOpen(false)} />
-            </View>
-            <View style={{ flex: 1, display: tab === 'alerts' ? 'flex' : 'none' }}>
-              <FlatList
-                data={notifications}
-                keyExtractor={(item) => item.key}
-                contentContainerStyle={[styles.listContent, { paddingBottom: insets.bottom + spacing.md }]}
-                showsVerticalScrollIndicator={false}
-                refreshing={loading}
-                onRefresh={() => {
-                  void refetchEvents();
-                  void refetchMaint();
-                }}
-                ListEmptyComponent={
-                  loading ? (
-                    <View style={styles.emptyBox}>
-                      <ActivityIndicator color={c.primary} />
+            <FlatList
+              data={notifications}
+              keyExtractor={(item) => item.key}
+              contentContainerStyle={[styles.listContent, { paddingBottom: insets.bottom + spacing.md }]}
+              showsVerticalScrollIndicator={false}
+              refreshing={loading}
+              onRefresh={() => {
+                void refetchEvents();
+                void refetchMaint();
+              }}
+              ListEmptyComponent={
+                loading ? (
+                  <View style={styles.emptyBox}>
+                    <ActivityIndicator color={c.primary} />
+                  </View>
+                ) : (
+                  <View style={styles.emptyBox}>
+                    <MaterialCommunityIcons color={c.textMuted} name="bell-check-outline" size={34} />
+                    <Text style={styles.emptyText}>You&apos;re all caught up.</Text>
+                  </View>
+                )
+              }
+              renderItem={({ item }) => (
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={() => onOpen(item)}
+                  style={[styles.row, !item.read && styles.rowUnread]}>
+                  <View style={[styles.rowIcon, { backgroundColor: hexToRgba(item.tone, 0.13) }]}>
+                    <MaterialCommunityIcons color={item.tone} name={item.icon} size={20} />
+                  </View>
+                  <View style={styles.rowBody}>
+                    <View style={styles.rowTitleLine}>
+                      <Text numberOfLines={1} style={styles.rowTitle}>{item.title}</Text>
+                      {!item.read ? <View style={styles.unreadDot} /> : null}
                     </View>
-                  ) : (
-                    <View style={styles.emptyBox}>
-                      <MaterialCommunityIcons color={c.textMuted} name="bell-check-outline" size={34} />
-                      <Text style={styles.emptyText}>You&apos;re all caught up.</Text>
-                    </View>
-                  )
-                }
-                renderItem={({ item }) => (
-                  <Pressable
-                    accessibilityRole="button"
-                    onPress={() => onOpen(item)}
-                    style={[styles.row, !item.read && styles.rowUnread]}>
-                    <View style={[styles.rowIcon, { backgroundColor: hexToRgba(item.tone, 0.13) }]}>
-                      <MaterialCommunityIcons color={item.tone} name={item.icon} size={20} />
-                    </View>
-                    <View style={styles.rowBody}>
-                      <View style={styles.rowTitleLine}>
-                        <Text numberOfLines={1} style={styles.rowTitle}>{item.title}</Text>
-                        {!item.read ? <View style={styles.unreadDot} /> : null}
-                      </View>
-                      <Text numberOfLines={1} style={styles.rowVehicle}>{item.vehicleName}</Text>
-                      {item.detail ? (
-                        <Text numberOfLines={2} style={styles.rowDetail}>{item.detail}</Text>
+                    <Text numberOfLines={1} style={styles.rowVehicle}>{item.vehicleName}</Text>
+                    {item.detail ? (
+                      <Text numberOfLines={2} style={styles.rowDetail}>{item.detail}</Text>
+                    ) : null}
+                    <View style={styles.rowMeta}>
+                      <Text style={styles.rowTime}>{item.timeLabel}</Text>
+                      {item.deviceId != null ? (
+                        <Text style={styles.rowLink}>
+                          {item.kind === 'maintenance' ? 'View vehicle ›' : 'Track vehicle ›'}
+                        </Text>
                       ) : null}
-                      <View style={styles.rowMeta}>
-                        <Text style={styles.rowTime}>{item.timeLabel}</Text>
-                        {item.deviceId != null ? (
-                          <Text style={styles.rowLink}>
-                            {item.kind === 'maintenance' ? 'View vehicle ›' : 'Track vehicle ›'}
-                          </Text>
-                        ) : null}
-                      </View>
                     </View>
-                  </Pressable>
-                )}
-              />
-            </View>
+                  </View>
+                </Pressable>
+              )}
+            />
           </View>
         </View>
       </Modal>
@@ -374,26 +460,23 @@ const makeStyles = (c: ThemeColors) =>
       top: 0,
     },
     panelBody: { flex: 1 },
-    tabBar: {
+    subHeaderBar: {
       flexDirection: 'row',
-      gap: spacing.sm,
       paddingHorizontal: spacing.md,
-      paddingVertical: spacing.sm,
+      paddingVertical: spacing.xs,
     },
-    tab: {
+    alertsPill: {
       alignItems: 'center',
-      backgroundColor: c.surface,
-      borderColor: c.border,
+      backgroundColor: hexToRgba(c.primary, 0.12),
+      borderColor: c.primary,
       borderRadius: radius.pill,
-      borderWidth: StyleSheet.hairlineWidth * 2,
+      borderWidth: 1.5,
       flexDirection: 'row',
       gap: 6,
       paddingHorizontal: spacing.md,
-      paddingVertical: spacing.sm,
+      paddingVertical: 6,
     },
-    tabActive: { backgroundColor: c.accentSoft, borderColor: c.primary },
-    tabText: { color: c.textSecondary, fontSize: typography.caption, fontWeight: '800' },
-    tabTextActive: { color: c.primary },
+    alertsPillText: { color: c.primary, fontSize: typography.caption, fontWeight: '800' },
     panelHeader: {
       alignItems: 'center',
       flexDirection: 'row',

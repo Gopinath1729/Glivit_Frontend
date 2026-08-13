@@ -12,8 +12,10 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { AiCommandCentrePanel } from '@/src/components/AiCommandCentrePanel';
 import { useSendChatMessageMutation, type ChatMessageDto } from '@/src/services/aiApi';
 import { buildChatHistory, CHAT_GREETING } from '@/src/services/aiChatHistory';
 import { formatAiPlainText } from '@/src/services/aiPlainText';
@@ -33,6 +35,7 @@ export default function AiChatScreen() {
   const insets = useSafeAreaInsets();
   const styles = useMemo(() => makeStyles(c), [c]);
 
+  const [activeTab, setActiveTab] = useState<'chat' | 'insights'>('chat');
   const [messages, setMessages] = useState<ChatMessageDto[]>([
     {
       role: 'assistant',
@@ -45,6 +48,29 @@ export default function AiChatScreen() {
   const listRef = useRef<FlatList>(null);
   const sendInFlightRef = useRef(false);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
+
+  const resetChatSession = useCallback(() => {
+    setMessages([
+      {
+        role: 'assistant',
+        content: CHAT_GREETING,
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+    setInput('');
+    setActiveTab('chat');
+    sendInFlightRef.current = false;
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      // Screen focused: ensure in-flight status is clean
+      sendInFlightRef.current = false;
+      return () => {
+        sendInFlightRef.current = false;
+      };
+    }, [])
+  );
 
   useEffect(() => {
     const showEvents = ['keyboardDidShow', 'keyboardWillShow'] as const;
@@ -77,8 +103,6 @@ export default function AiChatScreen() {
     setInput('');
 
     try {
-      // Only the last few real turns travel with the question; the greeting and
-      // any local error placeholders are filtered out so the prompt stays small.
       const response = await sendMessage({
         message: userMsg.content,
         history: buildChatHistory(messages),
@@ -122,9 +146,6 @@ export default function AiChatScreen() {
             <Text style={[styles.messageText, isUser ? styles.userMessageText : styles.aiMessageText]}>
               {isUser ? item.content : formatAiPlainText(item.content)}
             </Text>
-            {/* An answer built from fleet data is a normal answer, so DIRECT and
-                DEGRADED look exactly like FULL_AI. Only a genuinely unreachable
-                service is worth telling the user about. */}
             {!isUser && item.mode === 'UNAVAILABLE' && (
               <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 4 }}>
                 <MaterialCommunityIcons
@@ -161,84 +182,155 @@ export default function AiChatScreen() {
     : Math.max(spacing.md, insets.bottom);
 
   return (
-    <KeyboardAvoidingView
-      style={styles.screen}
-      behavior="padding"
-      keyboardVerticalOffset={insets.top + 60}>
-      <FlatList
-        ref={listRef}
-        style={styles.messageList}
-        contentContainerStyle={styles.messageListContent}
-        data={messages}
-        keyExtractor={(_, i) => String(i)}
-        renderItem={renderItem}
-        onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
-        onLayout={() => listRef.current?.scrollToEnd({ animated: true })}
-        ListFooterComponent={
-          isLoading ? (
-            <View style={styles.typingIndicator}>
-              <View style={styles.aiIconWrapper}>
-                <MaterialCommunityIcons name="robot-outline" size={16} color="#fff" />
-              </View>
-              <View style={styles.typingBubble}>
-                <ActivityIndicator size="small" color={c.primary} />
-                <Text style={styles.typingText}>Glivt AI is thinking...</Text>
-              </View>
-            </View>
-          ) : null
-        }
-      />
-
-      {messages.length <= 1 && (
-        <View style={styles.quickContainer}>
-          <FlatList
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            data={quickPrompts}
-            keyExtractor={(item) => item}
-            contentContainerStyle={styles.quickScrollContent}
-            renderItem={({ item }) => (
-              <Pressable style={styles.quickChip} onPress={() => setInput(item)}>
-                <MaterialCommunityIcons
-                  name={QUICK_PROMPT_ICONS[item] || 'help-circle-outline'}
-                  size={14}
-                  color={c.primary}
-                  style={{ marginRight: 6 }}
-                />
-                <Text style={styles.quickChipText}>{item}</Text>
-              </Pressable>
-            )}
+    <View style={styles.screen}>
+      {/* Top Header Tab Switcher */}
+      <View style={styles.topTabBar}>
+        <Pressable
+          accessibilityRole="tab"
+          accessibilityState={{ selected: activeTab === 'chat' }}
+          onPress={() => setActiveTab('chat')}
+          style={[styles.topTab, activeTab === 'chat' && styles.topTabActive]}>
+          <MaterialCommunityIcons
+            name="message-text-outline"
+            size={18}
+            color={activeTab === 'chat' ? c.primary : c.textMuted}
           />
-        </View>
-      )}
-
-      <View style={[styles.inputArea, { paddingBottom: bottomPadding }]}>
-        <View style={styles.inputContainer}>
-          <TextInput
-            style={styles.input}
-            placeholder="Ask anything about your fleet..."
-            placeholderTextColor={c.textMuted}
-            value={input}
-            onChangeText={setInput}
-            multiline
-            maxLength={1000}
-          />
-        </View>
+          <Text style={[styles.topTabText, activeTab === 'chat' && styles.topTabTextActive]}>
+            Chat
+          </Text>
+        </Pressable>
 
         <Pressable
-          style={[styles.sendButton, (!input.trim() || isLoading) && styles.sendButtonDisabled]}
-          onPress={handleSend}
-          disabled={!input.trim() || isLoading}>
-          <MaterialCommunityIcons name="send" size={18} color="#fff" />
+          accessibilityRole="tab"
+          accessibilityState={{ selected: activeTab === 'insights' }}
+          onPress={() => setActiveTab('insights')}
+          style={[styles.topTab, activeTab === 'insights' && styles.topTabActive]}>
+          <MaterialCommunityIcons
+            name="chart-timeline-variant"
+            size={18}
+            color={activeTab === 'insights' ? c.primary : c.textMuted}
+          />
+          <Text style={[styles.topTabText, activeTab === 'insights' && styles.topTabTextActive]}>
+            AI Fleet Insights
+          </Text>
         </Pressable>
       </View>
-    </KeyboardAvoidingView>
+
+      {/* Tab Content */}
+      {activeTab === 'insights' ? (
+        <View style={{ flex: 1 }}>
+          <AiCommandCentrePanel />
+        </View>
+      ) : (
+        <KeyboardAvoidingView
+          style={styles.chatContainer}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top + 64 : 0}>
+          <FlatList
+            ref={listRef}
+            style={styles.messageList}
+            contentContainerStyle={styles.messageListContent}
+            data={messages}
+            keyExtractor={(_, i) => String(i)}
+            renderItem={renderItem}
+            onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
+            onLayout={() => listRef.current?.scrollToEnd({ animated: true })}
+            ListFooterComponent={
+              isLoading ? (
+                <View style={styles.typingIndicator}>
+                  <View style={styles.aiIconWrapper}>
+                    <MaterialCommunityIcons name="robot-outline" size={16} color="#fff" />
+                  </View>
+                  <View style={styles.typingBubble}>
+                    <ActivityIndicator size="small" color={c.primary} />
+                    <Text style={styles.typingText}>Glivt AI is thinking...</Text>
+                  </View>
+                </View>
+              ) : null
+            }
+          />
+
+          {messages.length <= 1 && (
+            <View style={styles.quickContainer}>
+              <FlatList
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                data={quickPrompts}
+                keyExtractor={(item) => item}
+                contentContainerStyle={styles.quickScrollContent}
+                renderItem={({ item }) => (
+                  <Pressable style={styles.quickChip} onPress={() => setInput(item)}>
+                    <MaterialCommunityIcons
+                      name={QUICK_PROMPT_ICONS[item] || 'help-circle-outline'}
+                      size={14}
+                      color={c.primary}
+                      style={{ marginRight: 6 }}
+                    />
+                    <Text style={styles.quickChipText}>{item}</Text>
+                  </Pressable>
+                )}
+              />
+            </View>
+          )}
+
+          <View style={[styles.inputArea, { paddingBottom: bottomPadding }]}>
+            <View style={styles.inputContainer}>
+              <TextInput
+                style={styles.input}
+                placeholder="Ask anything about your fleet..."
+                placeholderTextColor={c.textMuted}
+                value={input}
+                onChangeText={setInput}
+                multiline
+                maxLength={1000}
+              />
+            </View>
+
+            <Pressable
+              style={[styles.sendButton, (!input.trim() || isLoading) && styles.sendButtonDisabled]}
+              onPress={handleSend}
+              disabled={!input.trim() || isLoading}>
+              <MaterialCommunityIcons name="send" size={18} color="#fff" />
+            </Pressable>
+          </View>
+        </KeyboardAvoidingView>
+      )}
+    </View>
   );
 }
 
 const makeStyles = (c: ThemeColors) =>
   StyleSheet.create({
     screen: { flex: 1, backgroundColor: c.pageBackground },
+    topTabBar: {
+      flexDirection: 'row',
+      backgroundColor: c.surface,
+      borderBottomWidth: StyleSheet.hairlineWidth * 2,
+      borderBottomColor: c.border,
+    },
+    topTab: {
+      flex: 1,
+      flexDirection: 'row',
+      alignItems: 'center',
+      justifyContent: 'center',
+      paddingVertical: spacing.md,
+      gap: spacing.xs,
+      borderBottomWidth: 3,
+      borderBottomColor: 'transparent',
+    },
+    topTabActive: {
+      borderBottomColor: c.primary,
+    },
+    topTabText: {
+      fontSize: typography.body,
+      fontWeight: '600',
+      color: c.textMuted,
+    },
+    topTabTextActive: {
+      color: c.primary,
+      fontWeight: '800',
+    },
+    chatContainer: { flex: 1 },
     messageList: { flex: 1 },
     messageListContent: { padding: spacing.md, gap: spacing.md, paddingBottom: spacing.lg },
     messageRow: {
