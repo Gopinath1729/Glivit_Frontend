@@ -246,6 +246,7 @@ export default function AppLayout() {
           options={{
             title: 'Live Map',
             headerTransparent: true,
+            headerTitle: () => <Text style={{ color: c.onPrimary, fontSize: 16, fontWeight: '800' }}>Live Map</Text>,
             tabBarIcon: ({ focused }) => renderTabIcon('map-marker-radius-outline', focused),
           }}
         />

@@ -1142,7 +1142,7 @@ export default function VehicleTrackerScreen() {
 
   const snapSheet = useCallback(
     (expanded: boolean) => {
-      const collapsedOffset = Math.max(160, sheetHeightRef.current - 118);
+      const collapsedOffset = Math.max(48, sheetHeightRef.current - 48);
       sheetExpandedRef.current = expanded;
       sheetTranslateY.stopAnimation();
       if (sheetAnimationFrameRef.current != null) {
@@ -1186,13 +1186,13 @@ export default function VehicleTrackerScreen() {
           });
         },
         onPanResponderMove: (_, gesture) => {
-          const collapsedOffset = Math.max(160, sheetHeightRef.current - 118);
+          const collapsedOffset = Math.max(48, sheetHeightRef.current - 48);
           sheetTranslateY.setValue(
             Math.max(0, Math.min(collapsedOffset, sheetDragStartRef.current + gesture.dy))
           );
         },
         onPanResponderRelease: (_, gesture) => {
-          const collapsedOffset = Math.max(160, sheetHeightRef.current - 118);
+          const collapsedOffset = Math.max(48, sheetHeightRef.current - 48);
           const projected = sheetDragStartRef.current + gesture.dy + gesture.vy * 90;
           snapSheet(projected < collapsedOffset * 0.5);
         },
@@ -2881,7 +2881,7 @@ const LiveDetailsSheet = memo(function LiveDetailsSheet({
   onSelectCameraMode,
 }: LiveDetailsSheetProps) {
   const sheetStyle = useMemo(
-    () => [styles.bottomSheet, { paddingBottom: 14, transform: [{ translateY }] }],
+    () => [styles.bottomSheetWrapper, { transform: [{ translateY }] }],
     [translateY]
   );
   const progressBarWidthRef = useRef<number>(0);
@@ -2896,19 +2896,27 @@ const LiveDetailsSheet = memo(function LiveDetailsSheet({
       <Pressable
         accessibilityLabel={expanded ? 'Collapse details' : 'Expand details'}
         accessibilityRole="button"
-        hitSlop={12}
+        hitSlop={20}
         onPress={onToggle}
         style={styles.sheetHandleHit}>
-        <View style={styles.sheetHandle} />
+        <MaterialCommunityIcons 
+          name={expanded ? "chevron-down" : "chevron-up"} 
+          size={36} 
+          color="rgba(255,255,255,1)" 
+          style={{
+            textShadowColor: 'rgba(0,0,0,0.8)',
+            textShadowOffset: { width: 0, height: 2 },
+            textShadowRadius: 5,
+          }}
+        />
       </Pressable>
-
 
       <Animated.View
         pointerEvents={expanded ? 'auto' : 'none'}
-        style={{
+        style={[styles.bottomSheetContent, {
           opacity: expanded ? 1 : 0,
           flex: 1,
-        }}
+        }]}
       >
         <View style={styles.tabBar}>
           <Pressable
@@ -3803,35 +3811,44 @@ const styles = StyleSheet.create({
     height: 58,
     width: 58,
   },
-  bottomSheet: {
+  bottomSheetWrapper: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    zIndex: 10,
+  },
+  bottomSheetContent: {
     backgroundColor: 'rgba(7, 15, 27, 0.97)',
     borderColor: 'rgba(255,255,255,0.13)',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     borderWidth: 1,
-    bottom: 0,
-    left: 0,
     paddingHorizontal: 16,
     paddingTop: 10,
-    position: 'absolute',
-    right: 0,
+    paddingBottom: 14,
     shadowColor: '#020712',
     shadowOffset: { width: 0, height: -8 },
     shadowOpacity: 0.42,
     shadowRadius: 24,
+    flex: 1,
   },
   sheetHandleHit: {
     alignItems: 'center',
-    paddingBottom: 8,
-    paddingTop: 2,
+    justifyContent: 'center',
+    height: 48,
+    width: 60,
+    alignSelf: 'center',
+    backgroundColor: 'transparent',
+    marginBottom: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.6,
+    shadowRadius: 4,
+    elevation: 4,
   },
   sheetHandle: {
-    alignSelf: 'center',
-    backgroundColor: 'rgba(190, 210, 228, 0.34)',
-    borderRadius: 2,
-    height: 4,
-    marginBottom: 4,
-    width: 44,
+    display: 'none',
   },
   collapsedSheetTapTarget: {
     ...StyleSheet.absoluteFillObject,

@@ -30,13 +30,18 @@ function messageTime(timestamp?: string) {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+type ChatMessage = ChatMessageDto & {
+  isError?: boolean;
+  originalInput?: string;
+};
+
 export default function AiChatScreen() {
   const { colors: c } = useTheme();
   const insets = useSafeAreaInsets();
   const styles = useMemo(() => makeStyles(c), [c]);
 
   const [activeTab, setActiveTab] = useState<'chat' | 'insights'>('chat');
-  const [messages, setMessages] = useState<ChatMessageDto[]>([
+  const [messages, setMessages] = useState<ChatMessage[]>([
     {
       role: 'assistant',
       content: CHAT_GREETING,
@@ -89,22 +94,27 @@ export default function AiChatScreen() {
     return () => subs.forEach((s) => s.remove());
   }, []);
 
-  const handleSend = useCallback(async () => {
-    if (!input.trim() || isLoading || sendInFlightRef.current) return;
+  const handleSend = useCallback(async (retryInput?: string) => {
+    const textToSend = typeof retryInput === 'string' ? retryInput : input.trim();
+    if (!textToSend || isLoading || sendInFlightRef.current) return;
     sendInFlightRef.current = true;
 
-    const userMsg: ChatMessageDto = {
+    const userMsg: ChatMessage = {
       role: 'user',
-      content: input.trim(),
+      content: textToSend,
       timestamp: new Date().toISOString(),
     };
 
-    setMessages((prev) => [...prev, userMsg]);
-    setInput('');
+    if (typeof retryInput !== 'string') {
+      setMessages((prev) => [...prev, userMsg]);
+      setInput('');
+    } else {
+      setMessages((prev) => prev.filter((msg) => !msg.isError));
+    }
 
     try {
       const response = await sendMessage({
-        message: userMsg.content,
+        message: textToSend,
         history: buildChatHistory(messages),
       }).unwrap();
 
@@ -125,6 +135,8 @@ export default function AiChatScreen() {
           role: 'assistant',
           content: 'The message could not be sent. Please check your connection and try again.',
           timestamp: new Date().toISOString(),
+          isError: true,
+          originalInput: textToSend,
         },
       ]);
     } finally {
@@ -132,7 +144,7 @@ export default function AiChatScreen() {
     }
   }, [input, isLoading, messages, sendMessage]);
 
-  const renderItem = ({ item }: { item: ChatMessageDto }) => {
+  const renderItem = ({ item }: { item: ChatMessage }) => {
     const isUser = item.role === 'user';
     return (
       <View style={[styles.messageRow, isUser ? styles.userRow : styles.aiRow]}>
@@ -157,6 +169,17 @@ export default function AiChatScreen() {
                   Assistant unavailable
                 </Text>
               </View>
+            )}
+            {item.isError && (
+              <Pressable
+                onPress={() => handleSend(item.originalInput)}
+                style={{ flexDirection: 'row', alignItems: 'center', marginTop: 8, paddingVertical: 6, paddingHorizontal: 12, backgroundColor: c.primary, borderRadius: radius.pill, alignSelf: 'flex-start' }}
+              >
+                <MaterialCommunityIcons name="refresh" size={14} color="#fff" />
+                <Text style={{ fontSize: 12, color: '#fff', marginLeft: 4, fontWeight: '600' }}>
+                  Retry
+                </Text>
+              </Pressable>
             )}
           </View>
           <Text style={[styles.timestamp, isUser ? styles.userTimestamp : styles.aiTimestamp]}>
@@ -288,7 +311,7 @@ export default function AiChatScreen() {
 
             <Pressable
               style={[styles.sendButton, (!input.trim() || isLoading) && styles.sendButtonDisabled]}
-              onPress={handleSend}
+              onPress={() => handleSend()}
               disabled={!input.trim() || isLoading}>
               <MaterialCommunityIcons name="send" size={18} color="#fff" />
             </Pressable>
