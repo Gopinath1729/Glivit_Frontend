@@ -67,6 +67,7 @@ export default function CompanyCodeScreen() {
       {/* Bottom inset is already in the content padding below. */}
       <KeyboardAwareForm
         applyBottomInset={false}
+        style={styles.flex}
         contentContainerStyle={[
           styles.content,
           { paddingTop: insets.top + spacing.xxl, paddingBottom: insets.bottom + spacing.xl },

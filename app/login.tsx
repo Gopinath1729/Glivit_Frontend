@@ -160,7 +160,7 @@ export default function LoginScreen() {
       </View>
       {/* flexGrow keeps the laid-out design pixel-identical while there is room,
           and only lets it scroll once the keyboard takes the space away. */}
-      <KeyboardAwareForm applyBottomInset={false} contentContainerStyle={styles.grow}>
+      <KeyboardAwareForm applyBottomInset={false} contentContainerStyle={styles.grow} style={styles.flex}>
         <SafeAreaView edges={['top', 'bottom']} style={styles.flex}>
         <View style={styles.contentContainer}>
           

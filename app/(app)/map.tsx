@@ -15,10 +15,15 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { FleetWebMap, type FleetWebMapHandle, type WebMapMarker } from '@/src/components/FleetWebMap';
+import {
+  FleetWebMap,
+  type FleetWebMapHandle,
+  type WebMapGeofence,
+  type WebMapMarker,
+} from '@/src/components/FleetWebMap';
 import { LiveVehicleMapMarker } from '@/src/components/LiveVehicleMapMarker';
 import { VEHICLE_SPRITE_SIZE_SELECTED } from '@/src/components/vehicleMarkerSprites';
-import MapView from '@/src/components/maps/NativeMap';
+import MapView, { Circle } from '@/src/components/maps/NativeMap';
 import { MapLayersBottomSheet } from '@/src/components/MapLayersBottomSheet';
 import {
   DEFAULT_MAP_PREFERENCES,
@@ -26,13 +31,14 @@ import {
   type MapPreferences,
 } from '@/src/services/mapPreferencesStorage';
 import { useGetAllDevicesQuery, useGetDevicesQuery } from '@/src/services/devicesApi';
+import { useGetGeofencesQuery } from '@/src/services/operationsApi';
 import { dedupeByVehicle } from '@/src/services/vehicleIdentity';
 import { useFleetLivePositions } from '@/src/services/fleetLivePositions';
 import { getMapStyleInfo, nativeMapsAvailable, type MapStyleVariant } from '@/src/services/mapStyle';
 import { normalizeHeading } from '@/src/services/vehicleMarkerAssets';
 import type { DeviceSummary } from '@/src/types/api';
 import { useTheme } from '@/src/theme/ThemeProvider';
-import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
+import { hexToRgba, radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
 
 export default function AllVehiclesMapScreen() {
   const router = useRouter();
@@ -62,6 +68,10 @@ export default function AllVehiclesMapScreen() {
 
   const { data, isFetching, refetch } = useGetAllDevicesQuery();
   const listQuery = useGetDevicesQuery({ page: 0, size: 100 });
+  // Zones are loaded on the Live Map itself, so they are redrawn on every
+  // mount -- after a refresh, after navigating away and back, and on a cold
+  // start -- rather than only existing in whatever created them.
+  const geofenceQuery = useGetGeofencesQuery({ page: 0, size: 200 });
 
   const rawDevices = useMemo(() => {
     // Collapsed to one tracker per vehicle so a vehicle carrying two devices
@@ -117,6 +127,26 @@ export default function AllVehiclesMapScreen() {
       });
     },
     [located, targetsRef, vehicleCount]
+  );
+
+  const mapGeofences = useMemo<WebMapGeofence[]>(
+    () =>
+      (geofenceQuery.data?.content ?? [])
+        .filter((g) => g.active !== false && (g.type ?? '').toUpperCase() === 'CIRCLE')
+        .map((g) => {
+          // Stored GeoJSON-style: [longitude, latitude].
+          const centre = g.coordinates?.[0];
+          return {
+            id: g.id,
+            name: g.name,
+            lat: centre?.[1] ?? Number.NaN,
+            lng: centre?.[0] ?? Number.NaN,
+            radius: g.radiusMeters ?? Number.NaN,
+            color: g.color,
+          };
+        })
+        .filter((g) => Number.isFinite(g.lat) && Number.isFinite(g.lng) && g.radius > 0),
+    [geofenceQuery.data?.content]
   );
 
   const statusCounts = useMemo(() => {
@@ -297,6 +327,7 @@ export default function AllVehiclesMapScreen() {
         <NativeFleetMap
           mapRef={mapRef}
           devices={liveDevices}
+          geofences={mapGeofences}
           mapStyle={mapStyleInfo.style}
           mapPreferences={mapPreferences}
           onClearSelection={clearSelection}
@@ -309,6 +340,7 @@ export default function AllVehiclesMapScreen() {
       ) : (
         <FleetWebMap
           ref={webMapRef}
+          geofences={mapGeofences}
           mapStyle={mapStyleInfo.webStyle}
           markers={webMarkers}
           onClearSelection={clearSelection}
@@ -413,6 +445,7 @@ function NativeFleetMap({
   onVisibleIdsChange,
   selectedId,
   targetsRef,
+  geofences,
 }: {
   mapRef: React.RefObject<MapView | null>;
   devices: LocatedDevice[];
@@ -423,6 +456,7 @@ function NativeFleetMap({
   onSelectDevice: (id: string | number) => void;
   onVisibleIdsChange: (ids: string[]) => void;
   selectedId: number | null;
+  geofences: WebMapGeofence[];
   targetsRef: React.MutableRefObject<Map<number, import('@/src/services/fleetLivePositions').FleetTarget>>;
 }) {
   const { stateColors } = useTheme();
@@ -639,6 +673,19 @@ function NativeFleetMap({
           pitch: 42,
           zoom: 11,
         }}>
+        {/* Drawn before the vehicles so a marker is never hidden by the zone
+            it sits in. react-native-maps takes a radius in metres, so this
+            stays correct through zoom and pan without any recomputation. */}
+        {geofences.map((zone) => (
+          <Circle
+            key={`geofence-${zone.id}`}
+            center={{ latitude: zone.lat, longitude: zone.lng }}
+            fillColor={hexToRgba(zone.color ?? '#27D34D', 0.14)}
+            radius={zone.radius}
+            strokeColor={zone.color ?? '#27D34D'}
+            strokeWidth={2}
+          />
+        ))}
         {devices.map((device) => {
           return (
             <LiveVehicleMapMarker

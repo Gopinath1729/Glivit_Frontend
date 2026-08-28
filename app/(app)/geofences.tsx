@@ -27,7 +27,7 @@ import { EmptyView, ErrorRetryView, LoadingView } from '@/src/components/ui/Stat
 import { TextField } from '@/src/components/ui/TextField';
 import { apiErrorMessage } from '@/src/services/apiError';
 import { GeofencePickerMap } from '@/src/components/maps/GeofencePickerMap';
-import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
+import { KeyboardAwareForm, KeyboardBottomSheet } from '@/src/components/ui/KeyboardAwareForm';
 import { useGetAllDevicesQuery } from '@/src/services/devicesApi';
 import { getMapStyleInfo } from '@/src/services/mapStyle';
 import {
@@ -795,7 +795,9 @@ export default function GeofencesScreen() {
           style={styles.editorBackdrop}
         />
         <View style={styles.editorWrap}>
-          <View style={[styles.editorSheet, { paddingBottom: insets.bottom + spacing.md }]}>
+          <KeyboardBottomSheet
+            maxHeightRatio={0.88}
+            style={[styles.editorSheet, { paddingBottom: insets.bottom + spacing.md }]}>
             <View style={styles.editorHandle} />
             {/* The sheet already carries the bottom inset, so the scroller must
                 not add it a second time. */}
@@ -1037,7 +1039,7 @@ export default function GeofencesScreen() {
               />
               <Button label="Cancel" onPress={closeEditor} variant="ghost" />
             </KeyboardAwareForm>
-          </View>
+          </KeyboardBottomSheet>
         </View>
       </Modal>
     </View>

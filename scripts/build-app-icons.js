@@ -50,11 +50,44 @@ async function markBounds(img) {
   return { x: minX, y: minY, w: maxX - minX + 1, h: maxY - minY + 1 };
 }
 
+/**
+ * Replaces the logo's flat background with transparency.
+ *
+ * logo.png is artwork on a solid dark panel, not a transparent PNG, so a crop of
+ * it carries that panel along as an opaque rectangle. Composited onto the splash
+ * -- which is a gradient, not one flat colour -- the rectangle does not match its
+ * surroundings and shows as a visible box around the mark.
+ *
+ * The background is uniform (rgb 12,21,30) and the mark is bright, so distance
+ * from that colour separates them cleanly. The ramp between the two thresholds
+ * keeps edge pixels partly transparent instead of leaving a hard, aliased
+ * outline.
+ */
+function keyOutBackground(image, background) {
+  const CLEAR_BELOW = 30;
+  const OPAQUE_ABOVE = 90;
+  image.scan(0, 0, image.bitmap.width, image.bitmap.height, function (x, y, idx) {
+    const data = this.bitmap.data;
+    const distance =
+      Math.abs(data[idx] - background.r) +
+      Math.abs(data[idx + 1] - background.g) +
+      Math.abs(data[idx + 2] - background.b);
+    if (distance <= CLEAR_BELOW) {
+      data[idx + 3] = 0;
+    } else if (distance < OPAQUE_ABOVE) {
+      const ratio = (distance - CLEAR_BELOW) / (OPAQUE_ABOVE - CLEAR_BELOW);
+      data[idx + 3] = Math.round(data[idx + 3] * ratio);
+    }
+  });
+  return image;
+}
+
 /** The mark, cropped and scaled to sit centred inside a square of `canvas` px. */
 async function scaledMark(canvas, scale) {
   const logo = await Jimp.read(SOURCE);
   const box = await markBounds(logo);
-  const mark = logo.clone().crop(box.x, box.y, box.w, box.h);
+  const background = Jimp.intToRGBA(logo.getPixelColor(4, 4));
+  const mark = keyOutBackground(logo.clone().crop(box.x, box.y, box.w, box.h), background);
   const target = Math.round(canvas * scale);
   // contain() preserves aspect ratio; the mark is wider than it is tall.
   mark.contain(target, target);
@@ -94,9 +127,14 @@ async function main() {
     Math.round((CANVAS - monoMark.bitmap.height) / 2));
   await write('android-icon-monochrome.png', mono);
 
-  // Splash artwork: the mark on transparency, sized by expo-splash-screen.
+  // Splash artwork: the mark edge-to-edge on transparency.
+  //
+  // Deliberately unpadded, unlike the launcher icons. Whatever draws this adds
+  // its own sizing, so padding baked in here would compound with it -- the mark
+  // was landing at 0.72 x 0.36 of the screen and sat lost inside the splash
+  // rings instead of filling them.
   const splash = new Jimp(CANVAS, CANVAS, 0x00000000);
-  const splashMark = await scaledMark(CANVAS, 0.72);
+  const splashMark = await scaledMark(CANVAS, 1);
   splash.composite(splashMark, Math.round((CANVAS - splashMark.bitmap.width) / 2),
     Math.round((CANVAS - splashMark.bitmap.height) / 2));
   await write('splash-icon.png', splash);

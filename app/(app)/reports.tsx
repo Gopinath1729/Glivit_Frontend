@@ -60,6 +60,16 @@ const SUMMARY_ITEMS: {
   { key: 'overspeedCount', label: 'Overspeed Count', icon: 'alert-octagon-outline', format: (v) => String(v) },
 ];
 
+/** Identity of a filter selection, used to tell "applied" from "edited since". */
+function filterSignature(
+  deviceId: number | undefined,
+  from: Date,
+  to: Date,
+  period: ReportPeriod
+): string {
+  return [deviceId ?? 'none', startOfDay(from).getTime(), endOfSelectedDay(to).getTime(), period].join('|');
+}
+
 type AppliedFilters = ActivityReportArgs;
 
 export default function ReportsScreen() {
@@ -76,6 +86,10 @@ export default function ReportsScreen() {
   const [toDate, setToDate] = React.useState(() => new Date());
   const [period, setPeriod] = React.useState<ReportPeriod>('DAILY');
   const [applied, setApplied] = React.useState<AppliedFilters | null>(null);
+  // Set only by the Apply Filter button. Compared against the current
+  // selection so changing vehicle or dates afterwards re-hides the export
+  // buttons until the new selection has actually been applied and loaded.
+  const [appliedSignature, setAppliedSignature] = React.useState<string | null>(null);
   const [filterOpen, setFilterOpen] = React.useState(true);
   const [showAllStops, setShowAllStops] = React.useState(false);
   const [showAllIdle, setShowAllIdle] = React.useState(false);
@@ -111,6 +125,26 @@ export default function ReportsScreen() {
     refetchOnFocus: true,
   });
 
+  const currentSignature = React.useMemo(
+    () => filterSignature(selectedDeviceId, fromDate, toDate, period),
+    [fromDate, period, selectedDeviceId, toDate]
+  );
+
+  /**
+   * Exports appear only once there is a report to export.
+   *
+   * All four conditions matter: the user has applied a filter, the selection has
+   * not changed since, data actually came back, and nothing is in flight. Without
+   * the signature comparison the buttons would stay on screen after the vehicle
+   * or dates were changed, and would export the previous vehicle's report.
+   */
+  const canExport =
+    appliedSignature != null &&
+    appliedSignature === currentSignature &&
+    !report.isFetching &&
+    !report.isError &&
+    report.data != null;
+
   const applyFilters = React.useCallback(() => {
     if (selectedDeviceId == null) {
       Alert.alert('Select a vehicle', 'Choose a vehicle before applying the report filter.');
@@ -124,6 +158,7 @@ export default function ReportsScreen() {
     setShowAllIdle(false);
     setShowAllOverspeed(false);
     setApplied(toArgs(selectedDeviceId, fromDate, toDate, period));
+    setAppliedSignature(filterSignature(selectedDeviceId, fromDate, toDate, period));
   }, [fromDate, period, selectedDeviceId, toDate]);
 
   const download = React.useCallback(
@@ -132,8 +167,8 @@ export default function ReportsScreen() {
       setExportFormat(format);
       try {
         const payload = await exportReport({ ...reportArgs, period, format }).unwrap();
-        const saved = await saveReportFile(payload, reportArgs.deviceId);
-        Alert.alert('Report exported', `${saved.fileName} is ready.`);
+        const saved = await saveReportFile(payload, reportArgs.deviceId, format);
+        Alert.alert('Report downloaded', `${saved.fileName} saved to ${saved.location}.`);
       } catch (error) {
         if (!isFilePickerCancellation(error)) {
           Alert.alert('Export failed', apiErrorMessage(error, 'Unable to export this report.'));
@@ -370,17 +405,22 @@ export default function ReportsScreen() {
               </View>
             </ReportSection>
 
-            <ReportSection title="Export report" icon="download-box-outline" styles={styles} color={c.primary}>
-              <Text style={styles.exportHint}>Download the complete filtered report, including journey, driver, trend, stop, idle and activity data.</Text>
-              <View style={[styles.exportRow, !compact && styles.exportRowDesktop]}>
-                <View style={styles.exportButton}>
-                  <Button icon="file-pdf-box" label="Export PDF" loading={exportFormat === 'PDF'} disabled={exportFormat !== null} onPress={() => void download('PDF')} />
+            {/* Hidden until a filter has been applied and its data has arrived,
+                so there is never an Export button that would download the
+                previous vehicle's report or nothing at all. */}
+            {canExport ? (
+              <ReportSection title="Export report" icon="download-box-outline" styles={styles} color={c.primary}>
+                <Text style={styles.exportHint}>Download the complete filtered report, including journey, driver, trend, stop, idle and activity data.</Text>
+                <View style={[styles.exportRow, !compact && styles.exportRowDesktop]}>
+                  <View style={styles.exportButton}>
+                    <Button icon="file-pdf-box" label="Export PDF" loading={exportFormat === 'PDF'} disabled={exportFormat !== null} onPress={() => void download('PDF')} />
+                  </View>
+                  <View style={styles.exportButton}>
+                    <Button icon="microsoft-excel" label="Export Excel" loading={exportFormat === 'EXCEL'} disabled={exportFormat !== null} onPress={() => void download('EXCEL')} variant="secondary" />
+                  </View>
                 </View>
-                <View style={styles.exportButton}>
-                  <Button icon="microsoft-excel" label="Export Excel" loading={exportFormat === 'EXCEL'} disabled={exportFormat !== null} onPress={() => void download('EXCEL')} variant="secondary" />
-                </View>
-              </View>
-            </ReportSection>
+              </ReportSection>
+            ) : null}
           </>
         ) : (
           <Card style={styles.loadingCard}>

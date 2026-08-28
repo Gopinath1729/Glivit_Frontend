@@ -20,6 +20,16 @@ export type WebMapMarker = {
   label?: string;
 };
 
+/** A circular zone drawn on the map, in metres. */
+export type WebMapGeofence = {
+  id: string | number;
+  name: string;
+  lat: number;
+  lng: number;
+  radius: number;
+  color?: string;
+};
+
 export type WebMapCameraMode =
   | 'follow'
   | 'chase'
@@ -46,6 +56,8 @@ type FleetWebMapProps = {
   mapStyle: MapStyleSpec;
   cameraMode?: WebMapCameraMode;
   polyline?: [number, number][]; // [lng, lat] pairs
+  /** Circular geofences to draw as ground-accurate rings. */
+  geofences?: WebMapGeofence[];
   selectedId?: string | number | null;
   followSelected?: boolean;
   onSelect?: (id: string | number) => void;
@@ -70,6 +82,7 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
     markers,
     mapStyle,
     polyline,
+    geofences,
     selectedId,
     followSelected = false,
     onSelect,
@@ -85,6 +98,7 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
   const markersRef = useRef(markers);
   const lastSyncedMarkersRef = useRef<object | null>(null);
   const lastSyncedRouteRef = useRef<[number, number][] | null>(null);
+  const lastSyncedGeofencesRef = useRef<object | null>(null);
   markersRef.current = markers;
   const [reloadKey, setReloadKey] = useState(0);
   const [status, setStatus] = useState<WebMapStatus>('loading');
@@ -132,6 +146,25 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
     [cameraMode, followSelected, markers]
   );
   const routeCoordinates = useMemo(() => sanitizeWebRoute(polyline ?? []), [polyline]);
+  const geofencePayload = useMemo(
+    () =>
+      (geofences ?? [])
+        .filter(
+          (g) =>
+            isValidWebCoordinate(g.lat, g.lng) &&
+            Number.isFinite(g.radius) &&
+            g.radius > 0
+        )
+        .map((g) => ({
+          id: String(g.id),
+          name: g.name ?? '',
+          lat: g.lat,
+          lng: g.lng,
+          radius: g.radius,
+          color: g.color ?? '#27D34D',
+        })),
+    [geofences]
+  );
 
   const syncMarkers = useCallback(
     (fit = false) => {
@@ -150,16 +183,25 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
     lastSyncedRouteRef.current = routeCoordinates;
   }, [routeCoordinates]);
 
+  const syncGeofences = useCallback(() => {
+    webRef.current?.injectJavaScript(
+      `window.__glivtSyncGeofences && window.__glivtSyncGeofences(${JSON.stringify(geofencePayload)}); true;`
+    );
+    lastSyncedGeofencesRef.current = geofencePayload;
+  }, [geofencePayload]);
+
   const syncAll = useCallback(
     (fit = false) => {
       webRef.current?.injectJavaScript(
         `window.__glivtSyncRoute && window.__glivtSyncRoute(${JSON.stringify(routeCoordinates)});` +
+          `window.__glivtSyncGeofences && window.__glivtSyncGeofences(${JSON.stringify(geofencePayload)});` +
           `window.__glivtSyncMarkers && window.__glivtSyncMarkers(${JSON.stringify(markerPayload)}, ${fit ? 'true' : 'false'}); true;`
       );
       lastSyncedRouteRef.current = routeCoordinates;
+      lastSyncedGeofencesRef.current = geofencePayload;
       lastSyncedMarkersRef.current = markerPayload;
     },
-    [markerPayload, routeCoordinates]
+    [geofencePayload, markerPayload, routeCoordinates]
   );
 
   useEffect(() => {
@@ -167,6 +209,7 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
     setErrorMessage('');
     lastSyncedMarkersRef.current = null;
     lastSyncedRouteRef.current = null;
+    lastSyncedGeofencesRef.current = null;
   }, [html, reloadKey]);
 
   useEffect(() => {
@@ -206,6 +249,15 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
       syncRoute();
     }
   }, [routeCoordinates, status, syncRoute]);
+
+  // Zones are pushed like markers and the route: on ready, and whenever the set
+  // changes. That is what makes a newly saved geofence appear without a reload,
+  // and what redraws every saved zone after a remount or app restart.
+  useEffect(() => {
+    if (status === 'ready' && lastSyncedGeofencesRef.current !== geofencePayload) {
+      syncGeofences();
+    }
+  }, [geofencePayload, status, syncGeofences]);
 
   const handleMessage = (event: EmbeddedWebViewMessageEvent) => {
     try {
@@ -443,6 +495,7 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
         var BASE_READY = false;
         var MARKERS = [];
         var LINE = [];
+        var GEOFENCES = [];
         if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
         if (typeof STYLE === 'string' && STYLE.indexOf('https://') !== 0) {
           throw new Error('Map style URL must use HTTPS.');
@@ -613,6 +666,20 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
           map.addLayer({ id:'route', type:'line', source:'route',
             layout:{ 'line-cap':'round','line-join':'round' },
             paint:{ 'line-color':'#16A34A','line-width':5 } }, labelLayerId);
+
+          // Geofences sit beneath the route and markers so a vehicle is never
+          // obscured by the zone it is sitting in.
+          map.addSource('geofences', { type:'geojson', data: emptyCollection() });
+          map.addLayer({ id:'geofence-fill', type:'fill', source:'geofences',
+            paint:{ 'fill-color':['get','color'], 'fill-opacity':0.14 } }, 'route-aura');
+          map.addLayer({ id:'geofence-line', type:'line', source:'geofences',
+            paint:{ 'line-color':['get','color'], 'line-width':2 } }, 'route-aura');
+          map.addLayer({ id:'geofence-label', type:'symbol', source:'geofences',
+            layout:{ 'text-field':['get','name'], 'text-size':11,
+                     'text-font':['Noto Sans Regular'], 'text-allow-overlap':false },
+            paint:{ 'text-color':['get','color'], 'text-halo-color':'rgba(3,12,22,0.85)',
+                    'text-halo-width':1.4 } }, labelLayerId);
+          syncGeofenceSource();
           BASE_READY = true;
           post({ type:'ready' });
         });
@@ -694,6 +761,51 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
         window.__glivtZoomIn = function () { if (map) map.zoomIn(); };
         window.__glivtZoomOut = function () { if (map) map.zoomOut(); };
         window.__glivtResetBearing = function () { if (map) map.setBearing(0); };
+        function emptyCollection() {
+          return { type:'FeatureCollection', features: [] };
+        }
+
+        /**
+         * A geofence radius as a ground polygon.
+         *
+         * MapLibre's circle-radius is measured in screen pixels, so a pixel
+         * circle would keep its size as the map zooms and stop describing the
+         * zone. A polygon in geographic coordinates stays true to the ground,
+         * which is what keeps the boundary correct through zoom and pan.
+         */
+        function ringPolygon(lat, lng, metres) {
+          var points = [];
+          var segments = 72;
+          var latDelta = metres / 111320;
+          var cos = Math.cos((lat * Math.PI) / 180);
+          var lngDelta = metres / (111320 * (Math.abs(cos) < 1e-6 ? 1e-6 : cos));
+          for (var i = 0; i <= segments; i++) {
+            var angle = (i / segments) * 2 * Math.PI;
+            points.push([lng + lngDelta * Math.cos(angle), lat + latDelta * Math.sin(angle)]);
+          }
+          return points;
+        }
+
+        function syncGeofenceSource() {
+          if (!map) return;
+          var source = map.getSource('geofences');
+          if (!source) return;
+          var features = GEOFENCES.map(function (g) {
+            return {
+              type:'Feature',
+              properties:{ name: g.name || '', color: g.color || '#27D34D' },
+              geometry:{ type:'Polygon', coordinates:[ ringPolygon(g.lat, g.lng, g.radius) ] }
+            };
+          });
+          source.setData({ type:'FeatureCollection', features: features });
+        }
+
+        window.__glivtSyncGeofences = function (list) {
+          GEOFENCES = Array.isArray(list) ? list : [];
+          if (!BASE_READY) return;
+          syncGeofenceSource();
+        };
+
         window.__glivtSyncRoute = function (line) {
           LINE = Array.isArray(line) ? line : [];
           if (!BASE_READY) return;

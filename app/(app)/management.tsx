@@ -18,7 +18,7 @@ import { DeviceCreateForm } from '@/src/components/DeviceCreateForm';
 import { Button } from '@/src/components/ui/Button';
 import { Card } from '@/src/components/ui/Card';
 import { Chip, EmptyLine } from '@/src/components/ui/ModulePrimitives';
-import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
+import { KeyboardAwareForm, KeyboardBottomSheet } from '@/src/components/ui/KeyboardAwareForm';
 import { TextField } from '@/src/components/ui/TextField';
 import { P } from '@/src/constants/permissions';
 import { apiErrorMessage } from '@/src/services/apiError';
@@ -774,7 +774,7 @@ export default function ManagementScreen() {
                 setSelectedDeviceForEdit(null);
               }}
             />
-            <View
+            <KeyboardBottomSheet
               style={[
                 styles.modalSheetContainer,
                 { paddingBottom: Math.max(insets.bottom + spacing.md, spacing.lg) },
@@ -813,7 +813,7 @@ export default function ManagementScreen() {
                   }}
                 />
               </KeyboardAwareForm>
-            </View>
+            </KeyboardBottomSheet>
           </View>
         </Modal>
       ) : null}
@@ -828,7 +828,7 @@ export default function ManagementScreen() {
           visible={userModalVisible}>
           <View style={styles.modalOverlay}>
             <Pressable style={StyleSheet.absoluteFill} onPress={() => setUserModalVisible(false)} />
-            <View
+            <KeyboardBottomSheet
               style={[
                 styles.modalSheetContainer,
                 { paddingBottom: Math.max(insets.bottom + spacing.md, spacing.lg) },
@@ -885,7 +885,7 @@ export default function ManagementScreen() {
                   onPress={submitUser}
                 />
               </KeyboardAwareForm>
-            </View>
+            </KeyboardBottomSheet>
           </View>
         </Modal>
       ) : null}
@@ -900,7 +900,7 @@ export default function ManagementScreen() {
           visible={editUserModalVisible}>
           <View style={styles.modalOverlay}>
             <Pressable style={StyleSheet.absoluteFill} onPress={() => setEditUserModalVisible(false)} />
-            <View
+            <KeyboardBottomSheet
               style={[
                 styles.modalSheetContainer,
                 { paddingBottom: Math.max(insets.bottom + spacing.md, spacing.lg) },
@@ -993,7 +993,7 @@ export default function ManagementScreen() {
                   onPress={submitEditUser}
                 />
               </KeyboardAwareForm>
-            </View>
+            </KeyboardBottomSheet>
           </View>
         </Modal>
       ) : null}
@@ -1017,7 +1017,7 @@ export default function ManagementScreen() {
                 setSelectedProjectForEdit(null);
               }}
             />
-            <View
+            <KeyboardBottomSheet
               style={[
                 styles.modalSheetContainer,
                 { paddingBottom: Math.max(insets.bottom + spacing.md, spacing.lg) },
@@ -1074,7 +1074,7 @@ export default function ManagementScreen() {
                   onPress={submitProjectModal}
                 />
               </KeyboardAwareForm>
-            </View>
+            </KeyboardBottomSheet>
           </View>
         </Modal>
       ) : null}

@@ -1,5 +1,5 @@
 import { LinearGradient } from 'expo-linear-gradient';
-import React, { useEffect } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { StyleSheet, View, useWindowDimensions } from 'react-native';
 import Animated, {
   Easing,
@@ -28,6 +28,9 @@ const WORDMARK = ['G', 'L', 'I', 'V', 'T'];
 /** Time from first frame to the exit fade, in ms. */
 const RUNTIME = 2400;
 
+/** Ring diameters as a fraction of screen width, innermost first. */
+const RING_SCALES = [0.42, 0.60, 0.78];
+
 type Props = {
   /** Called once the exit fade has finished and the app below is safe to show. */
   onFinished: () => void;
@@ -43,49 +46,61 @@ type Props = {
  * The GLIVT launch animation.
  *
  * It continues the native splash rather than replacing it: both draw the same
- * mark on the same brand navy, so the handover is invisible and the motion reads
- * as part of the launch. The sequence is mark, GPS ping, speed streaks, wordmark,
- * tagline -- the order the logo itself is built from.
+ * mark on the same brand navy, so the handover is invisible.
+ *
+ * The rings are concentric and fixed, not expanding. An expanding ping reads as
+ * a radar sweep in motion but leaves the composition different in every frame --
+ * a screenshot catches rings at arbitrary radii, some clipped by the screen
+ * edge. Holding them still and breathing the opacity keeps the layout stable at
+ * every instant while the screen is still alive.
  */
 export function BrandSplash({ onFinished, ready }: Props) {
   const { width } = useWindowDimensions();
 
-  const markScale = useSharedValue(0.72);
+  const markScale = useSharedValue(0.82);
   const markOpacity = useSharedValue(0);
-  const ping = useSharedValue(0);
-  const streak = useSharedValue(0);
+  const rings = useSharedValue(0);
+  const breathe = useSharedValue(0);
   const wordmark = useSharedValue(0);
   const tagline = useSharedValue(0);
   const exit = useSharedValue(0);
 
-  useEffect(() => {
-    markOpacity.value = withTiming(1, { duration: 420, easing: Easing.out(Easing.quad) });
-    markScale.value = withSpring(1, { damping: 11, stiffness: 120, mass: 0.9 });
+  const ringSizes = useMemo(() => RING_SCALES.map((scale) => Math.round(width * scale)), [width]);
+  const markSize = useMemo(() => Math.round(width * 0.36), [width]);
 
-    // The ping loops for as long as the splash is up, so a slow cold start still
-    // looks alive instead of frozen on a static frame.
-    ping.value = withDelay(
-      260,
-      withRepeat(withTiming(1, { duration: 1700, easing: Easing.out(Easing.quad) }), -1, false)
+  useEffect(() => {
+    markOpacity.value = withDelay(120, withTiming(1, { duration: 460, easing: Easing.out(Easing.quad) }));
+    markScale.value = withDelay(120, withSpring(1, { damping: 13, stiffness: 110, mass: 0.9 }));
+
+    rings.value = withTiming(1, { duration: 900, easing: Easing.out(Easing.cubic) });
+
+    // A slow swell rather than an expansion: the rings stay where they are, so
+    // the composition never changes, but the screen is not frozen either.
+    breathe.value = withRepeat(
+      withSequence(
+        withTiming(1, { duration: 1500, easing: Easing.inOut(Easing.quad) }),
+        withTiming(0, { duration: 1500, easing: Easing.inOut(Easing.quad) })
+      ),
+      -1,
+      false
     );
 
-    streak.value = withDelay(360, withTiming(1, { duration: 640, easing: Easing.out(Easing.cubic) }));
-    wordmark.value = withDelay(620, withTiming(1, { duration: 740, easing: Easing.out(Easing.cubic) }));
-    tagline.value = withDelay(1100, withTiming(1, { duration: 620, easing: Easing.out(Easing.quad) }));
+    wordmark.value = withDelay(560, withTiming(1, { duration: 760, easing: Easing.out(Easing.cubic) }));
+    tagline.value = withDelay(1020, withTiming(1, { duration: 640, easing: Easing.out(Easing.quad) }));
 
     return () => {
-      cancelAnimation(ping);
+      cancelAnimation(breathe);
     };
-  }, [markOpacity, markScale, ping, streak, tagline, wordmark]);
+  }, [breathe, markOpacity, markScale, rings, tagline, wordmark]);
 
   // Exit only once the animation has played and the app behind is ready.
   useEffect(() => {
     if (!ready) return undefined;
     const timer = setTimeout(() => {
-      cancelAnimation(ping);
+      cancelAnimation(breathe);
       exit.value = withSequence(
         withTiming(0.06, { duration: 140, easing: Easing.out(Easing.quad) }),
-        withTiming(1, { duration: 420, easing: Easing.in(Easing.quad) }, (finished) => {
+        withTiming(1, { duration: 440, easing: Easing.in(Easing.quad) }, (finished) => {
           if (finished) {
             runOnJS(onFinished)();
           }
@@ -93,7 +108,7 @@ export function BrandSplash({ onFinished, ready }: Props) {
       );
     }, RUNTIME);
     return () => clearTimeout(timer);
-  }, [exit, onFinished, ping, ready]);
+  }, [breathe, exit, onFinished, ready]);
 
   const containerStyle = useAnimatedStyle(() => ({
     opacity: 1 - exit.value,
@@ -106,14 +121,9 @@ export function BrandSplash({ onFinished, ready }: Props) {
     transform: [{ scale: markScale.value }],
   }));
 
-  // Three rings on one clock, offset in phase, so they radiate in sequence.
-  const ping0 = useAnimatedStyle(() => pingFrame(ping.value, 0));
-  const ping1 = useAnimatedStyle(() => pingFrame(ping.value, 0.33));
-  const ping2 = useAnimatedStyle(() => pingFrame(ping.value, 0.66));
-
-  const streak0 = useAnimatedStyle(() => streakFrame(streak.value, 0, width));
-  const streak1 = useAnimatedStyle(() => streakFrame(streak.value, 1, width));
-  const streak2 = useAnimatedStyle(() => streakFrame(streak.value, 2, width));
+  const ring0 = useAnimatedStyle(() => ringFrame(rings.value, breathe.value, 0));
+  const ring1 = useAnimatedStyle(() => ringFrame(rings.value, breathe.value, 1));
+  const ring2 = useAnimatedStyle(() => ringFrame(rings.value, breathe.value, 2));
 
   const letter0 = useAnimatedStyle(() => letterFrame(wordmark.value, 0));
   const letter1 = useAnimatedStyle(() => letterFrame(wordmark.value, 1));
@@ -132,6 +142,8 @@ export function BrandSplash({ onFinished, ready }: Props) {
     transform: [{ scaleX: tagline.value }],
   }));
 
+  const ringStyles = [ring0, ring1, ring2];
+
   return (
     <Animated.View
       pointerEvents="none"
@@ -139,18 +151,22 @@ export function BrandSplash({ onFinished, ready }: Props) {
     >
       <LinearGradient colors={[NAVY, NAVY_DEEP]} style={StyleSheet.absoluteFill} />
 
-      <View style={styles.stage}>
-        <Animated.View style={[styles.ping, ping0]} />
-        <Animated.View style={[styles.ping, ping1]} />
-        <Animated.View style={[styles.ping, ping2]} />
-
-        <View style={styles.streaks}>
-          <Animated.View style={[styles.streak, styles.streakTop, streak0]} />
-          <Animated.View style={[styles.streak, styles.streakMid, streak1]} />
-          <Animated.View style={[styles.streak, styles.streakLow, streak2]} />
-        </View>
-
-        <Animated.Image source={MARK} style={[styles.mark, markStyle]} resizeMode="contain" />
+      <View style={[styles.stage, { height: ringSizes[2], width: ringSizes[2] }]}>
+        {ringSizes.map((size, index) => (
+          <Animated.View
+            key={size}
+            style={[
+              styles.ring,
+              { borderRadius: size / 2, height: size, width: size },
+              ringStyles[index],
+            ]}
+          />
+        ))}
+        <Animated.Image
+          source={MARK}
+          style={[{ height: markSize, width: markSize }, markStyle]}
+          resizeMode="contain"
+        />
       </View>
 
       <View style={styles.wordmarkRow}>
@@ -161,30 +177,26 @@ export function BrandSplash({ onFinished, ready }: Props) {
         ))}
       </View>
 
-      <Animated.View style={[styles.underline, underlineStyle]} />
+      <Animated.View style={[styles.underline, { width: Math.round(width * 0.25) }, underlineStyle]} />
       <Animated.Text style={[styles.tagline, taglineStyle]}>FLEET MANAGEMENT</Animated.Text>
     </Animated.View>
   );
 }
 
-/** One frame of a radiating ring, `phase` offsetting it around the shared clock. */
-function pingFrame(clock: number, phase: number) {
+/**
+ * One frame of a concentric ring.
+ *
+ * Outer rings sit fainter than inner ones so the set reads as depth rather than
+ * three equal circles, and the breath is scaled down accordingly.
+ */
+function ringFrame(entrance: number, breath: number, index: number) {
   'worklet';
-  const t = (clock + phase) % 1;
+  const base = [0.22, 0.15, 0.1][index];
+  const start = index * 0.14;
+  const appeared = interpolate(entrance, [start, start + 0.6], [0, 1], 'clamp');
   return {
-    opacity: interpolate(t, [0, 0.15, 1], [0, 0.34, 0]),
-    transform: [{ scale: interpolate(t, [0, 1], [0.55, 2.1]) }],
-  };
-}
-
-/** One frame of a motion streak sliding in from off-screen left. */
-function streakFrame(clock: number, index: number, width: number) {
-  'worklet';
-  const start = index * 0.12;
-  const progress = interpolate(clock, [start, start + 0.6], [0, 1], 'clamp');
-  return {
-    opacity: interpolate(progress, [0, 0.4, 1], [0, 0.9, 0.55]),
-    transform: [{ translateX: interpolate(progress, [0, 1], [-width * 0.5, 0]) }],
+    opacity: appeared * (base + breath * 0.05),
+    transform: [{ scale: interpolate(appeared, [0, 1], [0.94, 1]) }],
   };
 }
 
@@ -197,13 +209,10 @@ function letterFrame(clock: number, index: number) {
     opacity: progress,
     transform: [
       { translateY: interpolate(progress, [0, 1], [18, 0]) },
-      { scale: interpolate(progress, [0, 1], [0.86, 1]) },
+      { scale: interpolate(progress, [0, 1], [0.88, 1]) },
     ],
   };
 }
-
-const MARK_SIZE = 168;
-const PING_SIZE = 210;
 
 const styles = StyleSheet.create({
   root: {
@@ -213,65 +222,34 @@ const styles = StyleSheet.create({
   },
   stage: {
     alignItems: 'center',
-    height: MARK_SIZE,
     justifyContent: 'center',
-    width: MARK_SIZE * 1.6,
   },
-  mark: {
-    height: MARK_SIZE,
-    width: MARK_SIZE,
-  },
-  ping: {
+  ring: {
     borderColor: GREEN,
-    borderRadius: PING_SIZE / 2,
-    borderWidth: 1.5,
-    height: PING_SIZE,
+    borderWidth: 1,
     position: 'absolute',
-    width: PING_SIZE,
-  },
-  streaks: {
-    left: 0,
-    position: 'absolute',
-    top: '40%',
-  },
-  streak: {
-    backgroundColor: GREEN,
-    borderRadius: 2,
-    height: 3.5,
-  },
-  streakTop: {
-    marginBottom: 9,
-    width: 54,
-  },
-  streakMid: {
-    marginBottom: 9,
-    width: 42,
-  },
-  streakLow: {
-    width: 30,
   },
   wordmarkRow: {
     flexDirection: 'row',
-    marginTop: 26,
+    marginTop: 34,
   },
   letter: {
     color: '#F4F9FC',
-    fontSize: 40,
+    fontSize: 44,
     fontWeight: '800',
-    letterSpacing: 5,
+    letterSpacing: 8,
   },
   underline: {
     backgroundColor: CYAN,
     borderRadius: 1,
     height: 2,
-    marginTop: 14,
-    width: 92,
+    marginTop: 18,
   },
   tagline: {
-    color: '#7E97A8',
-    fontSize: 11,
-    fontWeight: '700',
-    letterSpacing: 5.5,
-    marginTop: 12,
+    color: '#8AA0B0',
+    fontSize: 12,
+    fontWeight: '600',
+    letterSpacing: 6,
+    marginTop: 16,
   },
 });

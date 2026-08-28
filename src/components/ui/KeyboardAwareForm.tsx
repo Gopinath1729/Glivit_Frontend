@@ -7,6 +7,7 @@ import {
   TextInput,
   View,
   findNodeHandle,
+  useWindowDimensions,
   type StyleProp,
   type ViewStyle,
 } from 'react-native';
@@ -40,7 +41,16 @@ export type KeyboardAwareFormProps = {
   children: React.ReactNode;
   /** Gap left between the focused input and the top of the keyboard. */
   extraOffset?: number;
-  /** Style for the scroll container itself. */
+  /**
+   * Style for the scroll container itself.
+   *
+   * Pass a filling style (`flex: 1`) only when the scroller should occupy a
+   * bounded parent, such as a full screen. Inside a bottom sheet -- whose height
+   * is driven by its content with a maxHeight cap -- `flex: 1` sets
+   * `flexBasis: 0`, which collapses the scroller to zero height and renders the
+   * sheet empty. Left unset, the scroller sizes to its content and the sheet's
+   * cap makes it scrollable, which is what a sheet wants.
+   */
   style?: StyleProp<ViewStyle>;
   /** Style applied to the scrolled content. */
   contentContainerStyle?: StyleProp<ViewStyle>;
@@ -118,7 +128,7 @@ export function KeyboardAwareForm({
     <ScrollView
       ref={scrollRef}
       testID={testID}
-      style={[styles.flex, style]}
+      style={style}
       contentContainerStyle={contentStyle}
       // Buttons and dropdown rows stay tappable while the keyboard is open.
       keyboardShouldPersistTaps="handled"
@@ -178,6 +188,39 @@ export function KeyboardLift({
   const lift = keyboardHeight > 0 ? Math.max(0, keyboardHeight - (useSafeArea ? insets.bottom : 0)) : 0;
 
   return <View style={[{ marginBottom: lift }, style]}>{children}</View>;
+}
+
+/**
+ * A bottom sheet that stays clear of the keyboard.
+ *
+ * A sheet anchored to the bottom of the screen sits exactly where the keyboard
+ * opens, so a scroller inside it cannot help -- the whole sheet is covered.
+ * This lifts it by the keyboard height and shrinks its cap by the same amount,
+ * so the lifted sheet still fits on screen rather than running off the top.
+ *
+ * With the keyboard closed the lift is zero and the cap is the ratio it always
+ * was, so the resting layout is unchanged.
+ */
+export function KeyboardBottomSheet({
+  children,
+  style,
+  maxHeightRatio = 0.85,
+}: {
+  children: React.ReactNode;
+  style?: StyleProp<ViewStyle>;
+  /** Fraction of the screen the sheet may occupy, matching its resting cap. */
+  maxHeightRatio?: number;
+}) {
+  const insets = useSafeAreaInsets();
+  const { height } = useWindowDimensions();
+  const keyboardHeight = useKeyboardHeight();
+  const lift = keyboardHeight > 0 ? Math.max(0, keyboardHeight - insets.bottom) : 0;
+
+  return (
+    <View style={[style, { marginBottom: lift, maxHeight: (height - lift) * maxHeightRatio }]}>
+      {children}
+    </View>
+  );
 }
 
 /** Re-exported so callers do not need to reach for the input module directly. */
