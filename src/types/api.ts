@@ -24,7 +24,7 @@ export type PageResponse<T> = {
   last: boolean;
 };
 
-export type Role = 'SUPER_ADMIN' | 'ADMIN' | 'DRIVER';
+export type Role = 'SUPER_ADMIN' | 'ADMIN' | 'TENANT_ADMIN' | 'COMPANY_USER' | 'DRIVER';
 
 export type TenantConfig = {
   companyCode: string;
@@ -99,11 +99,11 @@ export type TenantSummary = {
 export type TenantCreateRequest = {
   name: string;
   companyName: string;
-  adminName: string;
-  adminEmail: string;
-  adminPhone: string;
+  adminUserId: number;
   status: TenantStatus;
 };
+
+export type TenantMemberRole = 'ALL' | 'ADMIN' | 'USER' | 'DRIVER';
 
 export type TenantUpdateRequest = {
   name: string;
@@ -130,6 +130,7 @@ export type DeviceSummary = {
   id: number;
   name: string;
   imei: string;
+  sourceType?: 'GPS_DEVICE' | 'MOBILE_GPS';
   category: string;
   vehicleId?: number | null;
   vehicleName?: string | null;
@@ -138,6 +139,9 @@ export type DeviceSummary = {
   simNumber?: string | null;
   simProvider?: string | null;
   driverName?: string | null;
+  driverId?: number | null;
+  driverPhone?: string | null;
+  driverLicenceNumber?: string | null;
   state: string;
   latitude?: number | null;
   longitude?: number | null;
@@ -167,11 +171,32 @@ export type DeviceDetail = DeviceSummary & {
   driverId?: number | null;
   driverName?: string | null;
   driverPhone?: string | null;
+  driverLicenceNumber?: string | null;
   remarks?: string | null;
   activatedAt?: string | null;
   timezone?: string | null;
   distanceUnit?: string | null;
   speedUnit?: string | null;
+};
+
+export type VehicleDocumentDto = {
+  id: number;
+  deviceId: number;
+  name: string;
+  documentType: string;
+  fileName: string;
+  contentType: string;
+  sizeBytes: number;
+  expiryDate?: string | null;
+  notes?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type VehicleDocumentContent = {
+  fileName: string;
+  contentType: string;
+  content: string;
 };
 
 export type ProjectDto = {
@@ -289,6 +314,81 @@ export type ReportContent = {
   fileName: string;
   contentType: string;
   content: string;
+};
+
+export type ReportPeriod = 'DAILY' | 'WEEKLY' | 'MONTHLY';
+
+export type ReportLocationPoint = {
+  label: string;
+  dateTime: string;
+  latitude: number;
+  longitude: number;
+  address: string;
+  lastKnown: boolean;
+};
+
+export type ReportActivityEvent = {
+  startTime: string;
+  endTime: string;
+  durationSeconds: number;
+  latitude?: number | null;
+  longitude?: number | null;
+  address: string;
+};
+
+export type ReportOverspeedEvent = {
+  startTime: string;
+  endTime: string;
+  durationSeconds: number;
+  maximumSpeedKmh: number;
+  speedLimitKmh: number;
+  latitude?: number | null;
+  longitude?: number | null;
+  address: string;
+};
+
+export type VehicleActivityReport = {
+  deviceId: number;
+  vehicleId?: number | null;
+  vehicleName: string;
+  registrationNumber: string;
+  imei: string;
+  vehicleStatus: string;
+  fromTime: string;
+  toTime: string;
+  period: ReportPeriod;
+  hasGpsData: boolean;
+  summary: {
+    totalDistanceKm: number;
+    runningSeconds: number;
+    idleSeconds: number;
+    stoppedSeconds: number;
+    offlineSeconds: number;
+    maximumSpeedKmh: number;
+    averageSpeedKmh: number;
+    overspeedCount: number;
+  };
+  distanceTrend: { label: string; bucketStart: string; distanceKm: number }[];
+  journey: { start?: ReportLocationPoint | null; end?: ReportLocationPoint | null };
+  stopIdleDetails: {
+    totalStops: number;
+    stops: ReportActivityEvent[];
+    totalIdleEvents: number;
+    idleEvents: ReportActivityEvent[];
+  };
+  overspeedDetails: ReportOverspeedEvent[];
+  activitySummary: { status: 'RUNNING' | 'STOPPED' | 'OFFLINE'; durationSeconds: number; percentage: number }[];
+  driverDetails: {
+    assigned: boolean;
+    driverId?: number | null;
+    name?: string | null;
+    mobileNumber?: string | null;
+    licenceNumber?: string | null;
+    assignedVehicle: string;
+    totalDistanceKm: number;
+    runningSeconds: number;
+    overspeedEvents: number;
+  };
 };
 
 export type SettingsDto = {

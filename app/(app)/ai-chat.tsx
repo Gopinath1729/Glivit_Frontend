@@ -4,7 +4,6 @@ import {
   ActivityIndicator,
   FlatList,
   Keyboard,
-  KeyboardAvoidingView,
   Platform,
   Pressable,
   StyleSheet,
@@ -15,6 +14,7 @@ import {
 import { useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { KeyboardLift } from '@/src/components/ui/KeyboardAwareForm';
 import { AiCommandCentrePanel } from '@/src/components/AiCommandCentrePanel';
 import { useSendChatMessageMutation, type ChatMessageDto } from '@/src/services/aiApi';
 import { buildChatHistory, CHAT_GREETING } from '@/src/services/aiChatHistory';
@@ -245,10 +245,7 @@ export default function AiChatScreen() {
           <AiCommandCentrePanel />
         </View>
       ) : (
-        <KeyboardAvoidingView
-          style={styles.chatContainer}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top + 64 : 0}>
+        <KeyboardLift style={styles.chatContainer} useSafeArea={false}>
           <FlatList
             ref={listRef}
             style={styles.messageList}
@@ -316,7 +313,7 @@ export default function AiChatScreen() {
               <MaterialCommunityIcons name="send" size={18} color="#fff" />
             </Pressable>
           </View>
-        </KeyboardAvoidingView>
+        </KeyboardLift>
       )}
     </View>
   );

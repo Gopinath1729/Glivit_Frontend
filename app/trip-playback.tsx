@@ -17,10 +17,6 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
-  Fleet3DOverlay,
-  type Fleet3DOverlayMarker,
-} from '@/src/components/Fleet3DOverlay';
-import {
   FleetWebMap,
   type WebMapMarker,
   type WebMapProjection,
@@ -31,13 +27,8 @@ import {
   StableBaseRoute,
   StableRouteLine,
 } from '@/src/components/StableRouteLayers';
-import {
-  getVehicleModel,
-  Vehicle3DMarker,
-  type CarVariant,
-  modelForVehicle,
-} from '@/src/components/Vehicle3DMarker';
-import { VehicleModelPicker } from '@/src/components/VehicleModelPicker';
+import { VehicleMarker, markerCategory } from '@/src/components/VehicleMarker';
+import { vehicleSprite } from '@/src/components/vehicleMarkerSprites';
 import { apiErrorMessage } from '@/src/services/apiError';
 import { useGetDevicePlaybackQuery } from '@/src/services/devicesApi';
 import { getMapStyleInfo } from '@/src/services/mapStyle';
@@ -48,8 +39,6 @@ import {
   type PlaybackTrack,
 } from '@/src/services/playbackEngine';
 import { normalizeHeading } from '@/src/services/vehicleMarkerAssets';
-import { useAppDispatch, useAppSelector } from '@/src/store/hooks';
-import { setVehicleModelPreference } from '@/src/store/vehiclePreferencesSlice';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import type { PlaybackEventMarker, PlaybackStopMarker } from '@/src/types/api';
 
@@ -167,15 +156,6 @@ export default function TripPlaybackScreen() {
   }>();
   const deviceId = Number(params.deviceId);
   const devicePreferenceKey = String(deviceId);
-  const dispatch = useAppDispatch();
-  const preferredModel = useAppSelector(
-    (state) => state.vehiclePreferences.modelByDevice[devicePreferenceKey]
-  );
-
-  const initialVariant = useMemo(() => {
-    if (preferredModel) return preferredModel;
-    return modelForVehicle(params.category, params.deviceId ?? '0');
-  }, [preferredModel, params.category, params.deviceId]);
 
   // Date-range filter — defaults to today.
   const today = todayStr();
@@ -207,11 +187,6 @@ export default function TripPlaybackScreen() {
   const [speed, setSpeed] = useState<(typeof SPEEDS)[number]>(1);
   const [camera, setCamera] = useState<CameraMode>('cinematic');
   const [cameraCommandId, setCameraCommandId] = useState(0);
-  const [carVariant, setCarVariant] = useState<CarVariant>(initialVariant);
-  const [modelLoadState, setModelLoadState] = useState<'loading' | 'ready' | 'error'>(
-    'loading'
-  );
-  const [modelLoadError, setModelLoadError] = useState<string | null>(null);
   const [ui, setUi] = useState(0); // throttled progress for UI (0..1)
   const [mapReady, setMapReady] = useState(false);
 
@@ -228,31 +203,6 @@ export default function TripPlaybackScreen() {
     }
   }, []);
 
-  useEffect(() => {
-    setCarVariant(initialVariant);
-    setModelLoadState('loading');
-    setModelLoadError(null);
-  }, [initialVariant]);
-
-  const selectVehicleModel = useCallback(
-    (variant: CarVariant) => {
-      haptic();
-      setCarVariant(variant);
-      setModelLoadState('loading');
-      setModelLoadError(null);
-      dispatch(setVehicleModelPreference({ deviceKey: devicePreferenceKey, variant }));
-      if (__DEV__) console.debug(`[VehicleModel] selected ${variant}`);
-    },
-    [devicePreferenceKey, dispatch, haptic]
-  );
-
-  const handleModelLoadState = useCallback(
-    (state: 'loading' | 'ready' | 'error', message?: string) => {
-      setModelLoadState(state);
-      setModelLoadError(state === 'error' ? message ?? '3D model unavailable.' : null);
-    },
-    []
-  );
 
   const track = useMemo(() => buildPlaybackTrack(data?.points ?? []), [data?.points]);
   const points = track.points;
@@ -429,12 +379,11 @@ export default function TripPlaybackScreen() {
       {hasTrack && data ? (
         <CinematicTripMap
           accent={colors.primary}
+          category={params.category}
           cameraCommandId={cameraCommandId}
           cameraMode={camera}
-          carVariant={carVariant}
           events={data.events}
           onReady={handleMapReady}
-          onModelLoadState={handleModelLoadState}
           playing={appActive && playing}
           speed={speed}
           stops={data.stops}
@@ -541,19 +490,6 @@ export default function TripPlaybackScreen() {
             color={G.text}
             name="map-outline"
             size={16}
-          />
-        </View>
-      ) : null}
-
-      {hasTrack ? (
-        <View style={[styles.carPicker, { top: insets.top + 116 }]}>
-          <VehicleModelPicker
-            compact
-            errorMessage={modelLoadError}
-            loading={modelLoadState === 'loading'}
-            value={carVariant}
-            onChange={selectVehicleModel}
-            category={params.category}
           />
         </View>
       ) : null}
@@ -845,13 +781,21 @@ function lerpAngle(start: number, end: number, t: number): number {
   return normalizeHeading(start + da * t);
 }
 
+/**
+ * Android cannot rasterise a marker's React view under the New Architecture, so
+ * the vehicle is drawn from a pre-baked bitmap there -- see
+ * src/components/vehicleMarkerSprites. iOS keeps the vector marker because
+ * MapKit has no marker rotation at all.
+ */
+const USE_VEHICLE_SPRITE = Platform.OS === 'android';
+
 type CinematicTripMapProps = {
   accent: string;
+  /** Device category, for choosing the marker glyph. */
+  category?: string;
   cameraCommandId: number;
   cameraMode: CameraMode;
-  carVariant: CarVariant;
   events: PlaybackEventMarker[];
-  onModelLoadState: (state: 'loading' | 'ready' | 'error', message?: string) => void;
   onReady: () => void;
   playing: boolean;
   speed: number;
@@ -860,7 +804,6 @@ type CinematicTripMapProps = {
   ui: number;
 };
 
-type ScreenPoint = { x: number; y: number };
 
 function coordinateAhead(
   latitude: number,
@@ -907,11 +850,10 @@ function isDisplayCoordinate(latitude: number, longitude: number) {
  */
 function CinematicTripMap({
   accent,
+  category,
   cameraCommandId,
   cameraMode,
-  carVariant,
   events,
-  onModelLoadState,
   onReady,
   playing,
   speed,
@@ -928,15 +870,12 @@ function CinematicTripMap({
   const stableHeadingRef = useRef<number | null>(null);
   const lastProjectionAtRef = useRef(0);
   const readyReportedRef = useRef(false);
-  const { width, height } = useWindowDimensions();
+  const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const [mapLoaded, setMapLoaded] = useState(Platform.OS === 'web');
   const [autoFollow, setAutoFollow] = useState(true);
   const [resumeRequest, setResumeRequest] = useState(0);
   const [mapCameraHeading, setMapCameraHeading] = useState(0);
-  const [modelReady, setModelReady] = useState(false);
-  const [modelFailed, setModelFailed] = useState(false);
-  const [overlayPoint, setOverlayPoint] = useState<ScreenPoint | null>(null);
   const mapPadding = useMemo(
     () => ({
       top: Math.max(174, insets.top + 150),
@@ -994,16 +933,16 @@ function CinematicTripMap({
   const webMarkers = useMemo<WebMapMarker[]>(
     () => [
       {
-        category: getVehicleModel(carVariant).category.toUpperCase(),
-        color: getVehicleModel(carVariant).paintColor || accent,
+        category: (category ?? '').toUpperCase(),
+        color: accent,
         heading: cur.heading,
-        hidden: modelReady && overlayPoint != null,
         id: 'vehicle',
         lat: cur.lat,
         lng: cur.lng,
+        moving: playing,
       },
     ],
-    [accent, carVariant, cur, modelReady, overlayPoint]
+    [accent, category, cur, playing]
   );
   const webPolyline = useMemo<[number, number][]>(
     () => points.map((p) => [p.lng, p.lat] as [number, number]),
@@ -1035,55 +974,36 @@ function CinematicTripMap({
   }, [reportReady]);
 
   useEffect(() => {
-    setModelReady(false);
-    setModelFailed(false);
-    onModelLoadState('loading');
-  }, [carVariant, onModelLoadState]);
-
-  useEffect(() => {
     setAutoFollow(true);
     lastCameraAtRef.current = 0;
   }, [cameraCommandId]);
 
+  // Android caches a custom marker's bitmap, so it needs a window in which to
+  // redraw. Heading is bucketed to 15deg to keep that window rare.
+  const headingBucket = Math.round(normalizeHeading(cur.heading - mapCameraHeading) / 15);
+  const [vehicleTracksView, setVehicleTracksView] = useState(true);
+  useEffect(() => {
+    if (USE_VEHICLE_SPRITE) return;
+    setVehicleTracksView(true);
+    const timer = setTimeout(() => setVehicleTracksView(false), 240);
+    return () => clearTimeout(timer);
+  }, [accent, headingBucket, playing]);
+
   const projectVehicle = useCallback(async (force = false) => {
     const instance = mapRef.current;
-    if (!instance || !mapLoaded || !isDisplayCoordinate(cur.lat, cur.lng)) return;
+    if (!instance || !mapLoaded) return;
     const now = Date.now();
     if (!force && now - lastProjectionAtRef.current < 40) return;
     lastProjectionAtRef.current = now;
     const request = ++projectionRequestRef.current;
     try {
-      const [projected, camera] = await Promise.all([
-        instance.pointForCoordinate({
-          latitude: cur.lat,
-          longitude: cur.lng,
-        }),
-        instance.getCamera(),
-      ]);
-      if (
-        !mountedRef.current ||
-        request !== projectionRequestRef.current ||
-        !Number.isFinite(projected.x) ||
-        !Number.isFinite(projected.y)
-      ) {
-        return;
-      }
-      // A stale SDK projection can briefly return a point far outside the map
-      // during a camera transition. Keep the last valid screen position instead.
-      if (
-        projected.x >= -120 &&
-        projected.x <= width + 120 &&
-        projected.y >= -120 &&
-        projected.y <= height + 120
-      ) {
-        const heading = Number.isFinite(camera.heading) ? normalizeHeading(camera.heading) : 0;
-        setMapCameraHeading(heading);
-        setOverlayPoint(projected);
-      }
+      const camera = await instance.getCamera();
+      if (!mountedRef.current || request !== projectionRequestRef.current) return;
+      setMapCameraHeading(Number.isFinite(camera.heading) ? normalizeHeading(camera.heading) : 0);
     } catch {
-      // Projection can reject while the native map is changing regions.
+      // The camera can reject while the native map is changing regions.
     }
-  }, [cur.lat, cur.lng, height, mapLoaded, width]);
+  }, [mapLoaded]);
 
   useEffect(() => {
     if (Platform.OS === 'web') return;
@@ -1209,29 +1129,8 @@ function CinematicTripMap({
   }, [projectVehicle]);
 
   const handleWebProjection = useCallback((projection: WebMapProjection) => {
-    const heading = normalizeHeading(projection.heading);
-    setMapCameraHeading(heading);
-    const point = projection.points.vehicle;
-    if (point) setOverlayPoint(point);
+    setMapCameraHeading(normalizeHeading(projection.heading));
   }, []);
-  const projectedVehicleMarkers = useMemo<Fleet3DOverlayMarker[]>(
-    () =>
-      overlayPoint
-        ? [
-          {
-            heading: normalizeHeading(cur.heading - mapCameraHeading),
-            id: 'vehicle',
-            isActive: playing,
-            selected: true,
-            speed: cur.speed,
-            variant: carVariant,
-            x: overlayPoint.x,
-            y: overlayPoint.y,
-          },
-        ]
-        : [],
-    [carVariant, cur.heading, cur.speed, mapCameraHeading, overlayPoint, playing]
-  );
 
   const pauseFollowing = useCallback(() => {
     setAutoFollow(false);
@@ -1317,62 +1216,37 @@ function CinematicTripMap({
               </View>
             </Marker>
           ))}
+          {USE_VEHICLE_SPRITE ? (
+            <Marker
+              anchor={{ x: 0.5, y: 0.5 }}
+              coordinate={{ latitude: cur.lat, longitude: cur.lng }}
+              flat
+              identifier="playback-vehicle"
+              image={vehicleSprite(playing ? 'RUNNING' : 'STOPPED', true)}
+              rotation={normalizeHeading(cur.heading)}
+              tracksViewChanges={false}
+              zIndex={60}
+            />
+          ) : (
+            <Marker
+              anchor={{ x: 0.5, y: 0.5 }}
+              coordinate={{ latitude: cur.lat, longitude: cur.lng }}
+              flat
+              identifier="playback-vehicle"
+              tracksViewChanges={vehicleTracksView}
+              zIndex={60}>
+              <VehicleMarker
+                category={markerCategory(category)}
+                color={accent}
+                heading={normalizeHeading(cur.heading - mapCameraHeading)}
+                moving={playing}
+                selected
+                size={56}
+              />
+            </Marker>
+          )}
         </MapView>
       )}
-
-      {overlayPoint && mapLoaded ? (
-        <>
-          <Fleet3DOverlay
-            height={height}
-            markers={projectedVehicleMarkers}
-            onModelError={(id, variant, message) => {
-              if (id !== 'vehicle' || variant !== carVariant) return;
-              setModelReady(false);
-              setModelFailed(true);
-              onModelLoadState('error', message);
-            }}
-            onModelLoaded={(id, variant) => {
-              if (id !== 'vehicle' || variant !== carVariant) return;
-              setModelReady(true);
-              onModelLoadState('ready');
-            }}
-            onModelLoadStart={(id, variant) => {
-              if (id !== 'vehicle' || variant !== carVariant) return;
-              setModelReady(false);
-              setModelFailed(false);
-              onModelLoadState('loading');
-            }}
-            onUnavailable={(message) => {
-              setModelReady(false);
-              setModelFailed(true);
-              onModelLoadState('error', message);
-            }}
-            width={width}
-          />
-          {modelFailed ? (
-            <View
-              pointerEvents="none"
-              style={[
-                styles.mapVehicle,
-                {
-                  left: overlayPoint.x - 52,
-                  top: overlayPoint.y - 52,
-                },
-              ]}>
-              <View style={[styles.vehiclePulse, { borderColor: accent }]} />
-              <Vehicle3DMarker
-                heading={normalizeHeading(cur.heading - mapCameraHeading)}
-                isActive={playing}
-                renderMode="image"
-                showImageFallback
-                size={104}
-                speed={cur.speed}
-                variant={carVariant}
-              />
-            </View>
-          ) : null}
-        </>
-      ) : null}
 
       {!autoFollow ? (
         <Pressable

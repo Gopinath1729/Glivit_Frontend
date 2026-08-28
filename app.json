@@ -1,24 +1,26 @@
 {
   "expo": {
-    "name": "vehiclemoment",
-    "slug": "vehiclemoment",
+    "name": "GLIVT",
+    "slug": "glivt",
     "version": "1.0.0",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
-    "scheme": "vehiclemoment",
+    "scheme": "glivt",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
       "bundleIdentifier": "com.vehiclemoment.tracker",
       "supportsTablet": true,
       "infoPlist": {
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Allow Glivt to securely track the selected vehicle while Mobile GPS is active.",
+        "NSLocationAlwaysUsageDescription": "Allow Glivt to securely track the selected vehicle while Mobile GPS is active.",
         "NSLocationWhenInUseUsageDescription": "Your location is shown on the tracking map so you can see where you are relative to the fleet."
       }
     },
     "android": {
       "package": "com.vehiclemoment.tracker",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#0B161E",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
@@ -43,15 +45,25 @@
         "expo-splash-screen",
         {
           "image": "./assets/images/splash-icon.png",
-          "imageWidth": 200,
+          "imageWidth": 180,
           "resizeMode": "contain",
-          "backgroundColor": "#ffffff",
+          "backgroundColor": "#0B161E",
           "dark": {
-            "backgroundColor": "#000000"
+            "backgroundColor": "#0B161E"
           }
         }
       ],
       "expo-asset",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow Glivt to securely track the selected vehicle while Mobile GPS is active.",
+          "locationWhenInUsePermission": "Allow Glivt to use this phone as the selected vehicle's GPS source.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true,
+          "isIosBackgroundLocationEnabled": true
+        }
+      ],
       "expo-secure-store",
       "expo-image-picker",
       "@react-native-community/datetimepicker"

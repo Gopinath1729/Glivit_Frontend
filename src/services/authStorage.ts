@@ -62,6 +62,28 @@ async function clearSessionKeys() {
   ]);
 }
 
+async function restoreHomeTenantKeys() {
+  const [homeCompanyCode, homeTenantRaw] = await Promise.all([
+    SecureStore.getItemAsync(KEYS.homeCompanyCode),
+    SecureStore.getItemAsync(KEYS.homeTenantConfig),
+  ]);
+  const normalizedCode = normalizeCompanyCode(homeCompanyCode);
+  const tenantConfig = safeParse<TenantConfig>(homeTenantRaw);
+  if (
+    normalizedCode &&
+    tenantConfig &&
+    hasValidTenantSelection({ companyCode: normalizedCode, tenantConfig })
+  ) {
+    await Promise.all([
+      SecureStore.setItemAsync(KEYS.companyCode, normalizedCode),
+      SecureStore.setItemAsync(
+        KEYS.tenantConfig,
+        JSON.stringify({ ...tenantConfig, companyCode: normalizedCode })
+      ),
+    ]);
+  }
+}
+
 export const authStorage = {
   async saveSession({
     accessToken,
@@ -148,7 +170,13 @@ export const authStorage = {
 
   /** Clears session tokens + user but keeps tenant branding for the next login. */
   async clearSession() {
-    await mutate(clearSessionKeys);
+    await mutate(async () => {
+      await clearSessionKeys();
+      // A super-admin may sign out while viewing another tenant. Restore the
+      // tenant that owns the account so the next login never targets the last
+      // viewed tenant by mistake.
+      await restoreHomeTenantKeys();
+    });
   },
 
   /** Clears everything including the remembered company code. */
@@ -220,6 +248,20 @@ export const authStorage = {
       persisted.refreshToken = null;
       persisted.sessionCompanyCode = null;
       persisted.user = null;
+      if (
+        persisted.homeCompanyCode &&
+        persisted.homeTenantConfig &&
+        hasValidTenantSelection({
+          companyCode: persisted.homeCompanyCode,
+          tenantConfig: persisted.homeTenantConfig,
+        })
+      ) {
+        persisted.companyCode = persisted.homeCompanyCode;
+        persisted.tenantConfig = {
+          ...persisted.homeTenantConfig,
+          companyCode: persisted.homeCompanyCode,
+        };
+      }
     }
     return persisted;
   },

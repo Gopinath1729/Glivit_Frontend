@@ -31,16 +31,16 @@ export function hasValidTenantSelection(value: TenantSelection): boolean {
 }
 
 export function hasValidTenantSession(value: TenantSession): boolean {
-  const isSessionCodeValid = value.sessionCompanyCode
-    ? normalizeCompanyCode(value.sessionCompanyCode) === normalizeCompanyCode(value.companyCode)
-    : true;
+  const selectedCode = normalizeCompanyCode(value.companyCode);
+  const sessionCode = normalizeCompanyCode(value.sessionCompanyCode);
   return Boolean(
-    value.companyCode &&
+    selectedCode &&
+      sessionCode &&
+      sessionCode === selectedCode &&
       value.accessToken &&
       value.refreshToken &&
       value.user &&
       Number.isSafeInteger(value.user.tenantId) &&
-      value.user.tenantId > 0 &&
-      isSessionCodeValid
+      value.user.tenantId > 0
   );
 }

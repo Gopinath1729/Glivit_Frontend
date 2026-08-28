@@ -1,22 +1,19 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Redirect, Tabs, useNavigation } from 'expo-router';
 import React, { useState, useEffect } from 'react';
-import { ActivityIndicator, Pressable, Text, View, StyleSheet } from 'react-native';
+import { Pressable, Text, View, StyleSheet } from 'react-native';
 import * as SecureStore from 'expo-secure-store';
 import { Image } from 'expo-image';
 
 import { ProfilePanel } from '@/src/components/ProfilePanel';
 import { NotificationCenter } from '@/src/components/NotificationCenter';
-import { baseApi } from '@/src/services/baseApi';
 import {
   useAppSelector,
   useHasTenant,
   useIsAuthenticated,
   useTenantEpoch,
 } from '@/src/store/hooks';
-import { store } from '@/src/store/store';
 import { useTheme } from '@/src/theme/ThemeProvider';
-import { radius } from '@/src/theme/tokens';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 
@@ -37,55 +34,6 @@ function HeaderBackButton() {
     >
       <MaterialCommunityIcons name="arrow-left" color={c.onPrimary} size={24} />
     </Pressable>
-  );
-}
-
-function HeaderReloadButton() {
-  const [reloading, setReloading] = React.useState(false);
-  const { colors: c } = useTheme();
-
-  const handleReload = React.useCallback(async () => {
-    if (reloading) return;
-    setReloading(true);
-    try {
-      store.dispatch(
-        baseApi.util.invalidateTags([
-          'Device',
-          'Geofence',
-          'Report',
-          'Command',
-          'User',
-          'Project',
-          'Group',
-          'Audit',
-          'Dashboard',
-          'Settings',
-        ])
-      );
-      await new Promise((resolve) => setTimeout(resolve, 650));
-    } catch {
-      // Catch any unexpected store or network error gracefully
-    } finally {
-      setReloading(false);
-    }
-  }, [reloading]);
-
-  return (
-    <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-      <Pressable
-        accessibilityLabel="Reload page data"
-        accessibilityRole="button"
-        disabled={reloading}
-        hitSlop={12}
-        onPress={handleReload}
-        style={{ paddingHorizontal: 12, opacity: reloading ? 0.75 : 1 }}>
-        {reloading ? (
-          <ActivityIndicator color={c.onPrimary} size="small" />
-        ) : (
-          <MaterialCommunityIcons color={c.onPrimary} name="refresh" size={22} />
-        )}
-      </Pressable>
-    </View>
   );
 }
 
@@ -132,7 +80,7 @@ export default function AppLayout() {
   const [profileVisible, setProfileVisible] = useState(false);
   const [profileUri, setProfileUri] = useState<string | null>(null);
   const user = useAppSelector((s) => s.auth.user);
-  const displayName = user?.name ?? user?.username ?? 'Demo Admin';
+  const displayName = user?.name ?? user?.username ?? 'Fleet user';
   const initials = displayName.substring(0, 2).toUpperCase();
 
   useEffect(() => {
@@ -269,6 +217,7 @@ export default function AppLayout() {
           name="reports"
           options={{
             title: 'Reports',
+            headerTitle: 'Reports',
             tabBarIcon: ({ focused }) => renderTabIcon('file-chart-outline', focused),
           }}
         />
@@ -291,18 +240,18 @@ export default function AppLayout() {
           }}
         />
         <Tabs.Screen
-          name="commands"
-          options={{
-            href: null,
-            title: 'Commands',
-            headerLeft: () => <HeaderBackButton />,
-          }}
-        />
-        <Tabs.Screen
           name="manage-tenants"
           options={{
             href: null,
             title: 'Manage Tenants',
+            headerLeft: () => <HeaderBackButton />,
+          }}
+        />
+        <Tabs.Screen
+          name="tenant-details"
+          options={{
+            href: null,
+            title: 'Tenant Details',
             headerLeft: () => <HeaderBackButton />,
           }}
         />

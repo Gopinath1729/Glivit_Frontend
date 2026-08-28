@@ -9,13 +9,16 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { Provider } from 'react-redux';
 
 import { authStorage } from '@/src/services/authStorage';
-import { preloadVehicleModels } from '@/src/components/Vehicle3DMarker';
+import '@/src/services/mobileGpsBackgroundTask';
+import { BrandSplash } from '@/src/components/BrandSplash';
 import { TenantSwitchOverlay } from '@/src/components/TenantSwitchOverlay';
 import { hydrate } from '@/src/store/authSlice';
 import { adoptSessionTenant } from '@/src/store/tenantSlice';
 import {
   useAppDispatch,
   useAuth,
+  useHasTenant,
+  useIsAuthenticated,
   useTenantSwitchState,
 } from '@/src/store/hooks';
 import { store } from '@/src/store/store';
@@ -53,11 +56,16 @@ function ThemedStatusBar() {
 // default React Native / placeholder screen flashes.
 SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
-function Bootstrapper({ children }: { children: React.ReactNode }) {
+function Bootstrapper({
+  children,
+  onReady,
+}: {
+  children: React.ReactNode;
+  onReady: () => void;
+}) {
   const dispatch = useAppDispatch();
 
   useEffect(() => {
-    preloadVehicleModels();
     let active = true;
     (async () => {
       try {
@@ -77,13 +85,17 @@ function Bootstrapper({ children }: { children: React.ReactNode }) {
           dispatch(adoptSessionTenant(null));
         }
       } finally {
+        // The animated splash is already painted over the whole screen, so
+        // dropping the native one here is invisible -- both draw the same mark
+        // on the same brand navy. Hiding it is what lets the animation run.
         await SplashScreen.hideAsync().catch(() => undefined);
+        if (active) onReady();
       }
     })();
     return () => {
       active = false;
     };
-  }, [dispatch]);
+  }, [dispatch, onReady]);
 
   return <>{children}</>;
 }
@@ -103,6 +115,8 @@ function TenantSwitchGate() {
 
 function RootNavigator() {
   const { bootstrapped } = useAuth();
+  const hasTenant = useHasTenant();
+  const authenticated = useIsAuthenticated();
   const { isDark, colors: c } = useTheme();
 
   if (!bootstrapped) return null;
@@ -126,28 +140,46 @@ function RootNavigator() {
     <NavigationThemeProvider value={navTheme}>
       <Stack screenOptions={{ headerShown: false, animation: 'fade' }}>
         <Stack.Screen name="index" />
-        <Stack.Screen name="company-code" />
-        <Stack.Screen name="login" />
-        <Stack.Screen name="device-profile" />
-        <Stack.Screen name="live-track" />
-        <Stack.Screen name="trip-playback" />
-        <Stack.Screen name="(app)" />
+        <Stack.Protected guard={!hasTenant}>
+          <Stack.Screen name="company-code" />
+        </Stack.Protected>
+        <Stack.Protected guard={hasTenant && !authenticated}>
+          <Stack.Screen name="login" />
+        </Stack.Protected>
+        <Stack.Protected guard={authenticated}>
+          <Stack.Screen name="device-profile" />
+          <Stack.Screen name="live-track" />
+          <Stack.Screen name="tracker-mode" />
+          <Stack.Screen name="trip-playback" />
+          <Stack.Screen name="(app)" />
+        </Stack.Protected>
       </Stack>
     </NavigationThemeProvider>
   );
 }
 
 export default function RootLayout() {
+  const [booted, setBooted] = React.useState(false);
+  const [splashDone, setSplashDone] = React.useState(false);
+  const handleReady = React.useCallback(() => setBooted(true), []);
+  const handleSplashFinished = React.useCallback(() => setSplashDone(true), []);
+
   return (
     <Provider store={store}>
       <GestureHandlerRootView style={{ flex: 1 }}>
         <SafeAreaProvider>
           <ThemeProvider>
-            <Bootstrapper>
+            <Bootstrapper onReady={handleReady}>
               <RootNavigator />
               <TenantSwitchGate />
             </Bootstrapper>
             <ThemedStatusBar />
+            {/* Sits above the navigator so the app can mount and settle behind
+                it; it only fades out once boot has finished, which is why a slow
+                cold start never shows a half-built screen. */}
+            {splashDone ? null : (
+              <BrandSplash onFinished={handleSplashFinished} ready={booted} />
+            )}
           </ThemeProvider>
         </SafeAreaProvider>
       </GestureHandlerRootView>

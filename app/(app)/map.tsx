@@ -1,15 +1,13 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { DrawerActions } from '@react-navigation/native';
+import { HeaderHeightContext } from '@react-navigation/elements';
 import { useNavigation, useRouter } from 'expo-router';
-import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
+  Alert,
   Animated,
   type LayoutChangeEvent,
-  PanResponder,
   Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   useWindowDimensions,
@@ -17,37 +15,24 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { Fleet3DOverlay, type Fleet3DOverlayMarker } from '@/src/components/Fleet3DOverlay';
 import { FleetWebMap, type FleetWebMapHandle, type WebMapMarker } from '@/src/components/FleetWebMap';
 import { LiveVehicleMapMarker } from '@/src/components/LiveVehicleMapMarker';
-import MapView, { Marker } from '@/src/components/maps/NativeMap';
-import {
-  getVehicleModel,
-  modelForVehicle,
-  Vehicle3DMarker,
-} from '@/src/components/Vehicle3DMarker';
-import { StatusPill } from '@/src/components/ui/StatusPill';
+import { VEHICLE_SPRITE_SIZE_SELECTED } from '@/src/components/vehicleMarkerSprites';
+import MapView from '@/src/components/maps/NativeMap';
 import { MapLayersBottomSheet } from '@/src/components/MapLayersBottomSheet';
 import {
   DEFAULT_MAP_PREFERENCES,
   loadMapPreferences,
   type MapPreferences,
 } from '@/src/services/mapPreferencesStorage';
-import { useGetAllDevicesQuery, useGetDeviceQuery, useGetDevicesQuery } from '@/src/services/devicesApi';
+import { useGetAllDevicesQuery, useGetDevicesQuery } from '@/src/services/devicesApi';
+import { dedupeByVehicle } from '@/src/services/vehicleIdentity';
 import { useFleetLivePositions } from '@/src/services/fleetLivePositions';
-import { getMapStyleInfo, type MapStyleVariant } from '@/src/services/mapStyle';
+import { getMapStyleInfo, nativeMapsAvailable, type MapStyleVariant } from '@/src/services/mapStyle';
 import { normalizeHeading } from '@/src/services/vehicleMarkerAssets';
 import type { DeviceSummary } from '@/src/types/api';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
-import { useAppSelector } from '@/src/store/hooks';
-
-/** Shortest-path angular interpolation for smooth live heading changes. */
-function lerpAngle(a: number, b: number, t: number): number {
-  const diff = ((((b - a) % 360) + 540) % 360) - 180;
-  return (a + diff * t + 360) % 360;
-}
-type AnimatedPos = { lat: number; lng: number; heading: number };
 
 export default function AllVehiclesMapScreen() {
   const router = useRouter();
@@ -55,29 +40,47 @@ export default function AllVehiclesMapScreen() {
   const insets = useSafeAreaInsets();
   const { colors: c, stateColors, isDark, autoFollowVehicle } = useTheme();
   const styles = useMemo(() => makeStyles(c), [c]);
+
+  // The header is transparent and floats over the map, so overlays have to
+  // clear its *measured* height. Hard-coding `insets.top + 52` assumed a header
+  // bar shorter than the one the navigator actually draws, which is why the
+  // legend and the top of the toolbar ended up underneath it. The context value
+  // already includes the top safe-area inset; the fallback covers the case of
+  // this screen being rendered outside a navigator that provides a header.
+  const contextHeaderHeight = useContext(HeaderHeightContext);
+  const headerHeight = contextHeaderHeight ?? insets.top + (Platform.OS === 'ios' ? 44 : 56);
+  const overlayTop = headerHeight + spacing.sm;
+  const [legendHeight, setLegendHeight] = useState(0);
+  const handleLegendLayout = useCallback((event: LayoutChangeEvent) => {
+    const next = Math.round(event.nativeEvent.layout.height);
+    setLegendHeight((current) => (current === next ? current : next));
+  }, []);
   const mapRef = useRef<MapView>(null);
   const webMapRef = useRef<FleetWebMapHandle>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
-
-  const autoFollowVehicleRef = useRef(autoFollowVehicle);
-  useEffect(() => {
-    autoFollowVehicleRef.current = autoFollowVehicle;
-  }, [autoFollowVehicle]);
+  const [activeLocateId, setActiveLocateId] = useState<number | null>(null);
 
   const { data, isFetching, refetch } = useGetAllDevicesQuery();
   const listQuery = useGetDevicesQuery({ page: 0, size: 100 });
 
   const rawDevices = useMemo(() => {
-    if (data && Array.isArray(data) && data.length > 0) return data;
-    if (listQuery.data?.content && Array.isArray(listQuery.data.content)) return listQuery.data.content;
-    return data ?? [];
+    // Collapsed to one tracker per vehicle so a vehicle carrying two devices
+    // gets a single marker and is counted once in the status strip.
+    if (data && Array.isArray(data) && data.length > 0) return dedupeByVehicle(data);
+    if (listQuery.data?.content && Array.isArray(listQuery.data.content)) {
+      return dedupeByVehicle(listQuery.data.content);
+    }
+    return dedupeByVehicle(data ?? []);
   }, [data, listQuery.data?.content]);
 
-  const { targetsRef, connected, vehicleCount } = useFleetLivePositions(rawDevices);
+  const { targetsRef, vehicleCount } = useFleetLivePositions(rawDevices);
   const selectedIdRef = useRef<number | null>(null);
   selectedIdRef.current = selectedId;
 
   const located = useMemo(() => {
+    // vehicleCount is the render version emitted when the mutable live target
+    // map changes; reading it here intentionally invalidates this projection.
+    void vehicleCount;
     const unique = new Map<number, LocatedDevice>();
     for (const d of rawDevices) {
       if (unique.has(d.id)) continue;
@@ -93,17 +96,13 @@ export default function AllVehiclesMapScreen() {
       }
     }
     return Array.from(unique.values());
-  }, [rawDevices, vehicleCount]);
-
-  const selected = useMemo(
-    () => located.find((device) => device.id === selectedId) ?? null,
-    [located, selectedId]
-  );
+  }, [rawDevices, targetsRef, vehicleCount]);
 
   // Located devices with status metadata from SSE.
   const liveDevices = useMemo<LocatedDevice[]>(
-    () =>
-      located.map((d) => {
+    () => {
+      void vehicleCount;
+      return located.map((d) => {
         const target = targetsRef.current?.get(d.id);
         const state = target?.state ?? d.state;
         return {
@@ -115,17 +114,18 @@ export default function AllVehiclesMapScreen() {
           course: target?.heading ?? d.course ?? 0,
           lastUpdate: target ? new Date(target.updatedAt).toISOString() : d.lastUpdate,
         };
-      }),
-    [located, vehicleCount]
+      });
+    },
+    [located, targetsRef, vehicleCount]
   );
 
   const statusCounts = useMemo(() => {
-    const acc = { RUNNING: 0, IDLE: 0, STOPPED: 0, NO_DATA: 0 };
+    const acc = { RUNNING: 0, STOPPED: 0, NO_DATA: 0 };
     for (const d of liveDevices) {
       const st = (d.state ?? '').toUpperCase();
       if (st === 'RUNNING' || st === 'MOVING') acc.RUNNING += 1;
-      else if (st === 'IDLE') acc.IDLE += 1;
-      else if (st === 'STOPPED') acc.STOPPED += 1;
+      // IDLE is retired; rows still carrying it count as stopped.
+      else if (st === 'STOPPED' || st === 'IDLE') acc.STOPPED += 1;
       else acc.NO_DATA += 1;
     }
     return acc;
@@ -134,6 +134,7 @@ export default function AllVehiclesMapScreen() {
   useEffect(() => {
     if (selectedId != null && !located.some((device) => device.id === selectedId)) {
       setSelectedId(null);
+      setActiveLocateId(null);
     }
   }, [located, selectedId]);
 
@@ -142,14 +143,22 @@ export default function AllVehiclesMapScreen() {
     [liveDevices, selectedId]
   );
 
+  const activeLocatedVehicle = useMemo(
+    () => liveDevices.find((device) => device.id === activeLocateId) ?? null,
+    [activeLocateId, liveDevices]
+  );
+
   useEffect(() => {
-    if (autoFollowVehicle && selectedLive && mapRef.current) {
+    if (autoFollowVehicle && activeLocatedVehicle && mapRef.current) {
       mapRef.current.animateCamera({
-        center: { latitude: selectedLive.latitude, longitude: selectedLive.longitude },
+        center: {
+          latitude: activeLocatedVehicle.latitude,
+          longitude: activeLocatedVehicle.longitude,
+        },
         zoom: 15.2,
       }, { duration: 800 });
     }
-  }, [selectedLive?.latitude, selectedLive?.longitude, autoFollowVehicle]);
+  }, [activeLocatedVehicle, autoFollowVehicle]);
 
   const webMarkers = useMemo<WebMapMarker[]>(
     () =>
@@ -161,37 +170,12 @@ export default function AllVehiclesMapScreen() {
         heading: d.course,
         category: d.category,
         label: d.name,
+        moving: d.state === 'RUNNING' && (d.speed ?? 0) > 0,
       })),
     [liveDevices, stateColors]
   );
 
   const [showLayersSheet, setShowLayersSheet] = useState(false);
-  const [legendExpanded, setLegendExpanded] = useState(false);
-  const legendAnim = useRef(new Animated.Value(0)).current;
-
-  useEffect(() => {
-    Animated.timing(legendAnim, {
-      toValue: legendExpanded ? 1 : 0,
-      duration: 300,
-      useNativeDriver: true,
-    }).start();
-  }, [legendExpanded, legendAnim]);
-
-  const translateY = legendAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [200, 0],
-  });
-
-  const opacity = legendAnim.interpolate({
-    inputRange: [0, 0.1, 1],
-    outputRange: [0, 0.9, 1],
-  });
-
-  const aiFabTranslateY = legendAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0, -180],
-  });
-
   const [mapPreferences, setMapPreferences] = useState<MapPreferences>(DEFAULT_MAP_PREFERENCES);
 
   useEffect(() => {
@@ -210,7 +194,7 @@ export default function AllVehiclesMapScreen() {
         ? 'dark'
         : 'street';
   const mapStyleInfo = getMapStyleInfo(activeStyleKey);
-  const useNativeMap = Platform.OS !== 'web';
+  const useNativeMap = Platform.OS !== 'web' && nativeMapsAvailable;
 
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const handleRefresh = useCallback(async () => {
@@ -239,30 +223,44 @@ export default function AllVehiclesMapScreen() {
   }, []);
 
   const locateMe = useCallback(() => {
-    if (located.length === 0) return;
-    const target = selected ?? located[0];
-    if (useNativeMap) {
-      focusNative(target);
-    } else {
-      webMapRef.current?.fitAll();
+    if (!selectedLive) {
+      Alert.alert('Select a vehicle', 'Tap a vehicle marker first, then use Locate Me.');
+      return;
     }
-  }, [located, selected, useNativeMap, focusNative]);
+
+    // A single id owns the locate/follow camera. Replacing it atomically drops
+    // the previous vehicle before focusing the newly selected live position.
+    setActiveLocateId(selectedLive.id);
+    if (useNativeMap) {
+      focusNative(selectedLive);
+    } else {
+      webMapRef.current?.focusMarker(selectedLive.id);
+    }
+  }, [focusNative, selectedLive, useNativeMap]);
 
   const fitAll = useCallback(() => {
+    setActiveLocateId(null);
     if (useNativeMap) {
       if (located.length === 0) return;
       const coords = located.map((d) => ({
         latitude: d.latitude,
         longitude: d.longitude
       }));
+      // Keep the fitted bounds clear of the floating header, the legend under
+      // it and the tab bar, so "fit all" never parks a vehicle behind chrome.
       mapRef.current?.fitToCoordinates(coords, {
-        edgePadding: { top: 120, right: 60, bottom: 220, left: 60 },
+        edgePadding: {
+          top: Math.round(overlayTop + legendHeight + spacing.md),
+          right: 60,
+          bottom: 220,
+          left: 60,
+        },
         animated: true,
       });
     } else {
       webMapRef.current?.fitAll();
     }
-  }, [useNativeMap, located]);
+  }, [useNativeMap, located, overlayTop, legendHeight]);
 
   const selectById = useCallback(
     (id: string | number) => {
@@ -270,33 +268,28 @@ export default function AllVehiclesMapScreen() {
         || rawDevices.find((candidate) => String(candidate.id) === String(id));
       const targetId = device ? device.id : id;
       if (targetId == null) return;
-      router.push({ pathname: '/device-profile', params: { id: String(targetId) } });
+
+      const numericId = Number(targetId);
+      if (!Number.isSafeInteger(numericId)) return;
+
+      // First tap selects exactly one vehicle for Locate Me. Repeating the tap
+      // preserves the existing route to vehicle details.
+      if (selectedIdRef.current === numericId) {
+        router.push({ pathname: '/device-profile', params: { id: String(numericId) } });
+        return;
+      }
+
+      setActiveLocateId(null);
+      setSelectedId(numericId);
     },
     [located, rawDevices, router]
   );
 
-  const clearSelection = useCallback(() => { }, []);
+  const clearSelection = useCallback(() => {
+    setActiveLocateId(null);
+    setSelectedId(null);
+  }, []);
   const handleVisibleIdsChange = useCallback((visibleIds: string[]) => { }, []);
-
-  const openLiveTrack = (item: DeviceSummary) =>
-    router.push({ pathname: '/live-track', params: { deviceId: String(item.id), name: item.name, subtitle: item.address ?? '' } });
-
-  const openPlayback = (item: DeviceSummary) => {
-    const variant = modelForVehicle(item.category, item.id);
-    const model = getVehicleModel(variant);
-    router.push({
-      pathname: '/trip-playback' as never,
-      params: {
-        deviceId: String(item.id),
-        name: item.name,
-        category: item.category ?? '',
-        make: model.label,
-        model: model.id,
-        speed: String(item.speed ?? 0),
-        heading: String(item.course ?? 0),
-      },
-    });
-  };
 
   return (
     <SafeAreaView edges={['bottom']} style={styles.screen}>
@@ -321,6 +314,7 @@ export default function AllVehiclesMapScreen() {
           onClearSelection={clearSelection}
           onSelect={selectById}
           onVisibleIdsChange={handleVisibleIdsChange}
+          followSelected={autoFollowVehicle && activeLocateId != null && activeLocateId === selectedId}
           selectedId={selectedId}
           style={StyleSheet.absoluteFillObject}
         />
@@ -328,18 +322,45 @@ export default function AllVehiclesMapScreen() {
 
       <View pointerEvents="none" style={styles.mapVignette} />
 
-      <View style={[styles.railRight, { top: spacing.md }]}>
-        <LabeledFloatingButton icon="refresh" label="Refresh" loading={isFetching || listQuery.isFetching || manualRefreshing} onPress={handleRefresh} />
-        <LabeledFloatingButton icon="crosshairs-gps" label="Locate Me" onPress={locateMe} />
-        <LabeledFloatingButton icon="layers-outline" label="Layers" onPress={toggleLayers} />
-        <LabeledFloatingButton icon="fit-to-page-outline" label="Fit All" onPress={fitAll} />
-        {located.length > 0 && !selected && (
-          <LabeledFloatingButton
-            icon={legendExpanded ? 'chevron-down' : 'chevron-up'}
-            label="Status"
-            onPress={() => setLegendExpanded((prev) => !prev)}
-          />
-        )}
+      {/* Fleet status, always on screen. It used to live in a panel behind a
+          toggle, which meant the one number an operator checks constantly cost
+          a tap and covered a quarter of the map to read. */}
+      {located.length > 0 ? (
+        <View
+          onLayout={handleLegendLayout}
+          pointerEvents="none"
+          style={[styles.statusStrip, { top: overlayTop }]}>
+          {STATUS_SEGMENTS.map(({ key, label }) => (
+            <View key={key} style={styles.statusSegment}>
+              <View style={[styles.stripDot, { backgroundColor: stateColors[key] ?? c.textMuted }]} />
+              <Text style={styles.stripValue}>{statusCounts[key] ?? 0}</Text>
+              <Text style={styles.stripLabel}>{label}</Text>
+            </View>
+          ))}
+        </View>
+      ) : null}
+
+      {/* One slab of icon buttons rather than five labelled pills down the
+          edge: same actions, a fraction of the map covered. The rail stacks
+          under the legend rather than beside it, so neither has to be clipped
+          on a narrow screen and both share the same right margin. */}
+      <View
+        style={[
+          styles.railRight,
+          { top: located.length > 0 && legendHeight > 0 ? overlayTop + legendHeight + spacing.sm : overlayTop },
+        ]}>
+        <RailButton
+          icon="refresh"
+          label="Refresh"
+          loading={isFetching || listQuery.isFetching || manualRefreshing}
+          onPress={handleRefresh}
+        />
+        <View style={styles.railDivider} />
+        <RailButton icon="crosshairs-gps" label="Locate me" onPress={locateMe} />
+        <View style={styles.railDivider} />
+        <RailButton icon="fit-to-page-outline" label="Fit all" onPress={fitAll} />
+        <View style={styles.railDivider} />
+        <RailButton icon="layers-outline" label="Layers" onPress={toggleLayers} />
       </View>
 
       {located.length === 0 && !isFetching && !listQuery.isFetching ? (
@@ -354,82 +375,20 @@ export default function AllVehiclesMapScreen() {
         </View>
       ) : null}
 
-      {located.length > 0 ? (
-        <>
-          <Animated.View
-            style={[
-              styles.legend,
-              {
-                bottom: 68 + (insets.bottom > 0 ? insets.bottom : 8) + 16,
-                transform: [{ translateY }],
-                opacity,
-              },
-            ]}
-            pointerEvents={legendExpanded ? 'auto' : 'none'}
-          >
-            <LegendChip
-              badgeColor="#22C55E"
-              icon="truck"
-              label="Running"
-              labelColor="#22C55E"
-              value={statusCounts.RUNNING}
-            />
-            <LegendChip
-              badgeColor="#F59E0B"
-              icon="pause"
-              label="Idle"
-              labelColor="#94A3B8"
-              value={statusCounts.IDLE}
-            />
-            <LegendChip
-              badgeColor="#EF4444"
-              icon="stop"
-              label="Stopped"
-              labelColor="#EF4444"
-              value={statusCounts.STOPPED}
-            />
-            <LegendChip
-              badgeColor="#475569"
-              icon="wifi-off"
-              label="Offline"
-              labelColor="#94A3B8"
-              value={statusCounts.NO_DATA}
-            />
-          </Animated.View>
-        </>
-      ) : null}
-
-      <Animated.View
-        style={[
-          styles.aiFabLabel,
-          {
-            bottom: 68 + (insets.bottom > 0 ? insets.bottom : 8) + 16 + 8,
-            transform: [{ translateY: aiFabTranslateY }],
-          },
-        ]}
-      >
-        <Pressable
-          accessibilityRole="button"
-          onPress={() => router.push('/ai-chat')}
-          style={styles.aiFabLabelContainer}
-        >
-          <Text style={styles.aiFabLabelText}>Ask Glivt Sentinel</Text>
-        </Pressable>
-      </Animated.View>
-
-      <Animated.View
-        style={[
-          styles.aiFab,
-          {
-            bottom: 68 + (insets.bottom > 0 ? insets.bottom : 8) + 16,
-            transform: [{ translateY: aiFabTranslateY }],
-          },
-        ]}
-      >
-        <Pressable style={{ flex: 1, alignItems: 'center', justifyContent: 'center' }} onPress={() => router.push('/ai-chat')}>
-          <MaterialCommunityIcons name="robot-outline" size={28} color="#ffffff" />
-        </Pressable>
-      </Animated.View>
+      {/* Icon and label were two separately animated elements chasing each
+          other; one pill says the same thing and never desynchronises. */}
+      <Pressable
+        accessibilityLabel="Ask Glivt Sentinel"
+        accessibilityRole="button"
+        onPress={() => router.push('/ai-chat')}
+        style={({ pressed }) => [
+          styles.aiPill,
+          { bottom: 68 + (insets.bottom > 0 ? insets.bottom : 8) + 16 },
+          pressed && styles.aiPillPressed,
+        ]}>
+        <MaterialCommunityIcons color={c.onPrimary} name="robot-outline" size={19} />
+        <Text style={styles.aiPillText}>Sentinel</Text>
+      </Pressable>
 
       <MapLayersBottomSheet
         visible={showLayersSheet}
@@ -442,26 +401,6 @@ export default function AllVehiclesMapScreen() {
 }
 
 type LocatedDevice = DeviceSummary & { latitude: number; longitude: number };
-
-function hasCoordinate(device: DeviceSummary): device is LocatedDevice {
-  return (
-    device != null &&
-    typeof device.latitude === 'number' &&
-    typeof device.longitude === 'number' &&
-    Number.isFinite(device.latitude) &&
-    Number.isFinite(device.longitude) &&
-    (device.latitude !== 0 || device.longitude !== 0) &&
-    Math.abs(device.latitude) <= 90 &&
-    Math.abs(device.longitude) <= 180
-  );
-}
-
-function formatLastUpdate(value?: string | null) {
-  if (!value) return 'Update unavailable';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return 'Update unavailable';
-  return `Updated ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-}
 
 function NativeFleetMap({
   mapRef,
@@ -509,8 +448,6 @@ function NativeFleetMap({
   const lastCameraRef = useRef<any>(null);
   const hasInitialFitRef = useRef(false);
   const [mapReady, setMapReady] = useState(false);
-  const [threeReady, setThreeReady] = useState(false);
-  const [threeFailed, setThreeFailed] = useState(false);
   const [projection, setProjection] = useState<{
     heading: number;
     points: Record<string, { x: number; y: number }>;
@@ -520,6 +457,10 @@ function NativeFleetMap({
   // hysteresis band so popups don't flicker on/off right at the threshold.
   const zoomedInRef = useRef(false);
   const isCameraMovingRef = useRef(false);
+  // Mirrors isCameraMovingRef into render. The 3D overlay draws in screen space
+  // from points that are only re-projected once the gesture ends, so it has to
+  // stand down while the camera moves or it slides along with the finger.
+  const [cameraMoving, setCameraMoving] = useState(false);
   const [zoomedIn, setZoomedIn] = useState(false);
   const updateZoomFromRegion = useCallback((latitudeDelta?: number) => {
     if (!Number.isFinite(latitudeDelta)) return;
@@ -601,16 +542,12 @@ function NativeFleetMap({
     }
   }, [onFitAll, projectVehicles, mapRef]);
 
-  const handleThreeReady = useCallback(() => setThreeReady(true), []);
-  const handleThreeUnavailable = useCallback((message: string) => {
-    console.warn('[FleetMap] 3D vehicles unavailable; using marker images.', message);
-    setThreeReady(false);
-    setThreeFailed(true);
-  }, []);
-
   const handleRegionChange = useCallback(
     (region?: { latitudeDelta?: number }) => {
-      isCameraMovingRef.current = true;
+      if (!isCameraMovingRef.current) {
+        isCameraMovingRef.current = true;
+        setCameraMoving(true);
+      }
       updateZoomFromRegion(region?.latitudeDelta);
     },
     [updateZoomFromRegion]
@@ -620,7 +557,12 @@ function NativeFleetMap({
     (region?: { latitudeDelta?: number }) => {
       isCameraMovingRef.current = false;
       updateZoomFromRegion(region?.latitudeDelta);
-      void projectVehicles(true);
+      // Only hand the scene back to the 3D overlay once it holds screen points
+      // for the camera that is actually on screen now, otherwise it would show
+      // one frame of vehicles at their pre-gesture positions.
+      void projectVehicles(true).then(() => {
+        if (mountedRef.current && !isCameraMovingRef.current) setCameraMoving(false);
+      });
     },
     [projectVehicles, updateZoomFromRegion]
   );
@@ -633,21 +575,6 @@ function NativeFleetMap({
         return [{ id: String(device.id), item: device, point }];
       }),
     [devices, projection.points]
-  );
-
-  const threeMarkers = useMemo<Fleet3DOverlayMarker[]>(
-    () =>
-      placed.map(({ id, item, point }) => ({
-        heading: normalizeHeading(item.course - projection.heading),
-        id,
-        isActive: item.state === 'RUNNING',
-        selected: selectedId === item.id,
-        speed: Number.isFinite(item.speed) ? item.speed : 0,
-        variant: modelForVehicle(item.category, item.id),
-        x: point.x,
-        y: point.y,
-      })),
-    [placed, projection.heading, selectedId]
   );
 
   // Which vehicles get a compact popup. Far zoom -> none (except the selected
@@ -721,7 +648,7 @@ function NativeFleetMap({
               projectionHeading={projection.heading}
               isSelected={selectedId === device.id}
               onSelect={onSelectDevice}
-              threeFailed={threeFailed}
+              color={stateColors[device.state] ?? stateColors.NO_DATA}
             />
           );
         })}
@@ -732,16 +659,10 @@ function NativeFleetMap({
           points as the tap targets below, so the models track the map exactly.
           The 2D marker images only appear while this is starting up or if the
           device genuinely cannot provide a GL context. */}
-      <Fleet3DOverlay
-        height={height}
-        markers={threeMarkers}
-        onReady={handleThreeReady}
-        onUnavailable={handleThreeUnavailable}
-        width={width}
-      />
-
-      {/* Leader lines tying a moved marker back to where it actually is. */}
-      {popups.map(({ device, point, selected }) => (
+      {/* Leader lines tying a moved marker back to where it actually is. These
+          are positioned from the same projected points as the 3D overlay, so
+          they stand down during a gesture for the same reason it does. */}
+      {(cameraMoving ? [] : popups).map(({ device, point, selected }) => (
         <VehiclePopup
           key={`popup-${device.id}`}
           x={point.x}
@@ -758,20 +679,14 @@ function NativeFleetMap({
   );
 }
 
-const fleetMapStyles = StyleSheet.create({
-  vehicle3DOverlay: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    position: 'absolute',
-    zIndex: 10,
-  },
-});
-
 // Compact zoom-based vehicle popup (no circles/rings around the model).
 const POPUP_W = 132;
 const POPUP_H = 54;
 const POPUP_ARROW = 7;
-const MARKER_HALF = 32;
+// Half the marker's on-screen box, so a popup clears the vehicle instead of
+// sitting on it. Android draws the sprite bitmap, whose canvas is a known dp
+// size; iOS still draws the vector marker's larger rotation canvas.
+const MARKER_HALF = Platform.OS === 'android' ? VEHICLE_SPRITE_SIZE_SELECTED / 2 : 46;
 const POPUP_BG = 'rgba(9, 17, 29, 0.92)';
 // latitudeDelta thresholds (smaller delta = more zoomed in). Hysteresis band.
 const POPUP_ENTER_DELTA = 0.055;
@@ -781,9 +696,8 @@ function formatVehicleState(state: string): string {
   switch ((state ?? '').toUpperCase()) {
     case 'RUNNING':
       return 'Running';
-    case 'IDLE':
-      return 'Idle';
     case 'STOPPED':
+    case 'IDLE':
       return 'Stopped';
     case 'EXPIRED':
       return 'Expired';
@@ -889,204 +803,131 @@ const popupStyles = StyleSheet.create({
   },
 });
 
-function FloatingButton({
-  icon,
-  onPress,
-  loading,
-}: {
-  icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
-  onPress: () => void;
-  loading?: boolean;
-}) {
-  const { colors: c } = useTheme();
-  const styles = useMemo(() => makeStyles(c), [c]);
-  return (
-    <Pressable accessibilityRole="button" disabled={loading} onPress={onPress} style={styles.fab}>
-      <MaterialCommunityIcons color={c.textPrimary} name={loading ? 'timer-sand' : icon} size={22} />
-    </Pressable>
-  );
-}
-
-function LabeledFloatingButton({
+function RailButton({
   icon,
   label,
   loading = false,
   onPress,
 }: {
   icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
-  label?: string;
+  label: string;
   loading?: boolean;
   onPress: () => void;
 }) {
-  const { colors: c, isDark } = useTheme();
+  const { colors: c } = useTheme();
   const styles = useMemo(() => makeStyles(c), [c]);
   const spinValue = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
-    if (loading) {
-      const loop = Animated.loop(
-        Animated.timing(spinValue, {
-          toValue: 1,
-          duration: 900,
-          useNativeDriver: true,
-        })
-      );
-      loop.start();
-      return () => loop.stop();
-    } else {
+    if (!loading) {
       spinValue.setValue(0);
+      return;
     }
+    const loop = Animated.loop(
+      Animated.timing(spinValue, { toValue: 1, duration: 900, useNativeDriver: true })
+    );
+    loop.start();
+    return () => loop.stop();
   }, [loading, spinValue]);
 
-  const spin = spinValue.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['0deg', '360deg'],
-  });
+  const spin = spinValue.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '360deg'] });
 
   return (
-    <View style={styles.fabWrapper}>
-      <Pressable
-        accessibilityLabel={label}
-        accessibilityRole="button"
-        hitSlop={8}
-        onPress={onPress}
-        style={({ pressed }) => [styles.fab, pressed && styles.fabPressed]}>
-        <Animated.View style={{ transform: [{ rotate: spin }] }}>
-          <MaterialCommunityIcons color={c.textPrimary} name={icon} size={22} />
-        </Animated.View>
-      </Pressable>
-      {label ? (
-        <Text
-          numberOfLines={1}
-          style={[
-            styles.fabLabelText,
-            {
-              color: c.textPrimary,
-              textShadowColor: isDark ? 'rgba(0, 0, 0, 0.9)' : 'rgba(255, 255, 255, 0.95)',
-            },
-          ]}>
-          {label}
-        </Text>
-      ) : null}
-    </View>
+    <Pressable
+      accessibilityLabel={label}
+      accessibilityRole="button"
+      hitSlop={6}
+      onPress={onPress}
+      style={({ pressed }) => [styles.railButton, pressed && styles.railButtonPressed]}>
+      <Animated.View style={{ transform: [{ rotate: spin }] }}>
+        <MaterialCommunityIcons color={c.textPrimary} name={icon} size={19} />
+      </Animated.View>
+    </Pressable>
   );
 }
 
-function LegendChip({
-  badgeColor,
-  icon,
-  label,
-  labelColor,
-  value,
-}: {
-  badgeColor: string;
-  icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
-  label: string;
-  labelColor?: string;
-  value: number;
-}) {
-  const { colors: c } = useTheme();
-  const styles = useMemo(() => makeStyles(c), [c]);
-  return (
-    <View style={styles.legendChip}>
-      <View style={styles.legendTopRow}>
-        <View style={[styles.legendBadge, { backgroundColor: badgeColor }]}>
-          <MaterialCommunityIcons color="#FFFFFF" name={icon} size={13} />
-        </View>
-        <Text style={styles.legendValue}>{value}</Text>
-      </View>
-      <Text style={[styles.legendLabel, labelColor ? { color: labelColor } : null]}>{label}</Text>
-    </View>
-  );
-}
+const STATUS_SEGMENTS: { key: 'RUNNING' | 'STOPPED' | 'NO_DATA'; label: string }[] = [
+  { key: 'RUNNING', label: 'Running' },
+  { key: 'STOPPED', label: 'Stopped' },
+  { key: 'NO_DATA', label: 'Offline' },
+];
 
 const makeStyles = (c: ThemeColors) =>
   StyleSheet.create({
     screen: { backgroundColor: c.pageBackground, flex: 1 },
-    railRight: { alignItems: 'center', gap: 16, position: 'absolute', right: spacing.md, zIndex: 20 },
-    fabWrapper: { alignItems: 'center', gap: 4, width: 64 },
-    fabPressed: { opacity: 0.85, transform: [{ scale: 0.95 }] },
-    fabLabelText: {
-      fontSize: 11,
-      fontWeight: '800',
-      textAlign: 'center',
-      textShadowOffset: { width: 0, height: 1 },
-      textShadowRadius: 3,
-    },
-    legend: {
+    railRight: {
       alignItems: 'center',
       backgroundColor: c.cardBackground,
       borderColor: c.border,
-      borderRadius: radius.xl,
-      borderWidth: 1,
-      bottom: spacing.sm,
-      elevation: 8,
+      borderRadius: radius.lg,
+      borderWidth: StyleSheet.hairlineWidth,
+      elevation: 5,
+      overflow: 'hidden',
+      position: 'absolute',
+      right: 12,
+      shadowColor: c.shadowColor,
+      shadowOffset: { width: 0, height: 3 },
+      shadowOpacity: 0.16,
+      shadowRadius: 8,
+      zIndex: 20,
+    },
+    railButton: { alignItems: 'center', height: 44, justifyContent: 'center', width: 44 },
+    railButtonPressed: { backgroundColor: c.surfaceAlt },
+    railDivider: { alignSelf: 'stretch', backgroundColor: c.divider, height: StyleSheet.hairlineWidth },
+    statusStrip: {
+      alignSelf: 'center',
+      backgroundColor: c.cardBackground,
+      borderColor: c.border,
+      borderRadius: radius.lg,
+      borderWidth: StyleSheet.hairlineWidth,
+      elevation: 4,
       flexDirection: 'row',
-      justifyContent: 'space-around',
       left: spacing.sm,
-      paddingHorizontal: spacing.md,
-      paddingVertical: spacing.md,
+      minHeight: 44,
+      paddingHorizontal: 10,
+      paddingVertical: 7,
       position: 'absolute',
       right: spacing.sm,
       shadowColor: c.shadowColor,
-      shadowOffset: { width: 0, height: 8 },
-      shadowOpacity: 0.28,
-      shadowRadius: 18,
+      shadowOffset: { width: 0, height: 3 },
+      shadowOpacity: 0.13,
+      shadowRadius: 9,
+      zIndex: 20,
     },
-    aiFab: {
-      position: 'absolute',
-      right: spacing.md,
-      backgroundColor: c.primary,
-      width: 56,
-      height: 56,
-      borderRadius: 28,
+    statusSegment: { alignItems: 'center', flex: 1, flexDirection: 'row', gap: 5, justifyContent: 'center' },
+    stripDot: { borderRadius: 999, height: 7, width: 7 },
+    stripValue: {
+      color: c.textPrimary,
+      fontSize: 12.5,
+      fontVariant: ['tabular-nums'],
+      fontWeight: '800',
+    },
+    stripLabel: { color: c.textSecondary, fontSize: 10, fontWeight: '700' },
+    aiPill: {
       alignItems: 'center',
-      justifyContent: 'center',
+      backgroundColor: c.primary,
+      borderColor: 'rgba(255,255,255,0.35)',
+      borderRadius: radius.pill,
+      borderWidth: StyleSheet.hairlineWidth,
+      elevation: 6,
+      flexDirection: 'row',
+      gap: 6,
+      paddingHorizontal: 16,
+      paddingVertical: 11,
+      position: 'absolute',
+      right: 12,
       shadowColor: c.shadowColor,
       shadowOffset: { width: 0, height: 4 },
       shadowOpacity: 0.3,
-      shadowRadius: 6,
-      elevation: 6,
-      zIndex: 45,
+      shadowRadius: 8,
+      zIndex: 25,
     },
-    aiFabLabel: {
-      position: 'absolute',
-      right: spacing.md + 56 + spacing.sm,
-      zIndex: 45,
-    },
-    aiFabLabelContainer: {
-      backgroundColor: c.cardBackground,
-      borderColor: c.border,
-      borderWidth: 1,
-      borderRadius: radius.pill,
-      paddingHorizontal: spacing.md,
-      paddingVertical: 8,
-      shadowColor: c.shadowColor,
-      shadowOffset: { width: 0, height: 4 },
-      shadowOpacity: 0.22,
-      shadowRadius: 6,
-      elevation: 6,
-    },
-    aiFabLabelText: {
-      color: c.textPrimary,
-      fontSize: typography.caption,
-      fontWeight: '800',
-    },
-    legendChip: { alignItems: 'center', flexDirection: 'column', gap: 4 },
-    legendTopRow: { alignItems: 'center', flexDirection: 'row', gap: 6 },
-    legendBadge: {
-      alignItems: 'center',
-      borderRadius: radius.pill,
-      height: 24,
-      justifyContent: 'center',
-      width: 24,
-    },
-    legendValue: { color: c.textPrimary, fontSize: 16, fontWeight: '900' },
-    legendLabel: { color: c.textSecondary, fontSize: 11, fontWeight: '700', textAlign: 'center' },
+    aiPillPressed: { opacity: 0.85 },
+    aiPillText: { color: c.onPrimary, fontSize: 13, fontWeight: '900' },
     mapVignette: {
       ...StyleSheet.absoluteFillObject,
-      backgroundColor: 'rgba(6, 13, 24, 0.035)',
-      borderColor: 'rgba(4, 10, 20, 0.12)',
+      backgroundColor: 'rgba(6, 13, 24, 0.022)',
+      borderColor: 'rgba(4, 10, 20, 0.08)',
       borderWidth: 1,
     },
     floatingHeader: {

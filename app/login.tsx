@@ -6,46 +6,37 @@ import React from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import {
   Alert,
-  KeyboardAvoidingView,
   Linking,
   Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   useWindowDimensions,
   View,
 } from 'react-native';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { z } from 'zod';
 
+import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
 import { Button } from '@/src/components/ui/Button';
 import { GlivtLogo } from '@/src/components/GlivtLogo';
 import { TextField } from '@/src/components/ui/TextField';
 import { apiErrorMessage } from '@/src/services/apiError';
 import { authStorage } from '@/src/services/authStorage';
-import {
-  useAdminDemoLoginMutation,
-  useDemoLoginMutation,
-  useDriverDemoLoginMutation,
-  useLoginMutation,
-} from '@/src/services/authApi';
+import { useLoginMutation } from '@/src/services/authApi';
 import { baseApi } from '@/src/services/baseApi';
-import { env } from '@/src/config/env';
 import { normalizeCompanyCode } from '@/src/services/tenantIdentity';
-import { useResolveTenantMutation } from '@/src/services/tenantApi';
 import { clearTenant, setCredentials, setTenant } from '@/src/store/authSlice';
 import { adoptSessionTenant, clearActiveTenant } from '@/src/store/tenantSlice';
 import { useAppDispatch, useAppSelector } from '@/src/store/hooks';
-import { store } from '@/src/store/store';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
 import type { TenantConfig, TokenResponse } from '@/src/types/api';
 
-const DEFAULT_DEMO_CONFIG: TenantConfig = {
-  companyCode: 'DEMO',
-  name: 'Glivt Demo Fleet',
-  appName: 'Glivt Demo',
+const DEFAULT_TENANT_CONFIG: TenantConfig = {
+  companyCode: '',
+  name: 'Glivt Fleet',
+  appName: 'Glivt',
   primaryColor: '#0F172A',
   secondaryColor: '#1E293B',
   enabledModules: ['LIVE_TRACKING', 'REPORTS', 'ALERTS', 'GEOFENCING'],
@@ -61,7 +52,6 @@ const schema = z.object({
 type FormValues = z.infer<typeof schema>;
 
 export default function LoginScreen() {
-  const insets = useSafeAreaInsets();
   const { height: screenHeight } = useWindowDimensions();
   const isSmallScreen = screenHeight < 750;
   const router = useRouter();
@@ -71,15 +61,9 @@ export default function LoginScreen() {
   const tenant = useAppSelector((s) => s.auth.tenantConfig);
   const companyCode = useAppSelector((s) => s.auth.companyCode);
   const [login, { isLoading }] = useLoginMutation();
-  const [demoLogin, { isLoading: isDemoLoading }] = useDemoLoginMutation();
-  const [adminDemoLogin, { isLoading: isAdminDemoLoading }] = useAdminDemoLoginMutation();
-  const [driverDemoLogin, { isLoading: isDriverDemoLoading }] = useDriverDemoLoginMutation();
-  const [resolveTenant, { isLoading: isResolvingDemoTenant }] = useResolveTenantMutation();
   const [formError, setFormError] = React.useState<string | null>(null);
-  const [demoError, setDemoError] = React.useState(false);
-  const showDemoLogin = env.demoMode;
-  const anyLoginLoading =
-    isLoading || isDemoLoading || isAdminDemoLoading || isDriverDemoLoading || isResolvingDemoTenant;
+  const loginAttemptRef = React.useRef(false);
+  const anyLoginLoading = isLoading;
 
   const {
     control,
@@ -92,9 +76,10 @@ export default function LoginScreen() {
 
   const openSession = React.useCallback(
     async (result: TokenResponse, sessionCompanyCode: string) => {
-      const code = normalizeCompanyCode(sessionCompanyCode) || 'DEMO';
+      const code = normalizeCompanyCode(sessionCompanyCode);
+      if (!code) throw new Error('The authenticated session is missing a company code.');
       const activeConfig: TenantConfig = tenant || {
-        ...DEFAULT_DEMO_CONFIG,
+        ...DEFAULT_TENANT_CONFIG,
         companyCode: code,
         name: result.user.companyName || 'Glivt Fleet',
       };
@@ -122,77 +107,28 @@ export default function LoginScreen() {
   );
 
   const onSubmit = handleSubmit(async (values) => {
-    if (anyLoginLoading) return;
+    if (anyLoginLoading || loginAttemptRef.current) return;
+    loginAttemptRef.current = true;
     setFormError(null);
-    setDemoError(false);
     if (!companyCode) {
+      loginAttemptRef.current = false;
       router.replace('/company-code');
       return;
     }
     try {
       const result = await login({
         companyCode,
+        deviceInfo: `${Platform.OS} app`,
         username: values.username,
         password: values.password,
       }).unwrap();
       await openSession(result, companyCode);
     } catch (err) {
       setFormError(apiErrorMessage(err, 'Unable to sign in'));
+    } finally {
+      loginAttemptRef.current = false;
     }
   });
-
-  const onDemoLogin = async () => {
-    if (anyLoginLoading) return;
-    setFormError(null);
-    setDemoError(false);
-    try {
-      let config: TenantConfig;
-      try {
-        config = await resolveTenant('DEMO').unwrap();
-      } catch {
-        config = DEFAULT_DEMO_CONFIG;
-      }
-      await authStorage.saveTenant(config.companyCode, config);
-      dispatch(setTenant({ companyCode: config.companyCode, tenantConfig: config }));
-
-      const result = await demoLogin().unwrap();
-      await openSession(result, config.companyCode);
-    } catch (err) {
-      setDemoError(true);
-      setFormError(apiErrorMessage(err, 'Unable to open demo account'));
-    }
-  };
-
-  const onRoleDemoLogin = async (role: 'admin' | 'driver') => {
-    if (anyLoginLoading) return;
-    setFormError(null);
-    setDemoError(false);
-    try {
-      let config: TenantConfig;
-      try {
-        config = await resolveTenant('DEMO').unwrap();
-      } catch {
-        config = DEFAULT_DEMO_CONFIG;
-      }
-      await authStorage.saveTenant(config.companyCode, config);
-      dispatch(setTenant({ companyCode: config.companyCode, tenantConfig: config }));
-
-      const result =
-        role === 'admin'
-          ? await adminDemoLogin().unwrap()
-          : await driverDemoLogin().unwrap();
-
-      await openSession(result, config.companyCode);
-    } catch (err) {
-      setDemoError(true);
-      setFormError(
-        apiErrorMessage(
-          err,
-          `Unable to open ${role === 'admin' ? 'Admin' : 'Driver'} demo account`
-        )
-      );
-    }
-  };
 
   const contactProvider = () => {
     const phone = tenant?.supportPhone;
@@ -215,16 +151,17 @@ export default function LoginScreen() {
   };
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={styles.flex}>
+    <View style={styles.flex}>
       <View pointerEvents="none" style={styles.ambient}>
         <View style={styles.ambientOrbOne} />
         <View style={styles.ambientOrbTwo} />
         <View style={styles.roadLineOne} />
         <View style={styles.roadLineTwo} />
       </View>
-      <SafeAreaView edges={['top', 'bottom']} style={styles.flex}>
+      {/* flexGrow keeps the laid-out design pixel-identical while there is room,
+          and only lets it scroll once the keyboard takes the space away. */}
+      <KeyboardAwareForm applyBottomInset={false} contentContainerStyle={styles.grow}>
+        <SafeAreaView edges={['top', 'bottom']} style={styles.flex}>
         <View style={styles.contentContainer}>
           
           <View style={styles.upperGroup}>
@@ -273,12 +210,15 @@ export default function LoginScreen() {
                   render={({ field: { onChange, onBlur, value } }) => (
                     <TextField
                       autoCapitalize="none"
+                      autoComplete="username"
                       autoCorrect={false}
+                      importantForAutofill="yes"
                       error={errors.username?.message}
                       label="Username"
                       onBlur={onBlur}
                       onChangeText={onChange}
                       placeholder="Username"
+                      textContentType="username"
                       value={value}
                     />
                   )}
@@ -289,12 +229,17 @@ export default function LoginScreen() {
                   name="password"
                   render={({ field: { onChange, onBlur, value } }) => (
                     <TextField
+                      autoCapitalize="none"
+                      autoComplete="current-password"
+                      autoCorrect={false}
                       error={errors.password?.message}
+                      importantForAutofill="yes"
                       label="Password"
                       onBlur={onBlur}
                       onChangeText={onChange}
                       placeholder="Password"
                       secure
+                      textContentType="password"
                       value={value}
                       onSubmitEditing={onSubmit}
                       returnKeyType="go"
@@ -317,33 +262,12 @@ export default function LoginScreen() {
 
                 <Pressable
                   accessibilityRole="button"
-                  onPress={() =>
-                    Alert.alert(
-                      'Forgot Password',
-                      'Please contact your service provider to reset your password.'
-                    )
-                  }
+                  onPress={contactProvider}
                   style={styles.link}>
                   <Text style={styles.linkText}>Forgot Password?</Text>
                 </Pressable>
               </View>
 
-              <>
-                {demoError ? (
-                  <Text style={styles.demoEndpointText}>
-                    Backend: {env.backendBaseUrl || 'not configured'}
-                  </Text>
-                ) : null}
-                <Button
-                  disabled={anyLoginLoading}
-                  icon="shield-outline"
-                  label={demoError ? 'Retry Super Admin' : 'Super Admin'}
-                  loading={isDemoLoading || isResolvingDemoTenant}
-                  onPress={onDemoLogin}
-                  style={styles.superAdminBtn}
-                  textColor="#2BE6A6"
-                />
-              </>
             </View>
           </View>
 
@@ -369,14 +293,18 @@ export default function LoginScreen() {
           </View>
 
         </View>
-      </SafeAreaView>
-    </KeyboardAvoidingView>
+        </SafeAreaView>
+      </KeyboardAwareForm>
+    </View>
   );
 }
 
 const makeStyles = (c: ThemeColors, isSmallScreen: boolean) =>
   StyleSheet.create({
     flex: { flex: 1, backgroundColor: c.loginBackground },
+    // Fills the viewport so the fixed design is unchanged, then scrolls
+    // only when the keyboard leaves less room than the layout needs.
+    grow: { flexGrow: 1 },
     ambient: {
       ...StyleSheet.absoluteFillObject,
       backgroundColor: c.loginBackground,

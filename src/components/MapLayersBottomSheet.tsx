@@ -41,10 +41,10 @@ const CARD_ITEMS: CardItemDef[] = [
 ];
 
 const MAP_PREVIEW_IMAGES: Record<string, any> = {
-  standard: require('@/assets/images/map_preview_default.png'),
-  satellite: require('@/assets/images/map_preview_satellite.png'),
-  terrain: require('@/assets/images/map_preview_terrain.png'),
-  traffic: require('@/assets/images/map_preview_traffic.png'),
+  standard: require('@/assets/images/map_preview_default.jpg'),
+  satellite: require('@/assets/images/map_preview_satellite.jpg'),
+  terrain: require('@/assets/images/map_preview_terrain.jpg'),
+  traffic: require('@/assets/images/map_preview_traffic.jpg'),
 };
 
 export function MapLayersBottomSheet({

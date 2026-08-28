@@ -9,6 +9,7 @@ import {
   StyleSheet,
   Text,
   View,
+  type GestureResponderEvent,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -17,6 +18,7 @@ import { Button } from '@/src/components/ui/Button';
 import { EmptyView, ErrorRetryView, LoadingView } from '@/src/components/ui/StateViews';
 import { TextField } from '@/src/components/ui/TextField';
 import { apiErrorMessage } from '@/src/services/apiError';
+import { useGetUsersQuery } from '@/src/services/operationsApi';
 import { switchActiveTenant } from '@/src/services/tenantSwitch';
 import {
   useCreateTenantMutation,
@@ -73,8 +75,33 @@ export default function ManageTenantsScreen() {
   const [updateTenant, updateState] = useUpdateTenantMutation();
   const [deleteTenant] = useDeleteTenantMutation();
   const [triggerSwitch] = useSwitchTenantMutation();
+  const adminCandidatesQuery = useGetUsersQuery(
+    { page: 0, size: 100 },
+    { skip: !canManage || formMode !== 'create' }
+  );
+  const adminAssignmentsQuery = useGetTenantsQuery(
+    { page: 0, size: 100 },
+    { skip: !canManage || formMode !== 'create' }
+  );
 
   const rows = tenants.data?.content ?? [];
+  const adminCandidates = React.useMemo(
+    () => {
+      const assignedEmails = new Set(
+        (adminAssignmentsQuery.data?.content ?? [])
+          .map((tenant) => tenant.adminEmail?.trim().toLowerCase())
+          .filter((email): email is string => Boolean(email))
+      );
+      return (adminCandidatesQuery.data?.content ?? []).filter(
+        (member) =>
+          member.status === 'ACTIVE' &&
+          Boolean(member.mobile?.trim()) &&
+          Boolean(member.email?.trim() || member.username.includes('@')) &&
+          !assignedEmails.has((member.email ?? member.username).trim().toLowerCase())
+      );
+    },
+    [adminAssignmentsQuery.data?.content, adminCandidatesQuery.data?.content]
+  );
   const switching = switchState.status === 'switching';
 
   // ------------------------------------------------------------------
@@ -287,7 +314,13 @@ export default function ManageTenantsScreen() {
                 setEditing(item);
                 setFormMode('edit');
               }}
-              onPress={() => confirmSwitch(item)}
+              onPress={() =>
+                router.push({
+                  pathname: '/tenant-details',
+                  params: { tenantId: String(item.id) },
+                })
+              }
+              onSwitch={() => confirmSwitch(item)}
               tenant={item}
             />
           )}
@@ -295,6 +328,21 @@ export default function ManageTenantsScreen() {
       )}
 
       <TenantFormModal
+        adminCandidates={adminCandidates}
+        adminCandidatesError={
+          adminCandidatesQuery.isError || adminAssignmentsQuery.isError
+            ? apiErrorMessage(
+                adminCandidatesQuery.error ?? adminAssignmentsQuery.error,
+                'Available members could not be loaded'
+              )
+            : undefined
+        }
+        adminCandidatesLoading={
+          adminCandidatesQuery.isLoading ||
+          adminCandidatesQuery.isFetching ||
+          adminAssignmentsQuery.isLoading ||
+          adminAssignmentsQuery.isFetching
+        }
         existingTenants={rows}
         mode={formMode ?? 'create'}
         onClose={() => {
@@ -322,6 +370,7 @@ function TenantRow({
   canManage,
   disabled,
   onPress,
+  onSwitch,
   onEdit,
   onDelete,
 }: {
@@ -329,6 +378,7 @@ function TenantRow({
   canManage: boolean;
   disabled: boolean;
   onPress: () => void;
+  onSwitch: () => void;
   onEdit: () => void;
   onDelete: () => void;
 }) {
@@ -394,21 +444,38 @@ function TenantRow({
                 accessibilityLabel={`Edit ${tenant.name}`}
                 disabled={disabled}
                 icon="pencil-outline"
-                onPress={onEdit}
+                onPress={(event) => {
+                  event.stopPropagation();
+                  onEdit();
+                }}
                 tint={c.textSecondary}
               />
               <IconAction
                 accessibilityLabel={`Delete ${tenant.name}`}
                 disabled={disabled || !tenant.canDelete}
                 icon="trash-can-outline"
-                onPress={onDelete}
+                onPress={(event) => {
+                  event.stopPropagation();
+                  onDelete();
+                }}
                 tint={c.danger}
               />
             </>
           ) : null}
           {!tenant.current ? (
+            <IconAction
+              accessibilityLabel={`Switch to ${tenant.name}`}
+              disabled={disabled || status !== 'ACTIVE'}
+              icon="swap-horizontal"
+              onPress={(event) => {
+                event.stopPropagation();
+                onSwitch();
+              }}
+              tint={c.primary}
+            />
+          ) : (
             <MaterialCommunityIcons color={c.primary} name="chevron-right" size={22} />
-          ) : null}
+          )}
         </View>
       </View>
     </Pressable>
@@ -447,7 +514,7 @@ function IconAction({
   accessibilityLabel: string;
   disabled: boolean;
   icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
-  onPress: () => void;
+  onPress: (event: GestureResponderEvent) => void;
   tint: string;
 }) {
   const { colors: c } = useTheme();

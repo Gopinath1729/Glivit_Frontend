@@ -7,12 +7,10 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
-  KeyboardAvoidingView,
   Linking,
   Modal,
   Platform,
   Pressable,
-  PermissionsAndroid,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -25,11 +23,13 @@ import { z } from 'zod';
 
 import { Button } from '@/src/components/ui/Button';
 import { Card } from '@/src/components/ui/Card';
-import MapView, { Circle, Marker } from '@/src/components/maps/NativeMap';
 import { EmptyView, ErrorRetryView, LoadingView } from '@/src/components/ui/StateViews';
 import { TextField } from '@/src/components/ui/TextField';
 import { apiErrorMessage } from '@/src/services/apiError';
+import { GeofencePickerMap } from '@/src/components/maps/GeofencePickerMap';
+import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
 import { useGetAllDevicesQuery } from '@/src/services/devicesApi';
+import { getMapStyleInfo } from '@/src/services/mapStyle';
 import {
   useCreateGeofenceMutation,
   useDeleteGeofenceMutation,
@@ -113,7 +113,12 @@ type Coordinate = {
  * permissions and the underlying API calls are unchanged.
  */
 export default function GeofencesScreen() {
-  const { colors: c } = useTheme();
+  const { colors: c, isDark } = useTheme();
+  // Same style source as the live map, so the picker matches the app theme.
+  const pickerStyleUrl = React.useMemo(
+    () => getMapStyleInfo(isDark ? 'dark' : 'street').webStyleUrl,
+    [isDark]
+  );
   // Drawer navigator already applies the top safe-area inset to the header, so
   // only the bottom inset (Android nav/gesture bar, iPhone home indicator) needs
   // handling here — adding a top inset too would double-pad the screen.
@@ -144,11 +149,11 @@ export default function GeofencesScreen() {
   const [locationLoading, setLocationLoading] = React.useState(false);
   const [searchText, setSearchText] = React.useState('');
   const [selectedPlace, setSelectedPlace] = React.useState<{ name: string; latitude: number; longitude: number } | null>(null);
-  const [onlineSuggestions, setOnlineSuggestions] = React.useState<Array<{ name: string; latitude: number; longitude: number }>>([]);
+  const [onlineSuggestions, setOnlineSuggestions] = React.useState<{ name: string; latitude: number; longitude: number }[]>([]);
   const [isSearchingOnline, setIsSearchingOnline] = React.useState(false);
   const [searchError, setSearchError] = React.useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = React.useState(false);
-  const mapRef = React.useRef<MapView>(null);
+  const reverseGeocodeRequestRef = React.useRef(0);
   const geofences = React.useMemo(() => (Array.isArray(data?.content) ? data.content : []), [data]);
 
   const {
@@ -180,47 +185,65 @@ export default function GeofencesScreen() {
     return Number.isFinite(value) && value > 0 ? Math.min(value * 1000, 100_000) : Number(DEFAULT_FORM.radiusMeters) * 1000;
   }, [watchedRadius]);
 
+  const reverseGeocodeCoordinate = React.useCallback(async (coordinate: Coordinate, requestId: number) => {
+    let name = '';
+
+    if (Platform.OS !== 'web') {
+      try {
+        const addresses = await Location.reverseGeocodeAsync(coordinate);
+        name = formatExpoAddress(addresses[0]);
+      } catch {
+        // Native geocoding can be unavailable on some devices. Nominatim below
+        // is the network fallback and uses the exact same coordinate.
+      }
+    }
+
+    if (!name) {
+      try {
+        const response = await fetch(
+          `https://nominatim.openstreetmap.org/reverse?format=json&lat=${coordinate.latitude}&lon=${coordinate.longitude}`,
+          { headers: { 'User-Agent': 'GlivtTrackerApp/1.0' } }
+        );
+        const payload = response.ok ? await response.json() : null;
+        name = formatNominatimAddress(payload);
+      } catch {
+        // Coordinates remain authoritative even if an address provider is down.
+      }
+    }
+
+    if (requestId !== reverseGeocodeRequestRef.current) return;
+    const resolvedName =
+      name || `Current GPS (${coordinate.latitude.toFixed(5)}, ${coordinate.longitude.toFixed(5)})`;
+    setSearchText(resolvedName);
+    setSelectedPlace({
+      name: resolvedName,
+      latitude: coordinate.latitude,
+      longitude: coordinate.longitude,
+    });
+  }, []);
+
   const setPickedCoordinate = React.useCallback(
-    (coordinate: Coordinate, animate = true, updateAddress = true) => {
+    async (coordinate: Coordinate, animate = true, updateAddress = true) => {
+      if (!isValidCoordinate(coordinate)) {
+        throw new Error('The device returned an invalid GPS coordinate. Please try again.');
+      }
+
       setValue('latitude', coordinate.latitude.toFixed(6), { shouldDirty: true, shouldValidate: true });
       setValue('longitude', coordinate.longitude.toFixed(6), { shouldDirty: true, shouldValidate: true });
       clearErrors(['latitude', 'longitude']);
-      if (animate && Platform.OS !== 'web') {
-        mapRef.current?.animateCamera(
-          { center: coordinate, zoom: 15.5, pitch: 0, heading: 0 },
-          { duration: 360 }
-        );
-      }
+      // No imperative camera move: GeofencePickerMap follows the coordinate it
+      // is given, so writing the fields above is what recentres it.
+      void animate;
       if (updateAddress) {
-        fetch(
-          `https://nominatim.openstreetmap.org/reverse?format=json&lat=${coordinate.latitude}&lon=${coordinate.longitude}`,
-          { headers: { 'User-Agent': 'GlivtTrackerApp/1.0' } }
-        )
-          .then((res) => (res.ok ? res.json() : null))
-          .then((data) => {
-            let name = '';
-            if (data?.display_name) {
-              name = data.display_name.split(',').slice(0, 3).join(',');
-            } else if (data?.address) {
-              const addr = data.address;
-              name = [addr.suburb || addr.neighbourhood, addr.city || addr.town || addr.county]
-                .filter(Boolean)
-                .join(', ');
-            }
-            if (!name) {
-              name = `Locality (${coordinate.latitude.toFixed(4)}, ${coordinate.longitude.toFixed(4)})`;
-            }
-            setSearchText(name);
-            setSelectedPlace({ name, latitude: coordinate.latitude, longitude: coordinate.longitude });
-          })
-          .catch(() => {
-            const name = `Locality (${coordinate.latitude.toFixed(4)}, ${coordinate.longitude.toFixed(4)})`;
-            setSearchText(name);
-            setSelectedPlace({ name, latitude: coordinate.latitude, longitude: coordinate.longitude });
-          });
+        const requestId = ++reverseGeocodeRequestRef.current;
+        await reverseGeocodeCoordinate(coordinate, requestId);
+      } else {
+        // Invalidate an older GPS/address request so it cannot overwrite a
+        // newly searched or manually selected point.
+        reverseGeocodeRequestRef.current += 1;
       }
     },
-    [clearErrors, setValue]
+    [clearErrors, reverseGeocodeCoordinate, setValue]
   );
 
   const openCreate = React.useCallback(() => {
@@ -254,6 +277,7 @@ export default function GeofencesScreen() {
   );
 
   const closeEditor = React.useCallback(() => {
+    reverseGeocodeRequestRef.current += 1;
     setEditorTarget(null);
     setLocationLoading(false);
     setSearchText('');
@@ -337,7 +361,7 @@ export default function GeofencesScreen() {
     if (locationSuggestions.length > 0) {
       const topMatch = locationSuggestions[0];
       setSearchText(topMatch.name);
-      setPickedCoordinate({ latitude: topMatch.latitude, longitude: topMatch.longitude }, true);
+      await setPickedCoordinate({ latitude: topMatch.latitude, longitude: topMatch.longitude }, true);
       return;
     }
 
@@ -357,7 +381,7 @@ export default function GeofencesScreen() {
         if (Number.isFinite(lat) && Number.isFinite(lng)) {
           const placeName = item.display_name ? item.display_name.split(',').slice(0, 3).join(',') : query;
           setSearchText(placeName);
-          setPickedCoordinate({ latitude: lat, longitude: lng }, true);
+          await setPickedCoordinate({ latitude: lat, longitude: lng }, true);
           return;
         }
       }
@@ -372,6 +396,10 @@ export default function GeofencesScreen() {
   const handleCurrentLocation = React.useCallback(async () => {
     setLocationLoading(true);
     clearErrors(['latitude', 'longitude']);
+    reverseGeocodeRequestRef.current += 1;
+    setSelectedPlace(null);
+    setSearchText('');
+    setSearchError(null);
 
     try {
       let coords: Coordinate;
@@ -384,11 +412,46 @@ export default function GeofencesScreen() {
           geo.getCurrentPosition(
             (pos) => resolve({ latitude: pos.coords.latitude, longitude: pos.coords.longitude }),
             (err) => reject(err),
-            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+            { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
           );
         });
       } else {
-        // 1. Check if location services (GPS) are enabled on the device
+        // 1. Ask for foreground permission on every explicit user request. The
+        // OS resolves immediately when it has already been granted.
+        const permissionResult = await Location.requestForegroundPermissionsAsync();
+        if (permissionResult.status !== 'granted') {
+          if (permissionResult.canAskAgain === false) {
+            Alert.alert(
+              'Location Permission Required',
+              'Location permission is permanently denied. Please grant location access in your device settings.',
+              [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'Open Settings', onPress: () => Linking.openSettings().catch(() => undefined) },
+              ]
+            );
+          } else {
+            Alert.alert(
+              'Permission Denied',
+              'Location access was denied. Please allow location access to fill current GPS coordinates.'
+            );
+          }
+          setError('latitude', {
+            message: 'Location permission was denied. Please grant location access.',
+          });
+          return;
+        }
+
+        if (Platform.OS === 'android' && permissionResult.android?.accuracy === 'coarse') {
+          const message = 'Precise location is disabled. Enable precise location for Glivt in device settings.';
+          setError('latitude', { message });
+          Alert.alert('Precise Location Required', message, [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Open Settings', onPress: () => Linking.openSettings().catch(() => undefined) },
+          ]);
+          return;
+        }
+
+        // 2. Check whether a GPS/location provider is enabled.
         let servicesEnabled = false;
         try {
           servicesEnabled = await Location.hasServicesEnabledAsync();
@@ -421,31 +484,9 @@ export default function GeofencesScreen() {
           }
         }
 
-        // 2. Check and request location permissions
-        const permissionResult = await Location.requestForegroundPermissionsAsync();
-        if (permissionResult.status !== 'granted') {
-          if (permissionResult.canAskAgain === false) {
-            Alert.alert(
-              'Location Permission Required',
-              'Location permission is permanently denied. Please grant location access in your device settings.',
-              [
-                { text: 'Cancel', style: 'cancel' },
-                { text: 'Open Settings', onPress: () => Linking.openSettings().catch(() => undefined) },
-              ]
-            );
-          } else {
-            Alert.alert(
-              'Permission Denied',
-              'Location access was denied. Please allow location access to fill current GPS coordinates.'
-            );
-          }
-          setError('latitude', {
-            message: 'Location permission was denied. Please grant location access.',
-          });
-          return;
-        }
-
-        // 3. Obtain high-accuracy current location with a fallback timeout
+        // 3. Force a new navigation-grade fix. This intentionally does not use
+        // getLastKnownPositionAsync, so a cached/search coordinate can never be
+        // mistaken for the device's current position.
         coords = await new Promise<Coordinate>((resolve, reject) => {
           let finished = false;
           const timer = setTimeout(() => {
@@ -453,10 +494,11 @@ export default function GeofencesScreen() {
               finished = true;
               reject(new Error('Location request timed out. Please check your GPS signal and try again.'));
             }
-          }, 10000);
+          }, 15000);
 
           Location.getCurrentPositionAsync({
-            accuracy: Location.Accuracy.High,
+            accuracy: Location.Accuracy.BestForNavigation,
+            mayShowUserSettingsDialog: true,
           })
             .then((pos) => {
               if (!finished) {
@@ -478,12 +520,9 @@ export default function GeofencesScreen() {
         });
       }
 
-      setPickedCoordinate(coords, true, true);
+      await setPickedCoordinate(coords, true, true);
     } catch (err: unknown) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : 'Could not retrieve current GPS position. Please check your location settings.';
+      const msg = describeLocationError(err);
       setError('latitude', { message: msg });
       Alert.alert('GPS Location Error', msg);
     } finally {
@@ -755,15 +794,15 @@ export default function GeofencesScreen() {
           onPress={closeEditor}
           style={styles.editorBackdrop}
         />
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.editorWrap}>
+        <View style={styles.editorWrap}>
           <View style={[styles.editorSheet, { paddingBottom: insets.bottom + spacing.md }]}>
             <View style={styles.editorHandle} />
-            <ScrollView
+            {/* The sheet already carries the bottom inset, so the scroller must
+                not add it a second time. */}
+            <KeyboardAwareForm
+              applyBottomInset={false}
               contentContainerStyle={styles.editorContent}
-              keyboardShouldPersistTaps="handled"
-              showsVerticalScrollIndicator={false}>
+              dismissOnTapOutside={false}>
               <Text style={styles.title}>
                 {editorTarget && editorTarget !== 'new' ? 'Edit Geofence' : 'Create Circle Geofence'}
               </Text>
@@ -792,8 +831,9 @@ export default function GeofencesScreen() {
                   autoCapitalize="words"
                   label="Search location"
                   leftIcon="magnify"
-                  onChangeText={(text) => {
-                    setSearchText(text);
+                   onChangeText={(text) => {
+                     reverseGeocodeRequestRef.current += 1;
+                     setSearchText(text);
                     setSelectedPlace(null);
                     clearErrors(['latitude', 'longitude']);
                   }}
@@ -840,7 +880,7 @@ export default function GeofencesScreen() {
                           onPress={() => {
                             setSearchText(place.name);
                             clearErrors(['latitude', 'longitude']);
-                            setPickedCoordinate({ latitude: place.latitude, longitude: place.longitude }, true, false);
+                            void setPickedCoordinate({ latitude: place.latitude, longitude: place.longitude }, true, false);
                             setSelectedPlace(place);
                           }}
                           style={styles.locationSuggestion}>
@@ -859,7 +899,7 @@ export default function GeofencesScreen() {
                     ) : !isSearchingOnline && searchText.trim().length >= 2 ? (
                       <View style={styles.noResultsBox}>
                         <MaterialCommunityIcons color={c.textMuted} name="map-marker-off-outline" size={18} />
-                        <Text style={styles.noResultsText}>No places found for "{searchText}"</Text>
+                        <Text style={styles.noResultsText}>No places found for &quot;{searchText}&quot;</Text>
                       </View>
                     ) : null}
                     {searchError ? (
@@ -889,42 +929,16 @@ export default function GeofencesScreen() {
                     {locationLoading ? 'Reading GPS...' : 'Use Current Location'}
                   </Text>
                 </Pressable>
-                {Platform.OS !== 'web' ? (
-                  <MapView
-                    ref={mapRef}
-                    initialCamera={{
-                      center: pickedCoordinate,
-                      heading: 0,
-                      pitch: 0,
-                      zoom: 14.8,
-                    }}
-                    onPress={(event) => setPickedCoordinate(event.nativeEvent.coordinate)}
-                    scrollEnabled
-                    style={styles.pickerMap}
-                    toolbarEnabled={false}
-                    zoomEnabled>
-                    <Circle
-                      center={pickedCoordinate}
-                      fillColor="rgba(39, 211, 77, 0.14)"
-                      radius={previewRadius}
-                      strokeColor={c.primary}
-                      strokeWidth={2}
-                    />
-                    <Marker
-                      coordinate={pickedCoordinate}
-                      draggable
-                      onDragEnd={(event) => setPickedCoordinate(event.nativeEvent.coordinate)}
-                    />
-                  </MapView>
-                ) : (
-                  <View style={styles.webMapFallback}>
-                    <MaterialCommunityIcons color={c.primary} name="map-marker-radius-outline" size={28} />
-                    <Text style={styles.webMapFallbackText}>
-                      Map picker is available on mobile. Search suggestions still fill the coordinates here.
-                    </Text>
-                  </View>
-                )}
-                <Text style={styles.mapHint}>Tap the map or drag the pin. The circle updates as radius changes.</Text>
+                <GeofencePickerMap
+                  coordinate={pickedCoordinate}
+                  onChange={(next) => void setPickedCoordinate(next, false)}
+                  radiusMeters={previewRadius}
+                  style={styles.pickerMap}
+                  styleUrl={pickerStyleUrl}
+                />
+                <Text style={styles.mapHint}>
+                  Tap the map or drag the pin. The circle updates as radius changes.
+                </Text>
               </View>
               <View style={styles.row}>
                 <View style={styles.half}>
@@ -1022,9 +1036,9 @@ export default function GeofencesScreen() {
                 onPress={onSubmit}
               />
               <Button label="Cancel" onPress={closeEditor} variant="ghost" />
-            </ScrollView>
+            </KeyboardAwareForm>
           </View>
-        </KeyboardAvoidingView>
+        </View>
       </Modal>
     </View>
   );
@@ -1170,7 +1184,7 @@ function VehicleMultiSelect({
       ) : (
         <View style={styles.noVehiclesSelectedHint}>
           <Text style={styles.noVehiclesSelectedText}>
-            No vehicles assigned yet. Tap "Select Vehicles" to choose.
+            No vehicles assigned yet. Tap &quot;Select Vehicles&quot; to choose.
           </Text>
         </View>
       )}
@@ -1197,7 +1211,7 @@ function VehicleMultiSelect({
 
           <ScrollView style={styles.vehicleListScroll} nestedScrollEnabled showsVerticalScrollIndicator>
             {filteredDevices.length === 0 ? (
-              <Text style={styles.emptyVehicleSearchText}>No vehicles match "{filterText}"</Text>
+              <Text style={styles.emptyVehicleSearchText}>No vehicles match &quot;{filterText}&quot;</Text>
             ) : (
               filteredDevices.map((d) => {
                 const selected = selectedSet.has(d.id);
@@ -1368,6 +1382,75 @@ function finiteNumber(value: unknown) {
   return Number.isFinite(number) ? number : null;
 }
 
+function isValidCoordinate(coordinate: Coordinate): boolean {
+  return (
+    Number.isFinite(coordinate.latitude) &&
+    Number.isFinite(coordinate.longitude) &&
+    Math.abs(coordinate.latitude) <= 90 &&
+    Math.abs(coordinate.longitude) <= 180
+  );
+}
+
+function uniqueAddressParts(parts: (string | null | undefined)[]): string {
+  const seen = new Set<string>();
+  return parts
+    .map((part) => part?.trim())
+    .filter((part): part is string => {
+      if (!part) return false;
+      const key = part.toLocaleLowerCase();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .join(', ');
+}
+
+function formatExpoAddress(address?: Location.LocationGeocodedAddress): string {
+  if (!address) return '';
+  return uniqueAddressParts([
+    uniqueAddressParts([address.streetNumber, address.street]),
+    address.name,
+    address.district,
+    address.subregion,
+    address.city,
+    address.region,
+    address.postalCode,
+    address.country,
+  ]);
+}
+
+function formatNominatimAddress(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return '';
+  const record = payload as {
+    display_name?: unknown;
+    address?: Record<string, unknown>;
+  };
+  if (typeof record.display_name === 'string' && record.display_name.trim()) {
+    return record.display_name.split(',').slice(0, 5).join(',').trim();
+  }
+  const address = record.address ?? {};
+  const read = (key: string) => (typeof address[key] === 'string' ? address[key] as string : undefined);
+  return uniqueAddressParts([
+    read('road'),
+    read('suburb') ?? read('neighbourhood'),
+    read('city') ?? read('town') ?? read('village'),
+    read('state'),
+    read('postcode'),
+    read('country'),
+  ]);
+}
+
+function describeLocationError(error: unknown): string {
+  if (error && typeof error === 'object') {
+    const code = Number((error as { code?: unknown }).code);
+    if (code === 1) return 'Location permission was denied. Please grant location access.';
+    if (code === 2) return 'GPS position is unavailable. Move to an open area and try again.';
+    if (code === 3) return 'Location request timed out. Please check your GPS signal and try again.';
+  }
+  if (error instanceof Error && error.message.trim()) return error.message;
+  return 'Could not retrieve current GPS position. Please check your location settings.';
+}
+
 function formatCoordinate(value: number | null) {
   return value == null ? 'Unavailable' : value.toFixed(4);
 }
@@ -1496,30 +1579,10 @@ const makeStyles = (c: ThemeColors) =>
     currentLocationDisabled: { opacity: 0.72 },
     currentLocationText: { color: c.primary, fontSize: typography.caption, fontWeight: '900' },
     pickerMap: {
-      backgroundColor: c.border,
-      borderRadius: radius.md,
-      height: 210,
-      overflow: 'hidden',
+      height: 230,
       width: '100%',
     },
     mapHint: { color: c.textMuted, fontSize: 11, lineHeight: 15 },
-    webMapFallback: {
-      alignItems: 'center',
-      backgroundColor: c.surface,
-      borderColor: c.border,
-      borderRadius: radius.md,
-      borderWidth: StyleSheet.hairlineWidth,
-      gap: spacing.xs,
-      minHeight: 130,
-      justifyContent: 'center',
-      padding: spacing.md,
-    },
-    webMapFallbackText: {
-      color: c.textSecondary,
-      fontSize: typography.caption,
-      lineHeight: 17,
-      textAlign: 'center',
-    },
     radiusPresetRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginTop: -spacing.xs },
     radiusPreset: {
       alignItems: 'center',

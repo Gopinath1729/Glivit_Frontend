@@ -9,9 +9,7 @@ import {
 
 import { env } from '@/src/config/env';
 import { authStorage } from '@/src/services/authStorage';
-import { demoBaseQuery } from '@/src/services/demoData';
 import {
-  hasValidTenantSession,
   normalizeCompanyCode,
 } from '@/src/services/tenantIdentity';
 import { clearSession, setCredentials, type AuthState } from '@/src/store/authSlice';
@@ -83,17 +81,6 @@ function isAuthEndpoint(args: string | FetchArgs): boolean {
   return url.startsWith('/auth/') || url.startsWith('/tenant/');
 }
 
-function isLiveBackendEndpoint(args: string | FetchArgs): boolean {
-  const url = typeof args === 'string' ? args : args.url;
-  return (
-    url.startsWith('/auth/') ||
-    url === '/ai/chat' ||
-    url === '/tenants' ||
-    url.startsWith('/tenants/') ||
-    url.startsWith('/tenant/')
-  );
-}
-
 /** Tenant switching itself must not be discarded by the stale-tenant guard. */
 function isTenantSwitchEndpoint(args: string | FetchArgs): boolean {
   const url = typeof args === 'string' ? args : args.url;
@@ -143,8 +130,13 @@ const baseQueryWithReauth: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQue
       return result;
     }
 
+    const sessionCode = normalizeCompanyCode(auth.sessionCompanyCode ?? auth.companyCode);
+    if (!sessionCode) {
+      await clearCurrentSession(api);
+      return result;
+    }
     const snapshot: SessionSnapshot = {
-      companyCode: normalizeCompanyCode(auth.companyCode) || 'DEMO',
+      companyCode: sessionCode,
       refreshToken: auth.refreshToken,
       tenantId: auth.user.tenantId,
     };
@@ -227,12 +219,7 @@ const hybridBaseQuery: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQueryEr
   const issuedEpoch = before?.epoch ?? 0;
   const issuedTenantId = before?.activeTenantId ?? null;
 
-  const auth = (api.getState() as StateShape).auth;
-  const isAuthenticated = hasValidTenantSession(auth);
-
-  const result = env.demoMode && !isAuthenticated && !isLiveBackendEndpoint(args)
-    ? await demoBaseQuery(args, api, extraOptions)
-    : await baseQueryWithReauth(args, api, extraOptions);
+  const result = await baseQueryWithReauth(args, api, extraOptions);
 
   const after = (api.getState() as StateShape).tenant;
   const tenantChanged =
@@ -267,6 +254,7 @@ export const baseApi = createApi({
     'Settings',
     'Tenant',
     'User',
+    'VehicleDocument',
   ],
   endpoints: () => ({}),
 });

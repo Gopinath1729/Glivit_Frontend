@@ -1,8 +1,10 @@
 import { baseApi, unwrap } from '@/src/services/baseApi';
 import type {
   ApiResponse,
+  ManagedUserDto,
   PageResponse,
   TenantCreateRequest,
+  TenantMemberRole,
   TenantSummary,
   TenantSwitchResponse,
   TenantUpdateRequest,
@@ -39,6 +41,25 @@ export const tenantsApi = baseApi.injectEndpoints({
       transformResponse: (response: ApiResponse<PageResponse<TenantSummary>>) => unwrap(response),
       providesTags: ['Tenant'],
     }),
+    getTenant: build.query<TenantSummary, number>({
+      query: (id) => ({ url: `/tenants/${id}` }),
+      transformResponse: (response: ApiResponse<TenantSummary>) => unwrap(response),
+      providesTags: (_result, _error, id) => [{ type: 'Tenant', id }],
+    }),
+    getTenantMembers: build.query<
+      PageResponse<ManagedUserDto>,
+      { id: number; role?: TenantMemberRole; search?: string; page?: number; size?: number }
+    >({
+      query: ({ id, role = 'ALL', search, page = 0, size = 50 }) => ({
+        url: `/tenants/${id}/members`,
+        params: { role, ...(search ? { search } : {}), page, size },
+      }),
+      transformResponse: (response: ApiResponse<PageResponse<ManagedUserDto>>) => unwrap(response),
+      providesTags: (_result, _error, { id }) => [
+        { type: 'Tenant', id },
+        { type: 'User', id: `TENANT-${id}` },
+      ],
+    }),
     createTenant: build.mutation<TenantSummary, TenantCreateRequest>({
       query: (body) => ({ url: '/tenants', method: 'POST', body }),
       transformResponse: (response: ApiResponse<TenantSummary>) => unwrap(response),
@@ -73,6 +94,8 @@ export const tenantsApi = baseApi.injectEndpoints({
 export const {
   useCreateTenantMutation,
   useDeleteTenantMutation,
+  useGetTenantMembersQuery,
+  useGetTenantQuery,
   useGetTenantsQuery,
   useSwitchTenantMutation,
   useUpdateTenantMutation,

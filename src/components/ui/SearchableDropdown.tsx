@@ -10,6 +10,7 @@ import {
   View,
 } from 'react-native';
 
+import { KeyboardLift } from '@/src/components/ui/KeyboardAwareForm';
 import { TextField } from '@/src/components/ui/TextField';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
@@ -143,6 +144,10 @@ export function SearchableDropdown({
             style={StyleSheet.absoluteFill}
           />
 
+          {/* The card is pinned to the bottom of the screen, which is exactly
+              where the keyboard lands -- and the search field autofocuses, so
+              without this the sheet opens already hidden behind the IME. */}
+          <KeyboardLift useSafeArea={false}>
           <View style={styles.modalCard}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>{label || 'Select'}</Text>
@@ -209,6 +214,7 @@ export function SearchableDropdown({
               }}
             />
           </View>
+          </KeyboardLift>
         </View>
       </Modal>
     </View>

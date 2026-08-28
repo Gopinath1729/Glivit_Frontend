@@ -26,6 +26,8 @@ import type {
   TenantConfig,
   TenantSummary,
   TokenResponse,
+  VehicleDocumentContent,
+  VehicleDocumentDto,
 } from '@/src/types/api';
 // Type-only import (erased at compile time), so no runtime import cycle with
 // aiApi -> baseApi -> demoData.
@@ -126,7 +128,7 @@ const DEMO_VEHICLE_NAMES: Record<number, string> = {
 const DEMO_DEVICES: DeviceDetail[] = [
   makeDevice(1, 'TN20CM7677', 'CAR', 'RUNNING', 12.9718, 77.5946, 46, 'MG Road, Bengaluru'),
   makeDevice(2, 'KA05MJ1234', 'TRUCK', 'STOPPED', 12.9352, 77.6245, 0, 'Koramangala, Bengaluru'),
-  makeDevice(3, 'KA01AB9999', 'BUS', 'IDLE', 12.9611, 77.6387, 3, 'Indiranagar, Bengaluru'),
+  makeDevice(3, 'KA01AB9999', 'BUS', 'STOPPED', 12.9611, 77.6387, 3, 'Indiranagar, Bengaluru'),
   makeDevice(4, 'TN09XY4321', 'BIKE', 'NO_DATA', 13.0102, 77.559, 0, 'Hebbal, Bengaluru'),
   makeDevice(5, 'KA53MX2200', 'MIXER_TRUCK', 'INACTIVE', 12.9081, 77.6476, 0, 'HSR Layout, Bengaluru'),
   makeDevice(6, 'KA02CJ7788', 'HEAVY_MACHINERY', 'EXPIRED', 12.9986, 77.5966, 0, 'Malleshwaram, Bengaluru'),
@@ -264,6 +266,8 @@ const DEMO_GEOFENCES: GeofenceDto[] = [
 const DEMO_COMMANDS: CommandDto[] = [];
 const DEMO_REPORTS: ReportDto[] = [];
 const DEMO_AUDIT: AuditDto[] = [];
+const DEMO_DOCUMENTS: VehicleDocumentDto[] = [];
+const DEMO_DOCUMENT_CONTENT = new Map<number, string>();
 
 let DEMO_SETTINGS: SettingsDto = {
   distanceUnit: 'KM',
@@ -318,7 +322,7 @@ function makeDevice(
     longitude: safeLng,
     speed: safeSpeed,
     course: safeCourse,
-    ignition: safeState === 'RUNNING' || safeState === 'IDLE',
+    ignition: safeState === 'RUNNING',
     gpsValid: safeState !== 'NO_DATA',
     address: safeAddress,
     lastUpdate: new Date(NOW - (safeState === 'RUNNING' ? safeId * 10_000 : safeId * 60_000)).toISOString(),
@@ -388,7 +392,6 @@ function demoSummary(): DashboardSummary {
   const counts: Record<string, number> = {
     RUNNING: 0,
     STOPPED: 0,
-    IDLE: 0,
     INACTIVE: 0,
     NO_DATA: 0,
     EXPIRED: 0,
@@ -875,7 +878,19 @@ const demoBaseQueryImpl: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQuery
       last: true,
     });
   }
-  if (/^\/tenants\/\d+/.test(url)) {
+  if (/^\/tenants\/\d+\/members$/.test(url)) {
+    const requestedRole = String(params.role ?? 'ALL');
+    const filteredMembers = DEMO_USERS.filter((member) => {
+      if (requestedRole === 'ALL') return true;
+      if (requestedRole === 'ADMIN') {
+        return ['SUPER_ADMIN', 'ADMIN', 'TENANT_ADMIN'].includes(member.role);
+      }
+      if (requestedRole === 'USER') return member.role === 'COMPANY_USER';
+      return member.role === 'DRIVER';
+    });
+    return envelope(pageOf(filteredMembers, Number(params.page ?? 0), Number(params.size ?? 50)));
+  }
+  if (/^\/tenants\/\d+$/.test(url)) {
     if (method === 'GET') {
       return envelope(demoTenantRow());
     }
@@ -930,6 +945,63 @@ const demoBaseQueryImpl: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQuery
       return envelope(null);
     }
     return index >= 0 ? envelope(DEMO_DEVICES[index]) : notFound('Device not found');
+  }
+  const vehicleDocumentsMatch = url.match(/^\/devices\/(\d+)\/documents$/);
+  if (vehicleDocumentsMatch) {
+    const deviceId = Number(vehicleDocumentsMatch[1]);
+    if (!DEMO_DEVICES.some((device) => device.id === deviceId)) return notFound('Device not found');
+    if (method === 'POST' && body) {
+      const id = nextId(DEMO_DOCUMENTS);
+      const now = new Date().toISOString();
+      const created: VehicleDocumentDto = {
+        id,
+        deviceId,
+        name: String(body.name ?? body.fileName ?? 'Vehicle document'),
+        documentType: String(body.documentType ?? 'OTHER').toUpperCase(),
+        fileName: String(body.fileName ?? `vehicle-document-${id}`),
+        contentType: String(body.contentType ?? 'application/octet-stream'),
+        sizeBytes: Number(body.sizeBytes ?? 0),
+        expiryDate: body.expiryDate ? String(body.expiryDate) : null,
+        notes: body.notes ? String(body.notes) : null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      DEMO_DOCUMENTS.unshift(created);
+      DEMO_DOCUMENT_CONTENT.set(id, String(body.contentBase64 ?? ''));
+      audit('CREATE_VEHICLE_DOCUMENT', 'VEHICLE_DOCUMENT', String(id), `Device ${deviceId}`);
+      return envelope(created);
+    }
+    return envelope(DEMO_DOCUMENTS.filter((document) => document.deviceId === deviceId));
+  }
+  const vehicleDocumentContentMatch = url.match(
+    /^\/devices\/(\d+)\/documents\/(\d+)\/content$/
+  );
+  if (vehicleDocumentContentMatch) {
+    const deviceId = Number(vehicleDocumentContentMatch[1]);
+    const documentId = Number(vehicleDocumentContentMatch[2]);
+    const found = DEMO_DOCUMENTS.find(
+      (document) => document.id === documentId && document.deviceId === deviceId
+    );
+    if (!found) return notFound('Vehicle document not found');
+    const content: VehicleDocumentContent = {
+      fileName: found.fileName,
+      contentType: found.contentType,
+      content: DEMO_DOCUMENT_CONTENT.get(documentId) ?? '',
+    };
+    return envelope(content);
+  }
+  const vehicleDocumentMatch = url.match(/^\/devices\/(\d+)\/documents\/(\d+)$/);
+  if (vehicleDocumentMatch && method === 'DELETE') {
+    const deviceId = Number(vehicleDocumentMatch[1]);
+    const documentId = Number(vehicleDocumentMatch[2]);
+    const index = DEMO_DOCUMENTS.findIndex(
+      (document) => document.id === documentId && document.deviceId === deviceId
+    );
+    if (index < 0) return notFound('Vehicle document not found');
+    DEMO_DOCUMENTS.splice(index, 1);
+    DEMO_DOCUMENT_CONTENT.delete(documentId);
+    audit('DELETE_VEHICLE_DOCUMENT', 'VEHICLE_DOCUMENT', String(documentId), `Device ${deviceId}`);
+    return envelope(null);
   }
   if (url === '/projects') {
     if (method === 'POST' && body) {

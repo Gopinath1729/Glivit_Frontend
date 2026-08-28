@@ -40,7 +40,17 @@ function saveInBrowser(content: string, contentType: string, fileName: string): 
   if (typeof document === 'undefined' || typeof URL === 'undefined') {
     throw new Error('Browser download is unavailable');
   }
-  const blob = new Blob([content], { type: contentType });
+  const isBinary = !contentType.includes('text/') && !contentType.includes('csv');
+  let body: BlobPart = content;
+  if (isBinary) {
+    const decoded = atob(content);
+    const bytes = new Uint8Array(decoded.length);
+    for (let index = 0; index < decoded.length; index += 1) {
+      bytes[index] = decoded.charCodeAt(index);
+    }
+    body = bytes;
+  }
+  const blob = new Blob([body], { type: contentType });
   const uri = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = uri;
@@ -98,7 +108,7 @@ export async function saveReportFile(
       if (file.exists) {
         try {
           file.delete();
-        } catch (e) {
+        } catch {
           // Best-effort cleanup
         }
       }

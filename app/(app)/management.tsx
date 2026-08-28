@@ -7,7 +7,6 @@ import {
   Pressable,
   RefreshControl,
   ScrollView,
-  FlatList,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -18,7 +17,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { DeviceCreateForm } from '@/src/components/DeviceCreateForm';
 import { Button } from '@/src/components/ui/Button';
 import { Card } from '@/src/components/ui/Card';
-import { Chip, EmptyLine, RowCard } from '@/src/components/ui/ModulePrimitives';
+import { Chip, EmptyLine } from '@/src/components/ui/ModulePrimitives';
+import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
 import { TextField } from '@/src/components/ui/TextField';
 import { P } from '@/src/constants/permissions';
 import { apiErrorMessage } from '@/src/services/apiError';
@@ -33,7 +33,6 @@ import {
   useDeleteProjectMutation,
   useCreateUserMutation,
   useDeleteUserMutation,
-  useGetAuditQuery,
   useGetProjectsQuery,
   useGetUsersQuery,
   useUpdateUserMutation,
@@ -42,19 +41,18 @@ import { useAppSelector, useHasPermission, useCanManageTenants } from '@/src/sto
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
 import type { ManagedUserDto, ProjectDto } from '@/src/types/api';
-import CommandsScreen from './commands';
 import ManageTenantsScreen from './manage-tenants';
 
-type PrimaryTab = 'management' | 'tenants' | 'commands';
-type SubTab = 'devices' | 'users' | 'projects' | 'audit';
-type Tab = PrimaryTab | SubTab;
-type UserRole = 'ADMIN' | 'DRIVER';
+type PrimaryTab = 'management' | 'tenants';
+type SubTab = 'devices' | 'users' | 'projects';
+type UserRole = 'ADMIN' | 'COMPANY_USER' | 'DRIVER';
+// Creating an admin or a driver never asks for a password: the account is
+// provisioned without one and the person signs in with their Microsoft account,
+// so there is no credential to type, confirm, or get wrong here.
 type NewUserDraft = {
   name: string;
   username: string;
   mobile: string;
-  password?: string;
-  confirmPassword?: string;
   role: UserRole;
 };
 
@@ -62,10 +60,16 @@ const EMPTY_USER: NewUserDraft = {
   name: '',
   username: '',
   mobile: '',
-  password: '',
-  confirmPassword: '',
   role: 'ADMIN',
 };
+
+const STRONG_PASSWORD = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{12,72}$/;
+
+function memberRoleLabel(role: ManagedUserDto['role'] | UserRole) {
+  if (role === 'DRIVER') return 'Driver';
+  if (role === 'COMPANY_USER') return 'User';
+  return 'Admin';
+}
 
 export default function ManagementScreen() {
   const { colors: c } = useTheme();
@@ -75,30 +79,28 @@ export default function ManagementScreen() {
   const canDevices = useHasPermission(P.CREATE_DEVICE);
   const canUsers = useHasPermission(P.MANAGE_USERS);
   const canProjects = useHasPermission(P.MANAGE_PROJECTS);
-  const canAudit = useHasPermission(P.VIEW_AUDIT_LOGS);
-  const canCommands = useHasPermission(P.SEND_COMMANDS);
   const canManageTenants = useCanManageTenants();
-  const canManagement = canDevices || canUsers || canProjects || canAudit;
+  const canManagement = canDevices || canUsers || canProjects;
   const availablePrimaryTabs = useMemo(
     () =>
       [
         canManagement && 'management',
         canManageTenants && 'tenants',
-        canCommands && 'commands',
       ].filter(Boolean) as PrimaryTab[],
-    [canManagement, canManageTenants, canCommands]
+    [canManagement, canManageTenants]
   );
   const [primaryTab, setPrimaryTab] = useState<PrimaryTab>(availablePrimaryTabs[0] ?? 'management');
 
+  // Tab order is Devices -> Projects -> Users; the sub-tab strip renders this
+  // array in order, so this is the single place that decides it.
   const availableSubTabs = useMemo(
     () =>
       [
         canDevices && 'devices',
-        canUsers && 'users',
         canProjects && 'projects',
-        canAudit && 'audit',
+        canUsers && 'users',
       ].filter(Boolean) as SubTab[],
-    [canDevices, canUsers, canProjects, canAudit]
+    [canDevices, canUsers, canProjects]
   );
   const [subTab, setSubTab] = useState<SubTab>(availableSubTabs[0] ?? 'devices');
 
@@ -106,7 +108,7 @@ export default function ManagementScreen() {
   const [deviceModalVisible, setDeviceModalVisible] = useState(false);
   const [selectedDeviceForEdit, setSelectedDeviceForEdit] = useState<any | null>(null);
 
-  // Users tab role filter & creation modal state
+  // Members tab role filter & creation modal state
   const [userRoleTab, setUserRoleTab] = useState<UserRole>('ADMIN');
   const [userModalVisible, setUserModalVisible] = useState(false);
 
@@ -134,27 +136,23 @@ export default function ManagementScreen() {
 
   const projects = useGetProjectsQuery(undefined, { skip: !canProjects });
   const users = useGetUsersQuery({ role: userRoleTab, size: 50 }, { skip: !canUsers });
-  const audit = useGetAuditQuery({ size: 50 }, { skip: !canAudit });
 
   const [createProject, projectState] = useCreateProjectMutation();
   const [updateProject, updateProjectState] = useUpdateProjectMutation();
   const [deleteProject] = useDeleteProjectMutation();
   const [createUser, userState] = useCreateUserMutation();
   const [updateUser, updateUserState] = useUpdateUserMutation();
-  const [deleteUser, deleteUserState] = useDeleteUserMutation();
+  const [deleteUser] = useDeleteUserMutation();
 
   const [newUser, setNewUser] = useState<NewUserDraft>(EMPTY_USER);
 
   const filteredUsers = useMemo(() => {
     const content = users.data?.content ?? [];
-    if (userRoleTab === 'DRIVER') {
-      return content.filter((u) => u.role === 'DRIVER');
-    }
-    return content.filter((u) => u.role !== 'DRIVER');
+    return content.filter((u) => u.role === userRoleTab);
   }, [users.data?.content, userRoleTab]);
 
   const openCreateUserModal = useCallback((role: UserRole) => {
-    setNewUser({ name: '', username: '', mobile: '', password: '', confirmPassword: '', role });
+    setNewUser({ name: '', username: '', mobile: '', role });
     setUserModalVisible(true);
   }, []);
 
@@ -173,10 +171,12 @@ export default function ManagementScreen() {
 
   const submitEditUser = async () => {
     if (!selectedUserForEdit) return;
-    const isDriver = selectedUserForEdit.role === 'DRIVER';
     if (editUserDraft.password) {
-      if (editUserDraft.password.length < 6) {
-        Alert.alert('Validation Error', 'Password must be at least 6 characters.');
+      if (!STRONG_PASSWORD.test(editUserDraft.password)) {
+        Alert.alert(
+          'Validation Error',
+          'Password must be 12-72 characters and include uppercase, lowercase, number and symbol.'
+        );
         return;
       }
       if (editUserDraft.password !== editUserDraft.confirmPassword) {
@@ -200,11 +200,11 @@ export default function ManagementScreen() {
       setSelectedUserForEdit(null);
       void users.refetch();
       Alert.alert(
-        isDriver ? 'Driver updated' : 'Admin updated',
+        `${memberRoleLabel(selectedUserForEdit.role)} updated`,
         `${editUserDraft.name.trim()} has been updated successfully.`
       );
     } catch (err) {
-      Alert.alert(isDriver ? 'Driver not updated' : 'Admin not updated', apiErrorMessage(err));
+      Alert.alert(`${memberRoleLabel(selectedUserForEdit.role)} not updated`, apiErrorMessage(err));
     }
   };
 
@@ -241,15 +241,13 @@ export default function ManagementScreen() {
   const refreshing =
     (canDevices && allDevices.isFetching) ||
     (canProjects && projects.isFetching) ||
-    (canUsers && users.isFetching) ||
-    (canAudit && audit.isFetching);
+    (canUsers && users.isFetching);
 
   const refreshAll = useCallback(() => {
     if (canDevices) void allDevices.refetch();
     if (canProjects) void projects.refetch();
     if (canUsers) void users.refetch();
-    if (canAudit) void audit.refetch();
-  }, [canAudit, canDevices, canProjects, canUsers]);
+  }, [allDevices, canDevices, canProjects, canUsers, projects, users]);
 
   const submitProjectModal = async () => {
     if (!editProjectName.trim()) {
@@ -277,21 +275,11 @@ export default function ManagementScreen() {
 
 
   const submitUser = async () => {
-    const isDriver = newUser.role === 'DRIVER';
-    if (!newUser.password || newUser.password.length < 6) {
-      Alert.alert('Validation Error', 'Password must be at least 6 characters.');
-      return;
-    }
-    if (newUser.password !== newUser.confirmPassword) {
-      Alert.alert('Validation Error', 'Password and confirm password do not match.');
-      return;
-    }
     try {
       await createUser({
         username: newUser.username.trim(),
         name: newUser.name.trim(),
         mobile: newUser.mobile.trim(),
-        password: newUser.password,
         role: newUser.role,
         status: 'ACTIVE',
         permissions: {},
@@ -300,13 +288,11 @@ export default function ManagementScreen() {
       setNewUser(EMPTY_USER);
       void users.refetch();
       Alert.alert(
-        isDriver ? 'Driver created' : 'Admin created',
-        isDriver
-          ? `${newUser.name.trim()} can sign in using their registered email and password.`
-          : `${newUser.name.trim()} can sign in using their registered email and password.`
+        `${memberRoleLabel(newUser.role)} created`,
+        `${newUser.name.trim()} can sign in with their registered Microsoft account ID/email.`
       );
     } catch (err) {
-      Alert.alert(isDriver ? 'Driver not saved' : 'Admin not saved', apiErrorMessage(err));
+      Alert.alert(`${memberRoleLabel(newUser.role)} not saved`, apiErrorMessage(err));
     }
   };
 
@@ -319,13 +305,13 @@ export default function ManagementScreen() {
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
-        contentContainerStyle={[styles.tabRow, { paddingHorizontal: spacing.md, paddingVertical: spacing.sm }]}
+        contentContainerStyle={[styles.tabRow, { paddingHorizontal: spacing.sm, paddingVertical: spacing.xs }]}
         style={styles.tabRowScrollView}>
         {availablePrimaryTabs.map((value) => (
           <Chip
             key={value}
             active={primaryTab === value}
-            label={value === 'management' ? 'Management' : value === 'tenants' ? 'Manage Tenants' : 'Device Commands'}
+            label={value === 'management' ? 'Management' : 'Manage Tenants'}
             onPress={() => setPrimaryTab(value)}
           />
         ))}
@@ -335,7 +321,7 @@ export default function ManagementScreen() {
         <ScrollView
           horizontal
           showsHorizontalScrollIndicator={false}
-          contentContainerStyle={[styles.subTabRow, { paddingHorizontal: spacing.md }]}
+          contentContainerStyle={[styles.subTabRow, { paddingHorizontal: spacing.sm }]}
           style={styles.subTabRowScrollView}>
           {availableSubTabs.map((value) => {
             const isActive = subTab === value;
@@ -345,7 +331,7 @@ export default function ManagementScreen() {
                 onPress={() => setSubTab(value)}
                 style={[styles.subTabItem, isActive && styles.subTabItemActive]}>
                 <Text style={[styles.subTabItemText, isActive && styles.subTabItemTextActive]}>
-                  {value === 'devices' ? 'Devices' : value === 'users' ? 'Users' : value === 'projects' ? 'Projects' : 'Audit'}
+                  {value === 'devices' ? 'Devices' : value === 'users' ? 'Members' : 'Projects'}
                 </Text>
               </Pressable>
             );
@@ -353,7 +339,7 @@ export default function ManagementScreen() {
         </ScrollView>
       ) : null}
 
-      {primaryTab === 'management' && ['devices', 'users', 'projects', 'audit'].includes(subTab) ? (
+      {primaryTab === 'management' && ['devices', 'users', 'projects'].includes(subTab) ? (
         <ScrollView
           contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + spacing.xl }]}
           refreshControl={
@@ -419,8 +405,16 @@ export default function ManagementScreen() {
                       <Text style={styles.detailValue}>{device.category || 'GPS'}</Text>
                     </View>
                     <View style={styles.deviceDetailItem}>
-                      <Text style={styles.detailLabel}>SIM</Text>
-                      <Text style={styles.detailValue}>{device.simNumber || device.simProvider || 'No SIM'}</Text>
+                      {/* A phone tracker has no SIM of its own, so labelling the
+                          row "SIM / No SIM" read as a fault rather than a fact. */}
+                      <Text style={styles.detailLabel}>
+                        {device.sourceType === 'MOBILE_GPS' ? 'Source' : 'SIM'}
+                      </Text>
+                      <Text style={styles.detailValue}>
+                        {device.sourceType === 'MOBILE_GPS'
+                          ? 'Mobile GPS'
+                          : device.simNumber || device.simProvider || 'No SIM'}
+                      </Text>
                     </View>
                     <View style={styles.deviceDetailItem}>
                       <Text style={styles.detailLabel}>Driver</Text>
@@ -537,13 +531,13 @@ export default function ManagementScreen() {
           </Card>
         ) : null}
 
-        {/* Users Tab */}
+        {/* Members Tab */}
         {subTab === 'users' && canUsers ? (
           <Card style={[styles.form, { flex: 1 }]}>
             <View style={styles.titleRow}>
-              <Text style={styles.title}>Users & Drivers</Text>
+              <Text style={styles.title}>Members</Text>
               <TouchableOpacity
-                accessibilityLabel={`Create ${userRoleTab === 'DRIVER' ? 'Driver' : 'Admin'}`}
+                accessibilityLabel={`Create ${memberRoleLabel(userRoleTab)}`}
                 accessibilityRole="button"
                 activeOpacity={0.75}
                 onPress={() => openCreateUserModal(userRoleTab)}
@@ -552,22 +546,22 @@ export default function ManagementScreen() {
               </TouchableOpacity>
             </View>
             <Text style={styles.sectionHint}>
-              Select Admin or Driver to view matching users. Tap the + icon on the right to create a new user with the selected role.
+              Select Admin, User, or Driver to view matching members. Tap + to create a member with the selected role.
             </Text>
 
             <View style={styles.roleFilterRow}>
-              {(['ADMIN', 'DRIVER'] as const).map((role) => (
+              {(['ADMIN', 'COMPANY_USER', 'DRIVER'] as const).map((role) => (
                 <Chip
                   key={role}
                   active={userRoleTab === role}
-                  label={role === 'DRIVER' ? 'Driver' : 'Admin'}
+                  label={memberRoleLabel(role)}
                   onPress={() => setUserRoleTab(role)}
                 />
               ))}
             </View>
 
             <ListState
-              emptyText={userRoleTab === 'DRIVER' ? 'No drivers found.' : 'No admin users found.'}
+              emptyText={`No ${memberRoleLabel(userRoleTab).toLowerCase()} members found.`}
               error={users.error}
               isError={users.isError}
               isLoading={users.isLoading}
@@ -615,7 +609,7 @@ export default function ManagementScreen() {
                     <View style={styles.deviceDetailItem}>
                       <Text style={styles.detailLabel}>Role</Text>
                       <Text style={styles.detailValue}>
-                        {user.role === 'DRIVER' ? 'Driver' : 'Admin'}
+                        {memberRoleLabel(user.role)}
                       </Text>
                     </View>
                     {user.mobile ? (
@@ -753,35 +747,7 @@ export default function ManagementScreen() {
           </Card>
         ) : null}
 
-        {subTab === 'audit' && canAudit ? (
-          <Card style={[styles.form, { flex: 1 }]}>
-            <Text style={styles.title}>Audit Logs</Text>
-            <ListState
-              emptyText="No audit entries yet."
-              error={audit.error}
-              isError={audit.isError}
-              isLoading={audit.isLoading}
-              isEmpty={(audit.data?.content.length ?? 0) === 0}
-              onRetry={audit.refetch}
-              styles={styles}
-              tint={c.primary}
-            />
-            {audit.data?.content.map((entry) => (
-              <RowCard
-                key={entry.id}
-                icon="shield-search"
-                title={entry.action}
-                meta={`${entry.username ?? 'system'} | ${entry.entityType ?? ''} ${entry.entityId ?? ''}`}
-              />
-            )) ?? null}
-          </Card>
-        ) : null}
       </ScrollView>
-      ) : null}
-
-      {/* Device Commands Tab */}
-      {primaryTab === 'commands' && canCommands ? (
-        <CommandsScreen />
       ) : null}
 
       {/* Manage Tenants Tab */}
@@ -828,11 +794,11 @@ export default function ManagementScreen() {
                 </Pressable>
               </View>
 
-              <ScrollView
+              {/* The sheet already applies the bottom inset. */}
+              <KeyboardAwareForm
+                applyBottomInset={false}
                 contentContainerStyle={styles.modalScrollBody}
-                keyboardShouldPersistTaps="handled"
-                nestedScrollEnabled
-                showsVerticalScrollIndicator={true}
+                dismissOnTapOutside={false}
                 style={styles.modalScrollView}>
                 <DeviceCreateForm
                   initialDevice={selectedDeviceForEdit}
@@ -846,13 +812,13 @@ export default function ManagementScreen() {
                     void allDevices.refetch();
                   }}
                 />
-              </ScrollView>
+              </KeyboardAwareForm>
             </View>
           </View>
         </Modal>
       ) : null}
 
-      {/* User Creation Modal */}
+      {/* Member Creation Modal */}
       {primaryTab === 'management' && subTab === 'users' && canUsers ? (
         <Modal
           animationType="slide"
@@ -870,21 +836,21 @@ export default function ManagementScreen() {
               <View style={styles.modalHandle} />
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>
-                  {newUser.role === 'DRIVER' ? 'Create Driver' : 'Create Admin'}
+                  Create {memberRoleLabel(newUser.role)}
                 </Text>
                 <Pressable onPress={() => setUserModalVisible(false)} style={styles.closeButton}>
                   <MaterialCommunityIcons color={c.textSecondary} name="close" size={20} />
                 </Pressable>
               </View>
 
-              <ScrollView
+              {/* The sheet already applies the bottom inset. */}
+              <KeyboardAwareForm
+                applyBottomInset={false}
                 contentContainerStyle={styles.modalScrollBody}
-                keyboardShouldPersistTaps="handled"
-                nestedScrollEnabled
-                showsVerticalScrollIndicator={true}
+                dismissOnTapOutside={false}
                 style={styles.modalScrollView}>
                 <Text style={styles.sectionHint}>
-                  Users authenticate using their Microsoft account ID/email. Drivers get a login and driver record for vehicle assignment.
+                  Members authenticate using their Microsoft account ID/email. Drivers also get a driver record for vehicle assignment.
                 </Text>
 
                 <TextField
@@ -907,46 +873,24 @@ export default function ManagementScreen() {
                   placeholder="+91 98765 43210"
                   value={newUser.mobile}
                 />
-                <TextField
-                  label="Password"
-                  onChangeText={(password) => setNewUser((v) => ({ ...v, password }))}
-                  placeholder="Enter password (min 6 characters)"
-                  secure
-                  value={newUser.password ?? ''}
-                />
-                <TextField
-                  error={
-                    newUser.confirmPassword && newUser.confirmPassword !== newUser.password
-                      ? 'Passwords do not match'
-                      : undefined
-                  }
-                  label="Confirm password"
-                  onChangeText={(confirmPassword) => setNewUser((v) => ({ ...v, confirmPassword }))}
-                  placeholder="Re-enter password"
-                  secure
-                  value={newUser.confirmPassword ?? ''}
-                />
 
                 <Button
                   disabled={
                     !newUser.name.trim() ||
                     !newUser.username.trim() ||
-                    !newUser.mobile.trim() ||
-                    !newUser.password ||
-                    newUser.password.length < 6 ||
-                    newUser.password !== newUser.confirmPassword
+                    !newUser.mobile.trim()
                   }
-                  label={newUser.role === 'DRIVER' ? 'Create driver' : 'Create admin'}
+                  label={`Create ${memberRoleLabel(newUser.role).toLowerCase()}`}
                   loading={userState.isLoading}
                   onPress={submitUser}
                 />
-              </ScrollView>
+              </KeyboardAwareForm>
             </View>
           </View>
         </Modal>
       ) : null}
 
-      {/* Edit User Modal */}
+      {/* Edit Member Modal */}
       {selectedUserForEdit && canUsers ? (
         <Modal
           animationType="slide"
@@ -964,18 +908,18 @@ export default function ManagementScreen() {
               <View style={styles.modalHandle} />
               <View style={styles.modalHeader}>
                 <Text style={styles.modalTitle}>
-                  {selectedUserForEdit.role === 'DRIVER' ? 'Edit Driver' : 'Edit Admin'}
+                  Edit {memberRoleLabel(selectedUserForEdit.role)}
                 </Text>
                 <Pressable onPress={() => setEditUserModalVisible(false)} style={styles.closeButton}>
                   <MaterialCommunityIcons color={c.textSecondary} name="close" size={20} />
                 </Pressable>
               </View>
 
-              <ScrollView
+              {/* The sheet already applies the bottom inset. */}
+              <KeyboardAwareForm
+                applyBottomInset={false}
                 contentContainerStyle={styles.modalScrollBody}
-                keyboardShouldPersistTaps="handled"
-                nestedScrollEnabled
-                showsVerticalScrollIndicator={true}
+                dismissOnTapOutside={false}
                 style={styles.modalScrollView}>
                 <TextField
                   label="Full name"
@@ -1048,7 +992,7 @@ export default function ManagementScreen() {
                   loading={updateUserState.isLoading}
                   onPress={submitEditUser}
                 />
-              </ScrollView>
+              </KeyboardAwareForm>
             </View>
           </View>
         </Modal>
@@ -1093,11 +1037,11 @@ export default function ManagementScreen() {
                 </Pressable>
               </View>
 
-              <ScrollView
+              {/* The sheet already applies the bottom inset. */}
+              <KeyboardAwareForm
+                applyBottomInset={false}
                 contentContainerStyle={styles.modalScrollBody}
-                keyboardShouldPersistTaps="handled"
-                nestedScrollEnabled
-                showsVerticalScrollIndicator={true}
+                dismissOnTapOutside={false}
                 style={styles.modalScrollView}>
                 <TextField
                   label="Project name"
@@ -1129,7 +1073,7 @@ export default function ManagementScreen() {
                   loading={selectedProjectForEdit ? updateProjectState.isLoading : projectState.isLoading}
                   onPress={submitProjectModal}
                 />
-              </ScrollView>
+              </KeyboardAwareForm>
             </View>
           </View>
         </Modal>
@@ -1184,55 +1128,23 @@ function ListState({
   return null;
 }
 
-function Section({
-  title,
-  children,
-  buttonLabel,
-  loading,
-  submitDisabled,
-  onSubmit,
-}: {
-  title: string;
-  children: React.ReactNode;
-  buttonLabel: string;
-  loading: boolean;
-  submitDisabled?: boolean;
-  onSubmit: () => void;
-}) {
-  const { colors: c } = useTheme();
-  const styles = useMemo(() => makeStyles(c), [c]);
-  return (
-    <Card style={[styles.form, { flex: 1 }]}>
-      <Text style={styles.title}>{title}</Text>
-      {children}
-      <Button disabled={submitDisabled} label={buttonLabel} loading={loading} onPress={onSubmit} />
-    </Card>
-  );
-}
-
-function label(tab: Tab) {
-  if (tab === 'commands') return 'Device Commands';
-  if (tab === 'tenants') return 'Manage Tenants';
-  return tab.charAt(0).toUpperCase() + tab.slice(1);
-}
-
 const makeStyles = (c: ThemeColors) =>
   StyleSheet.create({
     screen: { backgroundColor: c.pageBackground, flex: 1 },
     content: {
       backgroundColor: c.pageBackground,
       flexGrow: 1,
-      gap: spacing.md,
-      padding: spacing.md,
+      gap: spacing.sm,
+      padding: spacing.sm,
     },
     tabRow: { flexDirection: 'row', gap: spacing.sm, alignItems: 'center' },
     tabRowScrollView: {
       flexGrow: 0,
-      maxHeight: 64,
+      maxHeight: 44,
     },
     subTabRow: {
       flexDirection: 'row',
-      gap: spacing.lg,
+      gap: spacing.md,
     },
     subTabRowScrollView: {
       flexGrow: 0,
@@ -1240,7 +1152,7 @@ const makeStyles = (c: ThemeColors) =>
       borderBottomColor: c.divider,
     },
     subTabItem: {
-      paddingVertical: spacing.sm,
+      paddingVertical: 6,
       paddingHorizontal: spacing.xs,
       borderBottomWidth: 2,
       borderBottomColor: 'transparent',
@@ -1250,38 +1162,46 @@ const makeStyles = (c: ThemeColors) =>
     },
     subTabItemText: {
       color: c.textMuted,
-      fontSize: 14,
-      fontWeight: '600',
+      fontSize: 12.5,
+      fontWeight: '700',
     },
     subTabItemTextActive: {
       color: c.primaryGreen,
       fontWeight: '700',
     },
-    roleFilterRow: { flexDirection: 'row', gap: spacing.sm, marginVertical: spacing.xs },
-    form: { gap: spacing.md },
+    roleFilterRow: {
+      alignItems: 'center',
+      alignSelf: 'flex-start',
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: spacing.sm,
+      justifyContent: 'flex-start',
+      marginVertical: spacing.xs,
+    },
+    form: { gap: spacing.sm },
     titleRow: {
       alignItems: 'center',
       flexDirection: 'row',
       justifyContent: 'space-between',
     },
-    title: { color: c.textPrimary, fontSize: typography.title, fontWeight: '900' },
+    title: { color: c.textPrimary, fontSize: typography.body, fontWeight: '900' },
     headerPlusButton: {
       alignItems: 'center',
       backgroundColor: c.surfaceAlt || 'rgba(255, 255, 255, 0.05)',
-      borderRadius: 18,
-      height: 36,
+      borderRadius: 15,
+      height: 30,
       justifyContent: 'center',
-      width: 36,
+      width: 30,
     },
-    sectionHint: { color: c.textSecondary, fontSize: typography.caption, lineHeight: 17 },
+    sectionHint: { color: c.textMuted, fontSize: 11, lineHeight: 15 },
     listState: {
       alignItems: 'center',
       backgroundColor: c.surfaceAlt,
       borderRadius: radius.md,
       gap: spacing.sm,
       justifyContent: 'center',
-      minHeight: 72,
-      padding: spacing.md,
+      minHeight: 56,
+      padding: spacing.sm,
     },
     listStateText: {
       color: c.textSecondary,
@@ -1291,10 +1211,11 @@ const makeStyles = (c: ThemeColors) =>
     deviceCard: {
       backgroundColor: c.surfaceAlt,
       borderColor: c.border,
-      borderRadius: radius.md,
-      borderWidth: 1,
-      gap: spacing.sm,
-      padding: spacing.md,
+      borderRadius: radius.sm,
+      borderWidth: StyleSheet.hairlineWidth,
+      gap: 6,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: spacing.sm,
     },
     deviceHeader: {
       alignItems: 'center',
@@ -1308,13 +1229,14 @@ const makeStyles = (c: ThemeColors) =>
     },
     deviceName: {
       color: c.textPrimary,
-      fontSize: typography.label,
+      flexShrink: 1,
+      fontSize: 13,
       fontWeight: '800',
     },
     statusBadge: {
       borderRadius: radius.pill,
-      paddingHorizontal: 8,
-      paddingVertical: 3,
+      paddingHorizontal: 6,
+      paddingVertical: 2,
     },
     statusBadgeActive: {
       backgroundColor: 'rgba(34, 197, 94, 0.15)',
@@ -1323,8 +1245,9 @@ const makeStyles = (c: ThemeColors) =>
       backgroundColor: 'rgba(148, 163, 184, 0.15)',
     },
     statusText: {
-      fontSize: 10,
+      fontSize: 9,
       fontWeight: '800',
+      letterSpacing: 0.4,
     },
     statusTextActive: {
       color: '#22C55E',
@@ -1333,29 +1256,34 @@ const makeStyles = (c: ThemeColors) =>
       color: c.textSecondary,
     },
     deviceDetailsGrid: {
+      columnGap: spacing.sm,
       flexDirection: 'row',
       flexWrap: 'wrap',
-      gap: spacing.sm,
+      rowGap: 5,
     },
     deviceDetailItem: {
-      width: '48%',
+      minWidth: '30%',
     },
     detailLabel: {
       color: c.textMuted,
-      fontSize: 11,
+      fontSize: 9,
+      fontWeight: '700',
+      letterSpacing: 0.5,
+      textTransform: 'uppercase',
     },
     detailValue: {
       color: c.textPrimary,
-      fontSize: 12,
+      fontSize: 11.5,
+      fontVariant: ['tabular-nums'],
       fontWeight: '600',
     },
     deviceActionsRow: {
       borderTopColor: c.divider,
-      borderTopWidth: 1,
+      borderTopWidth: StyleSheet.hairlineWidth,
       flexDirection: 'row',
       gap: spacing.xs,
       justifyContent: 'flex-end',
-      paddingTop: spacing.xs,
+      paddingTop: 6,
     },
     actionBtnSecondary: {
       alignItems: 'center',
@@ -1364,11 +1292,11 @@ const makeStyles = (c: ThemeColors) =>
       flexDirection: 'row',
       gap: 4,
       paddingHorizontal: spacing.sm,
-      paddingVertical: 6,
+      paddingVertical: 4,
     },
     actionBtnTextSecondary: {
       color: c.primary,
-      fontSize: 12,
+      fontSize: 11,
       fontWeight: '700',
     },
     actionBtnWarning: {
@@ -1378,11 +1306,11 @@ const makeStyles = (c: ThemeColors) =>
       flexDirection: 'row',
       gap: 4,
       paddingHorizontal: spacing.sm,
-      paddingVertical: 6,
+      paddingVertical: 4,
     },
     actionBtnTextWarning: {
       color: '#F59E0B',
-      fontSize: 12,
+      fontSize: 11,
       fontWeight: '700',
     },
     actionBtnSuccess: {
@@ -1392,11 +1320,11 @@ const makeStyles = (c: ThemeColors) =>
       flexDirection: 'row',
       gap: 4,
       paddingHorizontal: spacing.sm,
-      paddingVertical: 6,
+      paddingVertical: 4,
     },
     actionBtnTextSuccess: {
       color: '#22C55E',
-      fontSize: 12,
+      fontSize: 11,
       fontWeight: '700',
     },
     actionBtnDanger: {
@@ -1406,11 +1334,11 @@ const makeStyles = (c: ThemeColors) =>
       flexDirection: 'row',
       gap: 4,
       paddingHorizontal: spacing.sm,
-      paddingVertical: 6,
+      paddingVertical: 4,
     },
     actionBtnTextDanger: {
       color: '#EF4444',
-      fontSize: 12,
+      fontSize: 11,
       fontWeight: '700',
     },
     modalOverlay: {

@@ -61,12 +61,6 @@ function normalizeBackendBaseUrl(value: string): string {
 
 const backendBaseUrl = normalizeBackendBaseUrl(rawBackendBaseUrl);
 
-// Demo mode is controlled by EXPO_PUBLIC_DEMO_MODE and hard-gated behind React
-// Native's dev flag, so release builds turn it off even if the variable is set.
-const defaultDemoFlag = __DEV__ ? 'true' : 'false';
-const demoFlag = (process.env.EXPO_PUBLIC_DEMO_MODE || defaultDemoFlag).toLowerCase() === 'true';
-const demoMode = demoFlag && __DEV__ && !backendBaseUrl;
-
 if (__DEV__ && Platform.OS !== 'web' && !backendBaseUrl) {
   console.warn(
     '[api-config] Missing EXPO_PUBLIC_BACKEND_BASE_URL. Android emulator should use http://10.0.2.2:8085; physical devices should use the computer LAN IP.'
@@ -79,6 +73,6 @@ export const env = {
   /** REST root: <backend>/api */
   apiBaseUrl: backendBaseUrl ? `${backendBaseUrl}/api` : '/api',
   geoapifyApiKey: process.env.EXPO_PUBLIC_GEOAPIFY_API_KEY || '',
-  /** Serve offline demo data. Controlled by EXPO_PUBLIC_DEMO_MODE (default off). */
-  demoMode,
+  /** Production data is always authoritative; offline/demo routing is disabled. */
+  demoMode: false,
 };

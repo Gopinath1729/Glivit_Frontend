@@ -9,6 +9,7 @@ import {
   View,
 } from 'react-native';
 
+import { useKeyboardFocusReporter } from '@/src/components/ui/KeyboardAwareForm';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { layout, radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
 
@@ -36,6 +37,8 @@ export function TextField({
   const styles = useMemo(() => makeStyles(colors), [colors]);
   const [hidden, setHidden] = useState(secure);
   const [focused, setFocused] = useState(false);
+  // Null unless this field sits inside a KeyboardAwareForm.
+  const keyboardFocus = useKeyboardFocusReporter();
 
   return (
     <View style={styles.wrapper}>
@@ -67,6 +70,9 @@ export function TextField({
           style={[styles.input, style]}
           onFocus={(e) => {
             setFocused(true);
+            // Tells the enclosing form to scroll this field clear of the
+            // keyboard, including when moving straight from another field.
+            keyboardFocus?.onInputFocused((e.target as unknown as number) ?? null);
             onFocus?.(e);
           }}
           onBlur={(e) => {

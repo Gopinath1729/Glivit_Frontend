@@ -32,7 +32,8 @@ export type AllDevicesArgs = Pick<DeviceListArgs, 'search' | 'projectId' | 'grou
 
 export type DeviceUpsertRequest = {
   name: string;
-  imei: string;
+  imei?: string;
+  sourceType?: 'GPS_DEVICE' | 'MOBILE_GPS';
   simNumber?: string;
   model?: string;
   port?: number;
@@ -184,11 +185,27 @@ export const devicesApi = baseApi.injectEndpoints({
       transformResponse: (response: ApiResponse<PageResponse<PositionDto>>) => unwrap(response),
       providesTags: (_result, _error, { deviceId }) => [{ type: 'Device', id: deviceId }],
     }),
+    /**
+     * Rotates and returns a device's opaque ingestion token.
+     *
+     * The token is shown once and the previous one stops working, so callers
+     * must keep what they get. Requires `manage_devices`. This is what lets the
+     * phone post its own fixes as that device without carrying a user JWT.
+     */
+    issueIngestToken: build.mutation<{ deviceId: number; ingestToken: string }, number>({
+      query: (deviceId) => ({
+        url: `/devices/${deviceId}/ingest-token`,
+        method: 'POST',
+      }),
+      transformResponse: (response: ApiResponse<{ deviceId: number; ingestToken: string }>) =>
+        unwrap(response),
+    }),
   }),
 });
 
 export const {
   useCreateDeviceMutation,
+  useIssueIngestTokenMutation,
   useDeleteDeviceMutation,
   useGetAllDevicesQuery,
   useGetDeviceQuery,

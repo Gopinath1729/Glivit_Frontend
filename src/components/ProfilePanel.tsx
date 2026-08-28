@@ -3,8 +3,8 @@ import { Image } from 'expo-image';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as SecureStore from 'expo-secure-store';
 import { useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, Modal, Pressable, StyleSheet, Switch, Text, View, Platform } from 'react-native';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Alert, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 import Animated, { FadeIn, FadeOut, SlideInDown, SlideOutDown } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -83,10 +83,8 @@ export function ProfilePanel({ visible, onClose }: ProfilePanelProps) {
 
   if (!visible) return null;
 
-  const displayName = user?.name ?? user?.username ?? 'Demo Admin';
+  const displayName = user?.name ?? user?.username ?? 'Fleet user';
   const roleLabel = user?.role === 'SUPER_ADMIN' ? 'Super Admin' : 'Member';
-  const initials = displayName.substring(0, 2).toUpperCase();
-
   return (
     <>
       <Animated.View style={styles.backdrop} entering={FadeIn.duration(250)} exiting={FadeOut.duration(250)}>

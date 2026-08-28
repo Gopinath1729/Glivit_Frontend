@@ -3,9 +3,6 @@ import { useRouter } from 'expo-router';
 import React from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import {
-  KeyboardAvoidingView,
-  Platform,
-  ScrollView,
   StyleSheet,
   Text,
   View,
@@ -13,6 +10,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { z } from 'zod';
 
+import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
 import { Button } from '@/src/components/ui/Button';
 import { GlivtLogo } from '@/src/components/GlivtLogo';
 import { TextField } from '@/src/components/ui/TextField';
@@ -65,15 +63,14 @@ export default function CompanyCodeScreen() {
   });
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      style={styles.flex}>
-      <ScrollView
+    <View style={styles.flex}>
+      {/* Bottom inset is already in the content padding below. */}
+      <KeyboardAwareForm
+        applyBottomInset={false}
         contentContainerStyle={[
           styles.content,
           { paddingTop: insets.top + spacing.xxl, paddingBottom: insets.bottom + spacing.xl },
-        ]}
-        keyboardShouldPersistTaps="handled">
+        ]}>
         <View style={{ marginBottom: spacing.lg }}>
           <GlivtLogo size={72} />
         </View>
@@ -93,7 +90,7 @@ export default function CompanyCodeScreen() {
                 error={errors.companyCode?.message}
                 onBlur={onBlur}
                 onChangeText={onChange}
-                placeholder="e.g. DEMO"
+                placeholder="e.g. ACME01"
                 returnKeyType="go"
                 onSubmitEditing={onSubmit}
                 value={value}
@@ -104,8 +101,8 @@ export default function CompanyCodeScreen() {
             <Button label="Continue" loading={isLoading} onPress={onSubmit} />
           </View>
         </View>
-      </ScrollView>
-    </KeyboardAvoidingView>
+      </KeyboardAwareForm>
+    </View>
   );
 }
 

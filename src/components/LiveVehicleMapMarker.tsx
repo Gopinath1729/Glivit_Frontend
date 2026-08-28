@@ -1,9 +1,9 @@
-import React, { useEffect, useRef, memo, useState } from 'react';
-import { Platform, View } from 'react-native';
+import React, { useCallback, useEffect, useRef, memo, useState } from 'react';
+import { Platform } from 'react-native';
 import { AnimatedRegion, MarkerAnimated } from 'react-native-maps';
-import { Marker } from '@/src/components/maps/NativeMap';
-import { Vehicle3DMarker, modelForVehicle } from '@/src/components/Vehicle3DMarker';
-import { normalizeHeading, lerpAngle } from '@/src/services/playbackEngine';
+import { VehicleMarker, markerCategory } from '@/src/components/VehicleMarker';
+import { vehicleSprite } from '@/src/components/vehicleMarkerSprites';
+import { normalizeHeading } from '@/src/services/playbackEngine';
 import type { FleetTarget } from '@/src/services/fleetLivePositions';
 import type { DeviceSummary } from '@/src/types/api';
 
@@ -12,14 +12,26 @@ export type LocatedDevice = DeviceSummary & { latitude: number; longitude: numbe
 type LiveVehicleMapMarkerProps = {
   device: LocatedDevice;
   targetsRef: React.MutableRefObject<Map<number, FleetTarget>>;
+  /** Camera heading, so the marker's cone points at the real bearing on screen. */
   projectionHeading: number;
   isSelected: boolean;
   onSelect: (id: number) => void;
-  threeFailed: boolean;
+  /** Status colour for this device's state, resolved by the caller's theme. */
+  color: string;
 };
 
-// Use MarkerAnimated to support AnimatedRegion coordinate
+// MarkerAnimated is what accepts an AnimatedRegion coordinate.
 const AnimatedNativeMarker = MarkerAnimated as any;
+
+/**
+ * Android draws the vehicle from a pre-baked bitmap rather than from a React
+ * view: Fabric's legacy interop never reports a marker view's size, so
+ * react-native-maps bakes every custom marker into a 100x100 pixel square taken
+ * from its top-left corner -- which for a centred car is empty. See
+ * `vehicleMarkerSprites` for the full account. iOS keeps the vector marker,
+ * because MapKit cannot rotate a marker image at all.
+ */
+const USE_SPRITE = Platform.OS === 'android';
 
 export const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
   device,
@@ -27,7 +39,7 @@ export const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
   projectionHeading,
   isSelected,
   onSelect,
-  threeFailed,
+  color,
 }: LiveVehicleMapMarkerProps) {
   const coordinateRef = useRef(
     new AnimatedRegion({
@@ -83,45 +95,75 @@ export const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
     };
   }, [device.id, targetsRef]);
 
-  const markerSize = isSelected ? 76 : 60;
-  // If threeFailed is false, we just use opacity 0 so it's a touch target.
-  // If true, it falls back to 2D image marker which we don't bother rotating seamlessly.
+  const markerSize = isSelected ? 64 : 52;
+  const course = normalizeHeading(device.course ?? 0);
+  // A flat sprite is rotated by the map itself, so it wants the true bearing.
+  // The vector marker draws its own cone into a billboard the SDK never turns,
+  // so that one has to be handed the bearing relative to the camera instead.
+  const heading = USE_SPRITE ? course : normalizeHeading(course - projectionHeading);
+  const moving = device.state === 'RUNNING' && (device.speed ?? 0) > 0;
 
+  // Android rasterises a custom marker view once and reuses the bitmap, so it
+  // has to be told when the drawing actually changed. Heading is bucketed to
+  // 15deg: a vehicle rounding a corner re-bakes a few times, not on every fix.
+  const headingBucket = Math.round(heading / 15);
+  // Rasterisation used to stop on a fixed 240ms timer. If the car bitmap had
+  // not decoded by then Android baked an empty frame and never re-baked, so the
+  // marker stayed blank. Tracking continues until the image reports it loaded.
+  const [imageLoaded, setImageLoaded] = useState(false);
+  const onImageLoad = useCallback(() => setImageLoaded(true), []);
   const [tracksView, setTracksView] = useState(true);
   useEffect(() => {
+    if (USE_SPRITE) return;
     setTracksView(true);
-    const timer = setTimeout(() => setTracksView(false), 240);
+    // Prefer the decoded-image signal, but never wait on it forever. iOS does
+    // not always fire onLoad for a bundled static image, and leaving
+    // rasterisation on permanently costs a redraw every frame.
+    const timer = setTimeout(() => setTracksView(false), imageLoaded ? 120 : 1500);
     return () => clearTimeout(timer);
-  }, [threeFailed, device.state, isSelected]);
+  }, [color, headingBucket, imageLoaded, isSelected, moving]);
 
-  const transparentImage = { uri: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=' };
+  const onPress = useCallback(
+    (event: any) => {
+      event.stopPropagation();
+      onSelect(device.id);
+    },
+    [device.id, onSelect]
+  );
+
+  if (USE_SPRITE) {
+    return (
+      <AnimatedNativeMarker
+        coordinate={coordinateRef.current}
+        anchor={{ x: 0.5, y: 0.5 }}
+        flat
+        image={vehicleSprite(device.state, isSelected)}
+        rotation={heading}
+        // Nothing is rasterised from a view, so there is no bitmap to re-bake.
+        tracksViewChanges={false}
+        onPress={onPress}
+        zIndex={isSelected ? 50 : 20}
+      />
+    );
+  }
 
   return (
     <AnimatedNativeMarker
       coordinate={coordinateRef.current}
       anchor={{ x: 0.5, y: 0.5 }}
-      flat={false}
-      tracksViewChanges={threeFailed ? tracksView : false}
-      onPress={(e: any) => {
-        e.stopPropagation();
-        onSelect(device.id);
-      }}
-      zIndex={isSelected ? 50 : 20}
-      image={!threeFailed ? transparentImage : undefined}
-    >
-      {threeFailed ? (
-        <Vehicle3DMarker
-          heading={normalizeHeading((device.course ?? 0) - projectionHeading)}
-          isActive={device.state === 'RUNNING'}
-          renderMode="image"
-          showImageFallback
-          size={markerSize}
-          speed={device.speed ?? 0}
-          variant={modelForVehicle(device.category, device.id)}
-        />
-      ) : (
-        <View style={{ width: markerSize, height: markerSize, backgroundColor: 'transparent' }} />
-      )}
+      flat
+      tracksViewChanges={tracksView}
+      onPress={onPress}
+      zIndex={isSelected ? 50 : 20}>
+      <VehicleMarker
+        category={markerCategory(device.category)}
+        color={color}
+        heading={heading}
+        moving={moving}
+        onImageLoad={onImageLoad}
+        selected={isSelected}
+        size={markerSize}
+      />
     </AnimatedNativeMarker>
   );
 });

@@ -4,8 +4,6 @@ import {
   ActivityIndicator,
   FlatList,
   Keyboard,
-  KeyboardAvoidingView,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -19,6 +17,7 @@ import {
   type ChatMessageDto,
   type EventChatContextDto,
 } from '@/src/services/aiApi';
+import { KeyboardLift } from '@/src/components/ui/KeyboardAwareForm';
 import { buildChatHistory } from '@/src/services/aiChatHistory';
 import { formatAiPlainText } from '@/src/services/aiPlainText';
 import { useTheme } from '@/src/theme/ThemeProvider';
@@ -148,10 +147,7 @@ export function EventAiConversation({
   const bottomPadding = keyboardOpen ? spacing.md : Math.max(spacing.md, insets.bottom);
 
   return (
-    <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top + 98 : 0}
-      style={styles.screen}>
+    <KeyboardLift style={styles.screen} useSafeArea={false}>
       <FlatList
         ref={listRef}
         data={messages}
@@ -285,7 +281,7 @@ export function EventAiConversation({
           )}
         </Pressable>
       </View>
-    </KeyboardAvoidingView>
+    </KeyboardLift>
   );
 }
 

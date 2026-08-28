@@ -1,3 +1,5 @@
+import Constants from 'expo-constants';
+import { Platform } from 'react-native';
 import type { MapStyleElement } from 'react-native-maps';
 
 import { env } from '@/src/config/env';
@@ -153,6 +155,25 @@ export function getMapStyle(variant: MapStyleVariant = 'street'): MapStyleElemen
   if (variant === 'bright') return BRIGHT_MAP_STYLE;
   return STREET_MAP_STYLE;
 }
+
+/**
+ * Whether the native react-native-maps view can be mounted at all.
+ *
+ * On Android the native map throws IllegalStateException("API key not found")
+ * the moment it is created without com.google.android.geo.API_KEY in the
+ * manifest, and that takes the whole app down rather than just the map.
+ * app.config.js only injects that meta-data when GOOGLE_MAPS_API_KEY is set, so
+ * a build made without the key has to fall back to the WebView map. iOS draws
+ * Apple Maps and needs no key; web never mounts the native view.
+ */
+function resolveNativeMapsAvailable(): boolean {
+  if (Platform.OS === 'web') return false;
+  if (Platform.OS !== 'android') return true;
+  const apiKey = Constants.expoConfig?.android?.config?.googleMaps?.apiKey ?? '';
+  return apiKey.trim().length > 0;
+}
+
+export const nativeMapsAvailable = resolveNativeMapsAvailable();
 
 export function getNativeMapProviderLabel(platform: string): string {
   if (platform === 'android') return 'Google Maps';

@@ -108,7 +108,8 @@ export function AiCommandCentrePanel({ onClose }: { onClose?: () => void }) {
   const s = summary.data;
   const rawHealth = Number(s.fleetHealthScore);
   const health = Number.isFinite(rawHealth) ? Math.max(0, Math.min(100, rawHealth)) : 0;
-  const healthColor = health >= 90 ? stateColors.RUNNING : health >= 70 ? stateColors.IDLE : stateColors.STOPPED;
+  const healthColor =
+    health >= 90 ? stateColors.RUNNING : health >= 70 ? stateColors.LOW_ACCURACY : stateColors.STOPPED;
 
   const metrics = [
     { icon: 'car-multiple', label: 'Active', value: s.totalActiveVehicles, tint: c.primary },
@@ -496,7 +497,7 @@ function MetricDetailView({
   const router = useRouter();
 
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'ALL' | 'RUNNING' | 'IDLE' | 'OFFLINE'>('ALL');
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'RUNNING' | 'STOPPED' | 'OFFLINE'>('ALL');
 
   let data: any[] = [];
   let isLoading = false;
@@ -557,7 +558,7 @@ function MetricDetailView({
       const matchesStatus =
         statusFilter === 'ALL' ||
         (statusFilter === 'RUNNING' && (d.state === 'RUNNING' || d.state === 'MOVING')) ||
-        (statusFilter === 'IDLE' && d.state === 'IDLE') ||
+        (statusFilter === 'STOPPED' && (d.state === 'STOPPED' || d.state === 'IDLE')) ||
         (statusFilter === 'OFFLINE' && (d.state === 'NO_DATA' || d.state === 'OFFLINE' || d.state === 'INACTIVE' || d.state === 'EXPIRED'));
 
       return matchesSearch && matchesStatus;
@@ -569,8 +570,8 @@ function MetricDetailView({
       case 'RUNNING':
       case 'MOVING':
         return '#10B981';
-      case 'IDLE':
-        return '#F59E0B';
+      case 'STOPPED':
+        return '#EF4444';
       default:
         return '#9CA3AF';
     }
@@ -606,7 +607,7 @@ function MetricDetailView({
             />
           </View>
           <View style={styles.filterContainer}>
-            {(['ALL', 'RUNNING', 'IDLE', 'OFFLINE'] as const).map((filter) => (
+            {(['ALL', 'RUNNING', 'STOPPED', 'OFFLINE'] as const).map((filter) => (
               <Chip
                 key={filter}
                 active={statusFilter === filter}
@@ -620,6 +621,8 @@ function MetricDetailView({
 
       <FlatList
         data={filteredData}
+        // Rows and filter chips stay tappable while the search keyboard is up.
+        keyboardShouldPersistTaps="handled"
         keyExtractor={(item, index) => String(item.id || item.driverId || index)}
         contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + spacing.lg }]}
         refreshControl={

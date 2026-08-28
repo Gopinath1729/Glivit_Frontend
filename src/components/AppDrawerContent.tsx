@@ -3,26 +3,20 @@ import { type DrawerContentComponentProps } from '@react-navigation/drawer';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import React, { useMemo } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Svg, { Defs, LinearGradient, Path, Rect, Stop } from 'react-native-svg';
 
 import { P } from '@/src/constants/permissions';
-import { authStorage } from '@/src/services/authStorage';
-import { useLogoutMutation } from '@/src/services/authApi';
-import { baseApi } from '@/src/services/baseApi';
-import { clearSession } from '@/src/store/authSlice';
-import { clearActiveTenant } from '@/src/store/tenantSlice';
-import { useAppDispatch, useAppSelector, useHasPermission } from '@/src/store/hooks';
+import { useAppSelector, useHasPermission } from '@/src/store/hooks';
 import { useTheme } from '@/src/theme/ThemeProvider';
-import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
+import { radius, spacing, type ThemeColors } from '@/src/theme/tokens';
 
 type DrawerRoute =
   | '/vehicles'
   | '/map'
   | '/geofences'
   | '/reports'
-  | '/commands'
   | '/management'
   | '/manage-tenants'
   | '/settings';
@@ -71,7 +65,6 @@ function HeaderBackground() {
 
 export function AppDrawerContent(props: DrawerContentComponentProps) {
   const router = useRouter();
-  const dispatch = useAppDispatch();
   const { colors: c } = useTheme();
   const insets = useSafeAreaInsets();
   const styles = useMemo(() => makeStyles(c), [c]);
@@ -90,13 +83,11 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
   const canLive = useHasPermission(P.VIEW_LIVE_LOCATION);
   const canGeofence = useHasPermission(P.MANAGE_GEOFENCES);
   const canReports = useHasPermission(P.VIEW_REPORTS);
-  const canCommands = useHasPermission(P.SEND_COMMANDS);
   const canManageDevices = useHasPermission(P.MANAGE_DEVICES);
   const permissionMap: Record<string, boolean> = { [P.VIEW_ALL_VEHICLES]: canViewAll };
   permissionMap[P.VIEW_LIVE_LOCATION] = canLive;
   permissionMap[P.MANAGE_GEOFENCES] = canGeofence;
   permissionMap[P.VIEW_REPORTS] = canReports;
-  permissionMap[P.SEND_COMMANDS] = canCommands;
   permissionMap[P.MANAGE_DEVICES] = canManageDevices;
   const enabledModules = new Set((tenant?.enabledModules ?? []).map((m) => m.toLowerCase()));
 
@@ -120,10 +111,10 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
 
 
 
-  const displayName = user?.name ?? user?.username ?? 'Demo Admin';
-  const tenantLabel = activeTenantName ?? tenant?.appName ?? tenant?.name ?? 'Glivt Demo Fleet';
-  const companySublabel = activeCompanyName ?? user?.companyName ?? tenant?.name ?? 'Glivt Demo Logistics Pvt Ltd';
-  const tenantCodeLabel = activeTenantCode ?? companyCode ?? 'DEMO';
+  const displayName = user?.name ?? user?.username ?? 'Fleet user';
+  const tenantLabel = activeTenantName ?? tenant?.appName ?? tenant?.name ?? 'Glivt Fleet';
+  const companySublabel = activeCompanyName ?? user?.companyName ?? tenant?.name ?? 'Fleet management';
+  const tenantCodeLabel = activeTenantCode ?? companyCode ?? '—';
   const roleLabel = formatRole(user?.role) || 'Admin';
 
   return (

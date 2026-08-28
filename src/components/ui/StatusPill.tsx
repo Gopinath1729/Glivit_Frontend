@@ -14,7 +14,7 @@ export function StatusPill({ state }: { state: string }) {
     const colorKey = 
       normalized === 'ENGINE CUT' || normalized === 'LOCKED' ? 'IMMOBILISED' :
       normalized === 'GPS ERROR' ? 'GPS_INVALID' :
-      normalized === 'LOW ACCURACY' ? 'IDLE' :
+      normalized === 'LOW ACCURACY' ? 'LOW_ACCURACY' :
       normalized;
     return stateColors[colorKey] ?? stateColors[state] ?? stateColors.NO_DATA;
   }, [state, stateColors]);
@@ -30,7 +30,6 @@ export function StatusPill({ state }: { state: string }) {
 function formatState(state: string) {
   const normalized = (state ?? '').toUpperCase();
   if (normalized === 'RUNNING' || normalized === 'MOVING') return 'Running';
-  if (normalized === 'IDLE') return 'Idle';
   if (normalized === 'STOPPED') return 'Stopped';
   if (normalized === 'OFFLINE' || normalized === 'NO_DATA') return 'Offline';
   return state.replace(/_/g, ' ');

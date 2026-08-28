@@ -1,24 +1,27 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import React from 'react';
 import {
-  KeyboardAvoidingView,
   Modal,
-  Platform,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 
 import { Button } from '@/src/components/ui/Button';
+import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
 import { Chip } from '@/src/components/ui/ModulePrimitives';
+import {
+  SearchableDropdown,
+  type DropdownOption,
+} from '@/src/components/ui/SearchableDropdown';
 import { TextField } from '@/src/components/ui/TextField';
 import { apiErrorMessage } from '@/src/services/apiError';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
 import type {
   ApiResponse,
+  ManagedUserDto,
   TenantCreateRequest,
   TenantStatus,
   TenantSummary,
@@ -34,6 +37,7 @@ type Draft = {
   name: string;
   tenantId: string;
   companyName: string;
+  adminUserId?: number;
   adminName: string;
   adminEmail: string;
   adminPhone: string;
@@ -46,6 +50,7 @@ const EMPTY: Draft = {
   name: '',
   tenantId: '',
   companyName: '',
+  adminUserId: undefined,
   adminName: '',
   adminEmail: '',
   adminPhone: '',
@@ -58,6 +63,7 @@ function draftFrom(tenant: TenantSummary | null): Draft {
     name: tenant.name,
     tenantId: tenant.tenantId,
     companyName: tenant.companyName,
+    adminUserId: undefined,
     adminName: tenant.adminName ?? '',
     adminEmail: tenant.adminEmail ?? '',
     adminPhone: tenant.adminPhone ?? '',
@@ -95,6 +101,10 @@ export function validateTenantDraft(
   if (!companyName) errors.companyName = 'Company name is required';
   else if (companyName.length > 160) {
     errors.companyName = 'Company name must be 160 characters or fewer';
+  }
+
+  if (mode === 'create' && !draft.adminUserId) {
+    errors.adminUserId = 'Choose an administrator';
   }
 
   const adminName = draft.adminName.trim();
@@ -153,6 +163,9 @@ export function TenantFormModal({
   mode,
   tenant,
   existingTenants,
+  adminCandidates,
+  adminCandidatesLoading,
+  adminCandidatesError,
   submitting,
   onClose,
   onCreate,
@@ -162,6 +175,9 @@ export function TenantFormModal({
   mode: 'create' | 'edit';
   tenant: TenantSummary | null;
   existingTenants: TenantSummary[];
+  adminCandidates: ManagedUserDto[];
+  adminCandidatesLoading?: boolean;
+  adminCandidatesError?: string;
   submitting: boolean;
   onClose: () => void;
   onCreate: (body: TenantCreateRequest) => Promise<void>;
@@ -174,6 +190,18 @@ export function TenantFormModal({
   const [errors, setErrors] = React.useState<FieldErrors>({});
   const [banner, setBanner] = React.useState<string | null>(null);
   const [touched, setTouched] = React.useState(false);
+
+  const adminOptions = React.useMemo<DropdownOption[]>(
+    () =>
+      adminCandidates.map((member) => ({
+        id: member.id,
+        label: member.name,
+        subLabel: `${roleLabel(member.role)} · ${member.email ?? member.username}`,
+        phone: member.mobile ?? undefined,
+        searchTags: [member.username, member.email ?? '', roleLabel(member.role)],
+      })),
+    [adminCandidates]
+  );
 
   // Reopening the form must never show the previous tenant's values or errors.
   React.useEffect(() => {
@@ -192,6 +220,27 @@ export function TenantFormModal({
     setBanner(null);
   };
 
+  const selectAdmin = (option: DropdownOption | undefined) => {
+    const member = option
+      ? adminCandidates.find((candidate) => candidate.id === option.id)
+      : undefined;
+    setDraft((prev) => ({
+      ...prev,
+      adminUserId: member?.id,
+      adminName: member?.name ?? '',
+      adminEmail: member?.email ?? (member?.username.includes('@') ? member.username : ''),
+      adminPhone: member?.mobile ?? '',
+    }));
+    setErrors((prev) => ({
+      ...prev,
+      adminUserId: undefined,
+      adminName: undefined,
+      adminEmail: undefined,
+      adminPhone: undefined,
+    }));
+    setBanner(null);
+  };
+
   const submit = async () => {
     if (submitting) return;
     setTouched(true);
@@ -207,9 +256,7 @@ export function TenantFormModal({
         await onCreate({
           name: draft.name.trim(),
           companyName: draft.companyName.trim(),
-          adminName: draft.adminName.trim(),
-          adminEmail: draft.adminEmail.trim(),
-          adminPhone: draft.adminPhone.trim(),
+          adminUserId: draft.adminUserId!,
           status: draft.status,
         });
       } else if (tenant) {
@@ -233,9 +280,7 @@ export function TenantFormModal({
 
   return (
     <Modal animationType="slide" onRequestClose={onClose} statusBarTranslucent visible={visible}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        style={styles.flex}>
+      <View style={styles.flex}>
         <View style={styles.header}>
           <Pressable
             accessibilityLabel="Close"
@@ -250,10 +295,7 @@ export function TenantFormModal({
           </Text>
         </View>
 
-        <ScrollView
-          contentContainerStyle={styles.content}
-          keyboardShouldPersistTaps="handled"
-          style={styles.flex}>
+        <KeyboardAwareForm contentContainerStyle={styles.content} style={styles.flex}>
           {banner ? (
             <View style={styles.banner}>
               <MaterialCommunityIcons color={c.danger} name="alert-circle-outline" size={18} />
@@ -290,15 +332,29 @@ export function TenantFormModal({
           />
 
           <Text style={styles.sectionLabel}>Tenant administrator</Text>
-          <TextField
-            error={liveErrors.adminName}
-            label="Admin Name"
-            onChangeText={(v) => set('adminName', v)}
-            placeholder="Priya Sharma"
-            value={draft.adminName}
-          />
+          {mode === 'create' ? (
+            <SearchableDropdown
+              emptyText="No available members found"
+              error={liveErrors.adminUserId ?? adminCandidatesError}
+              label="Admin Name"
+              loading={adminCandidatesLoading}
+              onSelect={selectAdmin}
+              options={adminOptions}
+              placeholder="Choose an admin or member"
+              selectedId={draft.adminUserId}
+            />
+          ) : (
+            <TextField
+              error={liveErrors.adminName}
+              label="Admin Name"
+              onChangeText={(v) => set('adminName', v)}
+              placeholder="Priya Sharma"
+              value={draft.adminName}
+            />
+          )}
           <TextField
             autoCapitalize="none"
+            editable={mode !== 'create'}
             error={liveErrors.adminEmail}
             keyboardType="email-address"
             label="Admin Email"
@@ -307,6 +363,7 @@ export function TenantFormModal({
             value={draft.adminEmail}
           />
           <TextField
+            editable={mode !== 'create'}
             error={liveErrors.adminPhone}
             keyboardType="phone-pad"
             label="Phone Number"
@@ -314,6 +371,11 @@ export function TenantFormModal({
             placeholder="+91 98765 43210"
             value={draft.adminPhone}
           />
+          {mode === 'create' ? (
+            <Text style={styles.sectionHint}>
+              Email and phone are filled from the selected member&apos;s authenticated profile. Microsoft sign-in is used, so no tenant password is created.
+            </Text>
+          ) : null}
 
           <Text style={styles.sectionLabel}>Tenant Status</Text>
           <View style={styles.statusRow}>
@@ -337,8 +399,8 @@ export function TenantFormModal({
             />
             <Button disabled={submitting} label="Cancel" onPress={onClose} variant="secondary" />
           </View>
-        </ScrollView>
-      </KeyboardAvoidingView>
+        </KeyboardAwareForm>
+      </View>
     </Modal>
   );
 }
@@ -353,6 +415,12 @@ function statusHint(status: TenantStatus) {
   if (status === 'ACTIVE') return 'Users can sign in and this tenant can be switched to.';
   if (status === 'DISABLED') return 'Sign-in is blocked and nobody can switch into this tenant.';
   return 'Sign-in is blocked with a maintenance message; existing sessions keep working.';
+}
+
+function roleLabel(role: ManagedUserDto['role']) {
+  if (role === 'DRIVER') return 'Driver';
+  if (role === 'COMPANY_USER') return 'User';
+  return 'Admin';
 }
 
 const makeStyles = (c: ThemeColors) =>

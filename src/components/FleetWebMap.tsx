@@ -5,6 +5,7 @@ import EmbeddedWebView, {
   type EmbeddedWebViewHandle,
   type EmbeddedWebViewMessageEvent,
 } from '@/src/components/maps/EmbeddedWebView';
+import { WEB_MARKER_DATA_URI } from '@/src/components/webMarkerImage';
 import type { MapStyleSpec } from '@/src/services/mapStyle';
 
 export type WebMapMarker = {
@@ -14,6 +15,7 @@ export type WebMapMarker = {
   color: string;
   heading?: number;
   category?: string;
+  moving?: boolean;
   hidden?: boolean;
   label?: string;
 };
@@ -33,6 +35,7 @@ export type WebMapProjection = {
 
 export type FleetWebMapHandle = {
   fitAll: () => void;
+  focusMarker: (id: string | number) => void;
   zoomIn: () => void;
   zoomOut: () => void;
   resetBearing: () => void;
@@ -91,6 +94,10 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
     ref,
     () => ({
       fitAll: () => webRef.current?.injectJavaScript('window.__glivtFit && window.__glivtFit(); true;'),
+      focusMarker: (id) =>
+        webRef.current?.injectJavaScript(
+          `window.__glivtFocus && window.__glivtFocus(${JSON.stringify(String(id))}); true;`
+        ),
       zoomIn: () => webRef.current?.injectJavaScript('window.__glivtZoomIn && window.__glivtZoomIn(); true;'),
       zoomOut: () => webRef.current?.injectJavaScript('window.__glivtZoomOut && window.__glivtZoomOut(); true;'),
       resetBearing: () => webRef.current?.injectJavaScript('window.__glivtResetBearing && window.__glivtResetBearing(); true;'),
@@ -101,7 +108,7 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
   // The document contains only the map engine and selected style. Live GPS data
   // is streamed into the existing instance below, so a moving marker never
   // reloads MapLibre, its style, or its tile cache.
-  const html = useMemo(() => buildHtml(mapStyle), [mapStyle]);
+  const html = useMemo(() => buildHtml(mapStyle, WEB_MARKER_DATA_URI), [mapStyle]);
   const webSource = useMemo(() => ({ html }), [html]);
 
   const markerPayload = useMemo(
@@ -119,6 +126,7 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
           label: m.label ?? '',
           lat: m.lat,
           lng: m.lng,
+          moving: Boolean(m.moving),
         })),
     }),
     [cameraMode, followSelected, markers]
@@ -292,6 +300,11 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
   );
 });
 
+/**
+ * An HTML string inside a native WebView cannot read Metro's file:// asset URI.
+ * Embed the optimized bitmap as a data URI so the actual car renders on every
+ * platform instead of leaving only its CSS status backing visible.
+ */
 function isValidWebCoordinate(lat: number, lng: number) {
   return (
     Number.isFinite(lat) &&
@@ -330,7 +343,7 @@ function isProjectionPoints(
   );
 }
 
-function buildHtml(mapStyle: MapStyleSpec): string {
+function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -345,37 +358,51 @@ function buildHtml(mapStyle: MapStyleSpec): string {
       background: radial-gradient(circle at 50% 48%, transparent 35%, rgba(3,9,18,.16) 100%);
     }
     .glivt-marker {
-      width: 46px; height: 46px; display: flex; align-items: center; justify-content: center;
-      filter: drop-shadow(0 7px 8px rgba(2,8,18,.34));
-      transition: transform .2s cubic-bezier(.2,.8,.2,1), filter .2s ease;
+      width: 60px; height: 68px; display: flex; align-items: center; justify-content: center;
+      transition: transform .22s cubic-bezier(.2,.8,.2,1), filter .22s ease;
       transform-origin: center;
     }
-    /* No circular halo/ring behind the vehicle marker. */
-    .glivt-marker:before { content: none; }
+    .glivt-marker:before {
+      content: ''; position: absolute; inset: 5px 1px; border-radius: 50%; pointer-events: none;
+      background: color-mix(in srgb, var(--vehicle-color) 8%, transparent);
+      border: 2px solid var(--vehicle-color); box-shadow: 0 0 0 2px rgba(255,255,255,.72);
+      opacity: 0; transform: scale(.82); transition: opacity .2s ease, transform .2s ease;
+    }
+    .glivt-vehicle {
+      position: absolute; inset: 2px; transform: rotate(var(--heading));
+      transform-origin: center; transition: transform .2s linear;
+    }
+    .glivt-beam {
+      position: absolute; left: 18px; top: -1px; width: 20px; height: 28px;
+      background: linear-gradient(to top, var(--vehicle-color), transparent 82%);
+      clip-path: polygon(50% 0, 100% 100%, 50% 80%, 0 100%); opacity: .28;
+    }
+    .glivt-marker:not(.moving) .glivt-beam { display: none; }
     .glivt-car {
-      position: relative; width: 17px; height: 31px; border-radius: 6px;
-      background: linear-gradient(145deg, color-mix(in srgb, var(--vehicle-color) 82%, white), var(--vehicle-color));
-      border: 1.5px solid rgba(255,255,255,.94); box-shadow: 0 0 13px var(--vehicle-color);
-      transform: rotate(var(--heading)); transition: transform .2s linear;
+      position: absolute; left: 11px; top: 2px; width: 34px; height: 62px;
+      object-fit: contain; filter: drop-shadow(1px 3px 2px rgba(2,8,18,.58));
+      transform-origin: center; user-select: none; pointer-events: none;
     }
-    .glivt-car:before {
-      content: ''; position: absolute; left: 3px; right: 3px; top: 5px; height: 8px;
-      border-radius: 3px; background: linear-gradient(#c7f1ff, #4b7896);
-      border: 1px solid rgba(255,255,255,.75);
+    .glivt-status-dot {
+      position: absolute; right: 5px; bottom: 6px; width: 9px; height: 9px;
+      border-radius: 50%; background: var(--vehicle-color); border: 1.5px solid white;
+      box-shadow: 0 1px 5px var(--vehicle-color); z-index: 2;
     }
-    .glivt-car:after {
-      content: ''; position: absolute; left: 4px; right: 4px; top: 15px; height: 7px;
-      border-radius: 3px; background: rgba(2,10,22,.36);
-    }
+    .glivt-marker[data-category="BIKE"] .glivt-car { transform: scale(.82); }
+    .glivt-marker[data-category="AUTO"] .glivt-car { transform: scale(.9); }
+    .glivt-marker[data-category="VAN"] .glivt-car,
+    .glivt-marker[data-category="BUS"] .glivt-car { transform: scale(1.03); }
+    .glivt-marker[data-category="TRUCK"] .glivt-car,
+    .glivt-marker[data-category="MACHINERY"] .glivt-car { transform: scale(1.04); }
     .glivt-label {
-      position: absolute; left: 39px; top: 8px; max-width: 130px; overflow: hidden;
+      position: absolute; left: 44px; top: 10px; max-width: 130px; overflow: hidden;
       padding: 5px 8px; border-radius: 8px; white-space: nowrap; text-overflow: ellipsis;
       color: #f7fbff; background: rgba(5,13,24,.9); border: 1px solid rgba(255,255,255,.18);
       font: 700 10px system-ui, sans-serif; opacity: 0; transform: translateX(-4px);
       transition: opacity .2s ease, transform .2s ease;
     }
-    .glivt-marker.selected { transform: scale(1.3); filter: drop-shadow(0 9px 12px rgba(2,8,18,.5)); z-index: 5; }
-    .glivt-marker.selected:before { width: 44px; height: 44px; border-width: 2px; }
+    .glivt-marker.selected { transform: scale(1.22); filter: drop-shadow(0 9px 10px rgba(2,8,18,.5)); z-index: 5; }
+    .glivt-marker.selected:before { opacity: .14; transform: scale(1); }
     .glivt-marker.selected .glivt-label { opacity: 1; transform: translateX(0); }
     #err { position:absolute; top:0; left:0; right:0; padding:10px; font-family:sans-serif;
            font-size:12px; color:#FF432F; background:#fff; display:none; }
@@ -464,14 +491,26 @@ function buildHtml(mapStyle: MapStyleSpec): string {
           return ((heading % 360) + 360) % 360;
         }
 
+        function normalizedCategory(value) {
+          var category = typeof value === 'string' ? value.toUpperCase() : 'CAR';
+          if (category === 'MOTORCYCLE' || category === 'SCOOTER') return 'BIKE';
+          if (category === 'RICKSHAW') return 'AUTO';
+          if (category === 'LORRY' || category === 'MIXER_TRUCK') return 'TRUCK';
+          if (category === 'JEEP') return 'VAN';
+          if (category === 'EXCAVATOR' || category === 'HEAVY_MACHINERY') return 'MACHINERY';
+          return ['CAR', 'TRUCK', 'BUS', 'VAN', 'BIKE', 'AUTO', 'MACHINERY'].includes(category)
+            ? category
+            : 'CAR';
+        }
+
         function updateScreenHeadings() {
           var mapHeading = normalizedHeading(map.getBearing());
           MARKERS.forEach(function (marker) {
             var el = markerEls[marker.id];
             if (!el) return;
-            var car = el.querySelector('.glivt-car');
-            if (car) {
-              car.style.setProperty(
+            var vehicle = el.querySelector('.glivt-vehicle');
+            if (vehicle) {
+              vehicle.style.setProperty(
                 '--heading',
                 normalizedHeading(marker.heading - mapHeading) + 'deg'
               );
@@ -589,20 +628,55 @@ function buildHtml(mapStyle: MapStyleSpec): string {
           post({ type:'clear-selection' });
         });
 
+        // Vector stand-in for the marker artwork: a top-down car silhouette
+        // tinted by the marker's own status colour via currentColor.
+        var FALLBACK_CAR_SVG =
+          'data:image/svg+xml;charset=utf-8,' +
+          encodeURIComponent(
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 34 62">' +
+              '<g fill="#eef4fb" stroke="#0b1626" stroke-width="1.4">' +
+                '<rect x="6" y="4" width="22" height="54" rx="9"/>' +
+                '<rect x="9" y="10" width="16" height="12" rx="4" fill="#7c93ad"/>' +
+                '<rect x="9" y="40" width="16" height="10" rx="4" fill="#7c93ad"/>' +
+              '</g>' +
+            '</svg>'
+          );
+
         function makeMarker(m) {
             var el = document.createElement('div');
             el.className = 'glivt-marker';
             el.style.setProperty('--vehicle-color', m.color);
-            var car = document.createElement('div');
-            car.className = 'glivt-car';
-            car.style.setProperty(
+            el.dataset.category = normalizedCategory(m.category);
+            el.classList.toggle('moving', Boolean(m.moving));
+            var vehicle = document.createElement('div');
+            vehicle.className = 'glivt-vehicle';
+            vehicle.style.setProperty(
               '--heading',
               normalizedHeading(m.heading - map.getBearing()) + 'deg'
             );
+            var beam = document.createElement('span');
+            beam.className = 'glivt-beam';
+            var car = document.createElement('img');
+            car.className = 'glivt-car';
+            // A broken <img> renders as an empty bordered box, which reads as a
+            // missing vehicle. Swapping to the inline silhouette keeps a car on
+            // the map whatever happens to the artwork.
+            car.onerror = function () {
+              car.onerror = null;
+              car.src = FALLBACK_CAR_SVG;
+            };
+            car.src = ${JSON.stringify(realisticMarkerUri)};
+            car.alt = '';
+            car.draggable = false;
+            var statusDot = document.createElement('span');
+            statusDot.className = 'glivt-status-dot';
             var label = document.createElement('div');
             label.className = 'glivt-label';
             label.textContent = m.label || ('Vehicle ' + m.id);
-            el.appendChild(car);
+            vehicle.appendChild(beam);
+            vehicle.appendChild(car);
+            el.appendChild(vehicle);
+            el.appendChild(statusDot);
             el.appendChild(label);
             el.style.opacity = m.hidden ? '0' : '1';
             el.style.pointerEvents = m.hidden ? 'none' : 'auto';
@@ -650,11 +724,13 @@ function buildHtml(mapStyle: MapStyleSpec): string {
             } else {
               markerRefs[m.id].setLngLat([m.lng, m.lat]);
               markerEls[m.id].style.setProperty('--vehicle-color', m.color);
+              markerEls[m.id].dataset.category = normalizedCategory(m.category);
+              markerEls[m.id].classList.toggle('moving', Boolean(m.moving));
               markerEls[m.id].style.opacity = m.hidden ? '0' : '1';
               markerEls[m.id].style.pointerEvents = m.hidden ? 'none' : 'auto';
-              var car = markerEls[m.id].querySelector('.glivt-car');
-              if (car) {
-                car.style.setProperty(
+              var vehicle = markerEls[m.id].querySelector('.glivt-vehicle');
+              if (vehicle) {
+                vehicle.style.setProperty(
                   '--heading',
                   normalizedHeading(m.heading - map.getBearing()) + 'deg'
                 );
@@ -680,8 +756,27 @@ function buildHtml(mapStyle: MapStyleSpec): string {
           selectedMarkerId = id;
           Object.keys(markerEls).forEach(function (k) { markerEls[k].classList.remove('selected'); });
           if (markerEls[id]) markerEls[id].classList.add('selected');
-          lastCameraAt = 0;
-          applyCamera(true);
+          if (followSelected) {
+            lastCameraAt = 0;
+            applyCamera(true);
+          }
+        };
+        window.__glivtFocus = function (id) {
+          selectedMarkerId = id;
+          Object.keys(markerEls).forEach(function (k) { markerEls[k].classList.remove('selected'); });
+          if (markerEls[id]) markerEls[id].classList.add('selected');
+          var marker = MARKERS.find(function (item) { return item.id === id; });
+          if (!marker || !map) return;
+          map.stop();
+          map.easeTo({
+            center: [marker.lng, marker.lat],
+            bearing: 0,
+            duration: 680,
+            offset: [0, 42],
+            pitch: 34,
+            zoom: 15.4,
+            essential: true
+          });
         };
         window.__glivtClearSelection = function () {
           selectedMarkerId = null;

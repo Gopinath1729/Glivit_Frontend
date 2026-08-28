@@ -1,7 +1,6 @@
 import { baseApi, unwrap } from '@/src/services/baseApi';
 import type {
   ApiResponse,
-  AuditDto,
   CommandDto,
   EventDto,
   GeofenceDto,
@@ -217,11 +216,6 @@ export const operationsApi = baseApi.injectEndpoints({
       transformResponse: (response: ApiResponse<string>) => unwrap(response),
       providesTags: ['User'],
     }),
-    getAudit: build.query<PageResponse<AuditDto>, { page?: number; size?: number }>({
-      query: ({ page = 0, size = 20 }) => ({ url: '/audit', params: { page, size } }),
-      transformResponse: (response: ApiResponse<PageResponse<AuditDto>>) => unwrap(response),
-      providesTags: ['Audit'],
-    }),
   }),
 });
 
@@ -238,7 +232,6 @@ export const {
   useDeleteUserMutation,
   useUpdateGeofenceMutation,
   useUpdateUserMutation,
-  useGetAuditQuery,
   useGetCommandsQuery,
   useGetEventsQuery,
   useGetGeofencesQuery,

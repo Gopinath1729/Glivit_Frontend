@@ -33,10 +33,6 @@ import {
 
 import { StatusPill } from '@/src/components/ui/StatusPill';
 import {
-  Fleet3DOverlay,
-  type Fleet3DOverlayMarker,
-} from '@/src/components/Fleet3DOverlay';
-import {
   FleetWebMap,
   type FleetWebMapHandle,
   type WebMapMarker,
@@ -49,14 +45,18 @@ import {
   StableBaseRoute,
 } from '@/src/components/StableRouteLayers';
 import {
-  getVehicleModel,
-  modelForVehicle,
-  type CarVariant,
-} from '@/src/components/Vehicle3DMarker';
-import { VehicleModelPicker } from '@/src/components/VehicleModelPicker';
+  VehicleMarker,
+  markerCategory as markerCategoryFor,
+  vehicleMarkerCanvas,
+} from '@/src/components/VehicleMarker';
+import { vehicleSprite } from '@/src/components/vehicleMarkerSprites';
 import { env } from '@/src/config/env';
 import { useGetAllDevicesQuery, useGetDeviceQuery, useGetDevicePlaybackQuery } from '@/src/services/devicesApi';
-import { getMapStyleInfo, getNativeMapProviderLabel } from '@/src/services/mapStyle';
+import {
+  getMapStyleInfo,
+  getNativeMapProviderLabel,
+  nativeMapsAvailable,
+} from '@/src/services/mapStyle';
 import {
   buildPlaybackTrack,
   haversineKm,
@@ -66,16 +66,18 @@ import {
   type PlaybackTrack,
 } from '@/src/services/playbackEngine';
 import { useLivePositions } from '@/src/services/livePositions';
-import { useAppDispatch, useAppSelector } from '@/src/store/hooks';
-import { setVehicleModelPreference } from '@/src/store/vehiclePreferencesSlice';
-import {
-  vehicleMarkerKey,
-  vehicleMarkerRotation,
-  vehicleMarkerSource,
-} from '@/src/services/vehicleMarkerAssets';
+
 import type { DeviceSummary, PlaybackTrackPoint, PlaybackResponse, PlaybackStopMarker, PlaybackEventMarker } from '@/src/types/api';
 
-const LIVE_MARKER_SIZE = 64;
+/** Length of the vehicle glyph itself. */
+const LIVE_VEHICLE_SIZE = 52;
+/**
+ * Container for the marker. It has to clear VehicleMarker's own rotation
+ * canvas: hardcoding 64 while the marker needed 77 meant Android baked the
+ * marker bitmap at 64x64 and cropped the overflow.
+ */
+const LIVE_MARKER_SIZE = vehicleMarkerCanvas(LIVE_VEHICLE_SIZE);
+const LIVE_STATUS_CIRCLE_SIZE = 56;
 /** Single spacing unit for every floating map layer (header, rails, pills). */
 const OVERLAY_GAP = 10;
 /** Height assumed for the collapsed sheet before it has been measured. */
@@ -239,6 +241,13 @@ function simplifyRouteForRender(coordinates: Coordinate[], maxPoints = 2_000): C
   return reduced;
 }
 
+/**
+ * Android cannot rasterise a marker's React view under the New Architecture,
+ * so the vehicle is drawn from a pre-baked bitmap there. iOS keeps the vector
+ * marker because MapKit has no marker rotation at all.
+ */
+const USE_VEHICLE_SPRITE = Platform.OS === 'android';
+
 type LiveVehicleMapMarkerProps = {
   cameraHeading: number;
   category: string;
@@ -262,32 +271,56 @@ const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
   state,
   statusColor,
 }: LiveVehicleMapMarkerProps) {
-  const source = useMemo(() => vehicleMarkerSource(category, state), [category, state]);
-  const sourceKey = useMemo(() => vehicleMarkerKey(category, state), [category, state]);
-  const assetRotation = vehicleMarkerRotation(heading, category, state);
   const [tracksViewChanges, setTracksViewChanges] = useState(true);
+  const moving = (state ?? '').toUpperCase() === 'RUNNING';
+  // Bucketed so a turning vehicle re-rasterises a few times, not every fix.
+  const headingBucket = Math.round(heading / 15);
+  // Baking stopped on a fixed 240ms timer before. If the car bitmap had not
+  // decoded by then the marker captured an empty frame and never re-baked.
+  const [imageLoaded, setImageLoaded] = useState(false);
+  const onImageLoad = useCallback(() => setImageLoaded(true), []);
 
   useEffect(() => {
+    if (USE_VEHICLE_SPRITE) return;
     setTracksViewChanges(true);
-    const timer = setTimeout(() => setTracksViewChanges(false), 240);
+    // Never block on onLoad forever: it is not always fired for a bundled
+    // static image, and permanent rasterisation costs a redraw every frame.
+    const timer = setTimeout(() => setTracksViewChanges(false), imageLoaded ? 120 : 1500);
     return () => clearTimeout(timer);
-  }, [showStatusCircle, sourceKey, statusColor]);
+  }, [showStatusCircle, statusColor, headingBucket, imageLoaded, moving]);
 
-  // Android/Google Maps supports native flat-marker rotation. Apple MapKit does
-  // not, so its billboard image is rotated relative to the current map heading.
-  const imageRotation =
-    Platform.OS === 'ios'
-      ? ((assetRotation - cameraHeading) % 360 + 360) % 360
-      : 0;
+  // The vector marker draws its own heading cone into a billboard the SDK never
+  // turns, so it must be given the bearing relative to the camera. A flat
+  // sprite is rotated by the map itself and wants the true bearing.
+  const screenHeading = ((heading - cameraHeading) % 360 + 360) % 360;
+
+  // Android bakes a custom marker view into a 100x100 pixel square taken from
+  // its top-left corner under the New Architecture, which for a centred car is
+  // empty -- see src/components/vehicleMarkerSprites.
+  if (USE_VEHICLE_SPRITE) {
+    return (
+      <Marker
+        anchor={{ x: 0.5, y: 0.5 }}
+        centerOffset={{ x: 0, y: 0 }}
+        coordinate={coordinate}
+        flat
+        identifier="live-vehicle"
+        image={vehicleSprite(state, showStatusCircle)}
+        rotation={((heading % 360) + 360) % 360}
+        tappable={false}
+        tracksViewChanges={false}
+        zIndex={40}
+      />
+    );
+  }
 
   return (
     <Marker
       anchor={{ x: 0.5, y: 0.5 }}
       centerOffset={{ x: 0, y: 0 }}
       coordinate={coordinate}
-      flat={Platform.OS === 'android'}
+      flat
       identifier="live-vehicle"
-      rotation={Platform.OS === 'android' ? assetRotation : 0}
       tappable={false}
       tracksViewChanges={tracksViewChanges}
       zIndex={40}>
@@ -295,15 +328,13 @@ const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
         {showStatusCircle ? (
           <View style={[styles.markerStatusCircle, { borderColor: statusColor }]} />
         ) : null}
-        <View style={styles.markerShadow} />
-        <Image
-          fadeDuration={0}
-          resizeMode="contain"
-          source={source}
-          style={[
-            styles.markerVehicleImage,
-            Platform.OS === 'ios' && { transform: [{ rotate: `${imageRotation}deg` }] },
-          ]}
+        <VehicleMarker
+          category={markerCategoryFor(category)}
+          color={statusColor}
+          heading={screenHeading}
+          moving={moving}
+          onImageLoad={onImageLoad}
+          size={LIVE_VEHICLE_SIZE}
         />
       </View>
     </Marker>
@@ -355,10 +386,6 @@ export default function VehicleTrackerScreen() {
   // only when no device is passed or the app is in offline demo mode.
   const deviceId = params.deviceId ? Number(params.deviceId) : undefined;
   const devicePreferenceKey = String(deviceId ?? 'demo');
-  const dispatch = useAppDispatch();
-  const preferredModel = useAppSelector(
-    (state) => state.vehiclePreferences.modelByDevice[devicePreferenceKey]
-  );
   // A real, tenant-scoped device is selected (not the offline/demo screen).
   const hasRealDevice = deviceId != null && !Number.isNaN(deviceId) && !env.demoMode;
   const validDeviceId = deviceId != null && !Number.isNaN(deviceId);
@@ -520,13 +547,6 @@ export default function VehicleTrackerScreen() {
   const [autoFollowSuspended, setAutoFollowSuspended] = useState(false);
   const [cameraMode, setCameraMode] = useState<CameraMode>('follow');
   const [cinematicMode, setCinematicMode] = useState(false);
-  const [carVariant, setCarVariant] = useState<CarVariant>(() =>
-    preferredModel ?? modelForVehicle(vehicleCategory, deviceId ?? 0)
-  );
-  const [modelLoadState, setModelLoadState] = useState<'loading' | 'ready' | 'error'>(
-    'loading'
-  );
-  const [modelLoadError, setModelLoadError] = useState<string | null>(null);
   const [markerCategoryOverride, setMarkerCategoryOverride] = useState<string | null>(null);
   // Bottom sheet detent: collapsed shows only the summary; expanded shows all.
   const [sheetExpanded, setSheetExpanded] = useState(true);
@@ -592,18 +612,6 @@ export default function VehicleTrackerScreen() {
     resume: 38,
   });
   const markerCategory = markerCategoryOverride ?? vehicleCategory;
-
-  useEffect(() => {
-    const nextModel = preferredModel ?? modelForVehicle(vehicleCategory, deviceId ?? 0);
-    if (carVariant !== nextModel) {
-      setCarVariant(nextModel);
-      setModelLoadState('loading');
-      setModelLoadError(null);
-    }
-    setMarkerCategoryOverride(
-      preferredModel ? getVehicleModel(nextModel).category.toUpperCase() : null
-    );
-  }, [carVariant, deviceId, preferredModel, vehicleCategory]);
 
   const sample = useMemo(() => sampleAt(track, elapsedMs), [track, elapsedMs]);
   elapsedMsRef.current = elapsedMs;
@@ -677,13 +685,11 @@ export default function VehicleTrackerScreen() {
             ? 'GPS error'
             : isLowAccuracy
               ? 'Low accuracy'
-              : liveState === 'IDLE'
-                ? 'Idle'
-                : 'Running';
+              : 'Running';
   const statusColor =
     status === 'Running'
       ? BRAND.greenGlow
-      : status === 'Idle' || status === 'Low accuracy'
+      : status === 'Low accuracy'
         ? '#F5A623'
         : status === 'Offline'
           ? BRAND.muted
@@ -749,7 +755,7 @@ export default function VehicleTrackerScreen() {
     () => getMapStyleInfo(isNightMode ? 'dark' : isSatelliteMode ? 'bright' : 'street'),
     [isNightMode, isSatelliteMode]
   );
-  const useNativeMap = Platform.OS !== 'web';
+  const useNativeMap = Platform.OS !== 'web' && nativeMapsAvailable;
   const blockingMapIssue = mapStyleInfo.issues.find((issue) => issue.blocking);
   const mapProviderLabel = useMemo(() => {
     if (useNativeMap) return getNativeMapProviderLabel(Platform.OS);
@@ -1091,19 +1097,6 @@ export default function VehicleTrackerScreen() {
       void Haptics.selectionAsync().catch(() => undefined);
     }
   }, []);
-
-  const selectVehicleModel = useCallback(
-    (variant: CarVariant) => {
-      haptic();
-      setModelLoadState('loading');
-      setModelLoadError(null);
-      setCarVariant(variant);
-      setMarkerCategoryOverride(getVehicleModel(variant).category.toUpperCase());
-      dispatch(setVehicleModelPreference({ deviceKey: devicePreferenceKey, variant }));
-      if (__DEV__) console.debug(`[VehicleModel] selected ${variant}`);
-    },
-    [devicePreferenceKey, dispatch, haptic]
-  );
 
   const openVehiclePicker = useCallback(() => {
     if (fleet.length <= 1) return;
@@ -1763,16 +1756,12 @@ export default function VehicleTrackerScreen() {
           // Recorded route history lives on the SEPARATE playback screen, so the
           // live screen never shows past/complete routes — it links out instead.
           if (validDeviceId) {
-            const variant = modelForVehicle(vehicleCategory, deviceId);
-            const model = getVehicleModel(variant);
             router.push({
               pathname: '/trip-playback' as never,
               params: {
                 deviceId: String(deviceId),
                 name: vehicleName,
                 category: vehicleCategory,
-                make: model.label,
-                model: model.id,
                 speed: String(deviceDetail?.speed ?? 0),
                 heading: String(deviceDetail?.course ?? 0),
               },
@@ -1907,47 +1896,21 @@ export default function VehicleTrackerScreen() {
   const fallbackMarkers = useMemo<WebMapMarker[]>(
     () => [
       {
-        category: getVehicleModel(carVariant).category.toUpperCase(),
+        category: (markerCategory ?? '').toUpperCase(),
         id: 'vehicle',
         lat: vehicleCoordinate.latitude,
         lng: vehicleCoordinate.longitude,
-        color: getVehicleModel(carVariant).paintColor,
+        color: statusColor,
         heading,
-        hidden: modelLoadState === 'ready' && vehicleScreenPoint != null,
         label: vehicleName,
+        moving: liveState === 'RUNNING' && currentSpeed > 0,
       },
     ],
-    [carVariant, heading, modelLoadState, vehicleCoordinate, vehicleName, vehicleScreenPoint]
+    [currentSpeed, heading, liveState, markerCategory, statusColor, vehicleCoordinate, vehicleName]
   );
   const fallbackPolyline = useMemo<[number, number][]>(
     () => renderRoute.map((c) => [c.longitude, c.latitude] as [number, number]),
     [renderRoute]
-  );
-  const projectedVehicleMarkers = useMemo<Fleet3DOverlayMarker[]>(
-    () =>
-      vehicleScreenPoint && sample
-        ? [
-          {
-            heading: normalizeHeading(heading - mapCameraHeading),
-            id: 'vehicle',
-            isActive: !isStopped && !isStoppedOff && currentSpeed > 0,
-            selected: true,
-            speed: currentSpeed,
-            variant: carVariant,
-            x: vehicleScreenPoint.x,
-            y: vehicleScreenPoint.y,
-          },
-        ]
-        : [],
-    [
-      carVariant,
-      currentSpeed,
-      heading,
-      isStoppedOff,
-      mapCameraHeading,
-      sample,
-      vehicleScreenPoint,
-    ]
   );
 
   useEffect(() => {
@@ -2257,7 +2220,7 @@ export default function VehicleTrackerScreen() {
               width={6}
             />
           ) : null}
-          {sample && (modelLoadState !== 'ready' || !vehicleScreenPoint) ? (
+          {sample ? (
             <LiveVehicleMapMarker
               cameraHeading={mapCameraHeading}
               category={markerCategory}
@@ -2288,33 +2251,6 @@ export default function VehicleTrackerScreen() {
       )}
 
       <View pointerEvents="none" style={styles.mapShade} />
-
-      {vehicleScreenPoint ? (
-        <Fleet3DOverlay
-          height={mapSize.height}
-          markers={projectedVehicleMarkers}
-          onModelError={(id, variant, message) => {
-            if (id !== 'vehicle' || variant !== carVariant) return;
-            setModelLoadState('error');
-            setModelLoadError(message);
-          }}
-          onModelLoaded={(id, variant) => {
-            if (id !== 'vehicle' || variant !== carVariant) return;
-            setModelLoadState('ready');
-            setModelLoadError(null);
-          }}
-          onModelLoadStart={(id, variant) => {
-            if (id !== 'vehicle' || variant !== carVariant) return;
-            setModelLoadState('loading');
-            setModelLoadError(null);
-          }}
-          onUnavailable={(message) => {
-            setModelLoadState('error');
-            setModelLoadError(message);
-          }}
-          width={mapSize.width}
-        />
-      ) : null}
 
       {vehicleScreenPoint && tooltipVisible ? (
         <Animated.View
@@ -2447,21 +2383,17 @@ export default function VehicleTrackerScreen() {
         <LiveDetailsSheet
           address={currentAddress}
           alertActive={isAlertActive}
-          carVariant={carVariant}
           coveredText={`${coveredKmText} km`}
           expanded={sheetExpanded}
           following={isFollowing}
           gpsText={gpsText}
           ignitionText={ignitionText}
-          modelLoadError={modelLoadError}
-          modelLoading={modelLoadState === 'loading'}
           nightMode={isNightMode}
           onClosePanel={closeOptionPanel}
           onExpand={expandSheet}
           onFollowLive={jumpToLive}
           onLayout={handleSheetLayout}
           onRouteTool={handleRouteTool}
-          onSelectModel={selectVehicleModel}
           onToggle={toggleSheet}
           onToggleTools={toggleTools}
           panHandlers={sheetPanResponder.panHandlers}
@@ -2624,11 +2556,9 @@ const VehiclePickerSheet = memo(function VehiclePickerSheet({
                       backgroundColor:
                         state === 'RUNNING'
                           ? BRAND.greenGlow
-                          : state === 'IDLE'
-                            ? '#F5A623'
-                            : state === 'STOPPED'
-                              ? BRAND.red
-                              : BRAND.muted,
+                          : state === 'STOPPED' || state === 'IDLE'
+                            ? BRAND.red
+                            : BRAND.muted,
                     },
                   ]}
                 />
@@ -2771,21 +2701,17 @@ const MapControlRail = memo(function MapControlRail({
 type LiveDetailsSheetProps = {
   address: string;
   alertActive: boolean;
-  carVariant: CarVariant;
   coveredText: string;
   expanded: boolean;
   following: boolean;
   gpsText: string;
   ignitionText: string;
-  modelLoadError: string | null;
-  modelLoading: boolean;
   nightMode: boolean;
   onClosePanel: () => void;
   onExpand: () => void;
   onFollowLive: () => void;
   onLayout: (event: LayoutChangeEvent) => void;
   onRouteTool: (id: RouteMapOptionId) => void;
-  onSelectModel: (variant: CarVariant) => void;
   onToggle: () => void;
   onToggleTools: () => void;
   panHandlers: PanResponderInstance['panHandlers'];
@@ -2832,21 +2758,17 @@ type LiveDetailsSheetProps = {
 const LiveDetailsSheet = memo(function LiveDetailsSheet({
   address,
   alertActive,
-  carVariant,
   coveredText,
   expanded,
   following,
   gpsText,
   ignitionText,
-  modelLoadError,
-  modelLoading,
   nightMode,
   onClosePanel,
   onExpand,
   onFollowLive,
   onLayout,
   onRouteTool,
-  onSelectModel,
   onToggle,
   onToggleTools,
   panHandlers,
@@ -2962,15 +2884,6 @@ const LiveDetailsSheet = memo(function LiveDetailsSheet({
           </View>
         ) : activeTab === 'cinematic' ? (
           <View style={styles.cinematicSection}>
-            <View style={[styles.sheetModelPicker, { marginTop: 0, marginBottom: 12 }]}>
-              <VehicleModelPicker
-                compact
-                errorMessage={modelLoadError}
-                loading={modelLoading}
-                onChange={onSelectModel}
-                value={carVariant}
-              />
-            </View>
             <Text style={styles.cinematicTitleText}>CAMERA MODES</Text>
             <View style={styles.cameraGrid}>
               {CINEMATIC_CAMERAS.map((item) => {
@@ -3790,13 +3703,13 @@ const styles = StyleSheet.create({
   },
   markerStatusCircle: {
     backgroundColor: 'rgba(255,255,255,0.08)',
-    borderRadius: 28,
+    borderRadius: LIVE_STATUS_CIRCLE_SIZE / 2,
     borderWidth: 2,
-    height: 56,
-    left: 4,
+    height: LIVE_STATUS_CIRCLE_SIZE,
+    left: (LIVE_MARKER_SIZE - LIVE_STATUS_CIRCLE_SIZE) / 2,
     position: 'absolute',
-    top: 4,
-    width: 56,
+    top: (LIVE_MARKER_SIZE - LIVE_STATUS_CIRCLE_SIZE) / 2,
+    width: LIVE_STATUS_CIRCLE_SIZE,
   },
   markerShadow: {
     backgroundColor: 'rgba(3, 10, 18, 0.32)',

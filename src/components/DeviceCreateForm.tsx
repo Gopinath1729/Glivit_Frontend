@@ -6,8 +6,14 @@ import { Button } from '@/src/components/ui/Button';
 import { SearchableDropdown, type DropdownOption } from '@/src/components/ui/SearchableDropdown';
 import { TextField } from '@/src/components/ui/TextField';
 import { apiErrorMessage } from '@/src/services/apiError';
-import { useCreateDeviceMutation, useUpdateDeviceMutation, type DeviceUpsertRequest } from '@/src/services/devicesApi';
-import { useGetGroupsQuery, useGetProjectsQuery, useGetUsersQuery } from '@/src/services/operationsApi';
+import {
+  useCreateDeviceMutation,
+  useIssueIngestTokenMutation,
+  useUpdateDeviceMutation,
+  type DeviceUpsertRequest,
+} from '@/src/services/devicesApi';
+import { useGetProjectsQuery, useGetUsersQuery } from '@/src/services/operationsApi';
+import { requestTrackingPermission, startTracking } from '@/src/services/phoneTracker';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
 
@@ -31,6 +37,7 @@ type Draft = {
 };
 
 type FieldErrors = Partial<Record<'name' | 'imei' | 'driverPhone' | 'expiryDate', string>>;
+type DeviceSourceType = 'GPS_DEVICE' | 'MOBILE_GPS';
 
 const CATEGORIES: {
   id: string;
@@ -94,21 +101,32 @@ type DeviceCreateFormProps = {
   onCancel?: () => void;
 };
 
-export function DeviceCreateForm({ initialDevice, onSuccess, onCancel }: DeviceCreateFormProps = {}) {
+export function DeviceCreateForm({ initialDevice, onSuccess }: DeviceCreateFormProps = {}) {
   const { colors: c } = useTheme();
   const styles = React.useMemo(() => makeStyles(c), [c]);
   const [createDevice, { isLoading: isCreating }] = useCreateDeviceMutation();
   const [updateDevice, { isLoading: isUpdating }] = useUpdateDeviceMutation();
-  const isLoading = isCreating || isUpdating;
+  const [issueIngestToken, { isLoading: isIssuingToken }] = useIssueIngestTokenMutation();
+  const isLoading = isCreating || isUpdating || isIssuingToken;
 
   const projects = useGetProjectsQuery();
-  const groups = useGetGroupsQuery();
   const driversQuery = useGetUsersQuery({ role: 'DRIVER', size: 100 });
 
   const [draft, setDraft] = React.useState<Draft>(() => emptyDraft(initialDevice));
   const [errors, setErrors] = React.useState<FieldErrors>({});
+  const [sourceType, setSourceType] = React.useState<DeviceSourceType>(
+    () => (initialDevice?.sourceType === 'MOBILE_GPS' ? 'MOBILE_GPS' : 'GPS_DEVICE')
+  );
+  const [sourceMenuOpen, setSourceMenuOpen] = React.useState(false);
 
   const isEditing = Boolean(initialDevice?.id);
+
+  React.useEffect(() => {
+    setDraft(emptyDraft(initialDevice));
+    setErrors({});
+    setSourceType(initialDevice?.sourceType === 'MOBILE_GPS' ? 'MOBILE_GPS' : 'GPS_DEVICE');
+    setSourceMenuOpen(false);
+  }, [initialDevice]);
 
   const driverOptions: DropdownOption[] = React.useMemo(() => {
     return (driversQuery.data?.content ?? [])
@@ -134,14 +152,27 @@ export function DeviceCreateForm({ initialDevice, onSuccess, onCancel }: DeviceC
   }, []);
 
   const imeiDigits = draft.imei.replace(/\D/g, '');
-  const requiredComplete = draft.name.trim().length >= 2 && imeiDigits.length === IMEI_LENGTH;
+  const isMobileGps = sourceType === 'MOBILE_GPS';
+  // Mobile GPS needs no blurb: the label and icon already say what it is,
+  // and the selector directly above repeated the same sentence.
+  const heroSubtitle = isMobileGps
+    ? isEditing
+      ? 'Update vehicle attributes and assignments for this phone tracker.'
+      : ''
+    : isEditing
+      ? 'Update device attributes, driver assignment, or SIM details.'
+      : 'Register a tracker and bind it to a vehicle. Only the name, IMEI and type are required.';
+  const requiredComplete =
+    draft.name.trim().length >= 2 && (isMobileGps || imeiDigits.length === IMEI_LENGTH);
 
   const validate = React.useCallback((): FieldErrors => {
     const next: FieldErrors = {};
     if (draft.name.trim().length < 2) next.name = 'Enter the vehicle name or registration number.';
-    const digits = draft.imei.replace(/\D/g, '');
-    if (digits.length === 0) next.imei = 'IMEI is required.';
-    else if (digits.length !== IMEI_LENGTH) next.imei = `IMEI must be ${IMEI_LENGTH} digits (currently ${digits.length}).`;
+    if (!isMobileGps) {
+      const digits = draft.imei.replace(/\D/g, '');
+      if (digits.length === 0) next.imei = 'IMEI is required.';
+      else if (digits.length !== IMEI_LENGTH) next.imei = `IMEI must be ${IMEI_LENGTH} digits (currently ${digits.length}).`;
+    }
     if (draft.driverPhone.trim() && !/^\+?[\d\s-]{7,16}$/.test(draft.driverPhone.trim())) {
       next.driverPhone = 'Enter a valid phone number.';
     }
@@ -149,12 +180,20 @@ export function DeviceCreateForm({ initialDevice, onSuccess, onCancel }: DeviceC
       next.expiryDate = 'Use the format YYYY-MM-DD.';
     }
     return next;
-  }, [draft]);
+  }, [draft, isMobileGps]);
 
   const submit = React.useCallback(async () => {
     const found = validate();
     setErrors(found);
     if (Object.keys(found).length > 0) return;
+
+    if (isMobileGps && !isEditing) {
+      const permission = await requestTrackingPermission();
+      if (!permission.granted) {
+        Alert.alert('Location access required', permission.message);
+        return;
+      }
+    }
 
     const trimmed = (value: string) => (value.trim() ? value.trim() : undefined);
     const body: DeviceUpsertRequest = {
@@ -164,14 +203,15 @@ export function DeviceCreateForm({ initialDevice, onSuccess, onCancel }: DeviceC
       driverName: trimmed(draft.driverName),
       driverPhone: trimmed(draft.driverPhone),
       expiryDate: trimmed(draft.expiryDate),
-      imei: draft.imei.replace(/\D/g, ''),
-      model: trimmed(draft.model),
+      imei: isMobileGps ? undefined : draft.imei.replace(/\D/g, ''),
+      model: isMobileGps ? undefined : trimmed(draft.model),
       name: draft.name.trim(),
       projectId: draft.projectId,
       remarks: trimmed(draft.remarks),
-      simApn: trimmed(draft.simApn),
-      simNumber: trimmed(draft.simNumber),
-      simProvider: trimmed(draft.simProvider),
+      simApn: isMobileGps ? undefined : trimmed(draft.simApn),
+      simNumber: isMobileGps ? undefined : trimmed(draft.simNumber),
+      simProvider: isMobileGps ? undefined : trimmed(draft.simProvider),
+      sourceType,
       speedUnit: draft.speedUnit,
       timezone: draft.timezone,
     };
@@ -180,31 +220,84 @@ export function DeviceCreateForm({ initialDevice, onSuccess, onCancel }: DeviceC
       if (initialDevice?.id) {
         await updateDevice({ id: initialDevice.id, body }).unwrap();
       } else {
-        await createDevice(body).unwrap();
+        const created = await createDevice(body).unwrap();
+        if (isMobileGps) {
+          try {
+            const { ingestToken } = await issueIngestToken(created.id).unwrap();
+            const tracking = await startTracking({
+              accuracy: 'high',
+              ingestToken,
+              onStats: () => undefined,
+            });
+            Alert.alert(
+              'Mobile GPS is live',
+              tracking.background
+                ? `${created.name} is now using this phone's live GPS location, including in the background.`
+                : `${created.name} is using this phone's live GPS location. Keep the app open because background access was not granted.`
+            );
+          } catch (trackingError) {
+            Alert.alert(
+              'Mobile GPS created',
+              `The vehicle was saved, but live tracking could not start: ${apiErrorMessage(trackingError)}`
+            );
+          }
+        }
       }
       setDraft(emptyDraft());
       setErrors({});
+      setSourceType('GPS_DEVICE');
+      setSourceMenuOpen(false);
       onSuccess?.();
     } catch (err) {
       Alert.alert(isEditing ? 'Device not updated' : 'Device not saved', apiErrorMessage(err));
     }
-  }, [createDevice, updateDevice, draft, validate, initialDevice, isEditing, onSuccess]);
-
-  const showOptional = true;
+  }, [
+    createDevice,
+    draft,
+    initialDevice,
+    isEditing,
+    isMobileGps,
+    issueIngestToken,
+    onSuccess,
+    sourceType,
+    updateDevice,
+    validate,
+  ]);
 
   return (
     <View style={styles.root}>
+      {!isEditing ? (
+        <DeviceTypeSelector
+          onChange={(value) => {
+            setSourceType(value);
+            setSourceMenuOpen(false);
+            setErrors((current) => ({ ...current, imei: undefined }));
+          }}
+          onToggle={() => setSourceMenuOpen((open) => !open)}
+          open={sourceMenuOpen}
+          value={sourceType}
+        />
+      ) : null}
+
       <View style={styles.hero}>
         <View style={styles.heroIcon}>
-          <MaterialCommunityIcons color={c.primary} name="cellphone-link" size={26} />
+          <MaterialCommunityIcons
+            color={c.primary}
+            name={isMobileGps ? 'cellphone-marker' : 'cellphone-link'}
+            size={26}
+          />
         </View>
         <View style={styles.heroText}>
-          <Text style={styles.heroTitle}>{isEditing ? 'Edit GPS Device' : 'Create GPS Device'}</Text>
-          <Text style={styles.heroSubtitle}>
+          <Text style={styles.heroTitle}>
             {isEditing
-              ? 'Update device attributes, driver assignment, or SIM details.'
-              : 'Register a tracker and bind it to a vehicle. Only the name, IMEI and type are required.'}
+              ? isMobileGps
+                ? 'Edit Mobile GPS'
+                : 'Edit GPS Device'
+              : isMobileGps
+                ? 'Mobile GPS'
+                : 'Create GPS Device'}
           </Text>
+          {heroSubtitle ? <Text style={styles.heroSubtitle}>{heroSubtitle}</Text> : null}
         </View>
       </View>
 
@@ -217,31 +310,33 @@ export function DeviceCreateForm({ initialDevice, onSuccess, onCancel }: DeviceC
           placeholder="TN20CM7677"
           value={draft.name}
         />
-        <View style={styles.imeiRow}>
-          <View style={styles.imeiInput}>
-            <TextField
-              error={errors.imei}
-              keyboardType="number-pad"
-              label={`IMEI (${imeiDigits.length}/${IMEI_LENGTH})`}
-              maxLength={20}
-              onChangeText={(value) => set('imei', value)}
-              placeholder="864000000000001"
-              value={draft.imei}
-            />
+        {!isMobileGps ? (
+          <View style={styles.imeiRow}>
+            <View style={styles.imeiInput}>
+              <TextField
+                error={errors.imei}
+                keyboardType="number-pad"
+                label={`IMEI (${imeiDigits.length}/${IMEI_LENGTH})`}
+                maxLength={20}
+                onChangeText={(value) => set('imei', value)}
+                placeholder="864000000000001"
+                value={draft.imei}
+              />
+            </View>
+            <Pressable
+              accessibilityLabel="Scan IMEI barcode"
+              accessibilityRole="button"
+              onPress={() =>
+                Alert.alert(
+                  'Scan IMEI',
+                  'The QR/barcode scanner is available in native builds with camera permission granted.'
+                )
+              }
+              style={[styles.scanButton, errors.imei ? styles.scanButtonRaised : null]}>
+              <MaterialCommunityIcons color={c.primary} name="qrcode-scan" size={24} />
+            </Pressable>
           </View>
-          <Pressable
-            accessibilityLabel="Scan IMEI barcode"
-            accessibilityRole="button"
-            onPress={() =>
-              Alert.alert(
-                'Scan IMEI',
-                'The QR/barcode scanner is available in native builds with camera permission granted.'
-              )
-            }
-            style={[styles.scanButton, errors.imei ? styles.scanButtonRaised : null]}>
-            <MaterialCommunityIcons color={c.primary} name="qrcode-scan" size={24} />
-          </Pressable>
-        </View>
+        ) : null}
         <FieldLabel>Vehicle type</FieldLabel>
         <View style={styles.categoryGrid}>
           {CATEGORIES.map((category) => {
@@ -268,8 +363,7 @@ export function DeviceCreateForm({ initialDevice, onSuccess, onCancel }: DeviceC
         </View>
       </FormSection>
 
-      {showOptional ? (
-        <>
+      {!isMobileGps ? (
           <FormSection icon="sim" step={2} title="SIM & connectivity">
             <TextField
               keyboardType="phone-pad"
@@ -304,8 +398,9 @@ export function DeviceCreateForm({ initialDevice, onSuccess, onCancel }: DeviceC
               value={draft.model}
             />
           </FormSection>
+      ) : null}
 
-          <FormSection icon="account-group-outline" step={3} title="Assignment">
+          <FormSection icon="account-group-outline" step={isMobileGps ? 2 : 3} title="Assignment">
             <SearchableDropdown
               emptyText="No active drivers found"
               label="Driver"
@@ -355,7 +450,7 @@ export function DeviceCreateForm({ initialDevice, onSuccess, onCancel }: DeviceC
             />
           </FormSection>
 
-          <FormSection icon="calendar-clock" step={4} title="Subscription & units">
+          <FormSection icon="calendar-clock" step={isMobileGps ? 3 : 4} title="Subscription & units">
             <TextField
               autoCapitalize="none"
               error={errors.expiryDate}
@@ -403,14 +498,16 @@ export function DeviceCreateForm({ initialDevice, onSuccess, onCancel }: DeviceC
               value={draft.remarks}
             />
           </FormSection>
-        </>
-      ) : null}
 
       <View style={styles.submitBar}>
         <Text style={styles.submitHint}>
           {requiredComplete
-            ? 'Ready to register this tracker.'
-            : 'Enter a vehicle name and a 15-digit IMEI to continue.'}
+            ? isMobileGps
+              ? 'Ready to use this phone as the GPS source.'
+              : 'Ready to register this tracker.'
+            : isMobileGps
+              ? 'Enter a vehicle name to continue.'
+              : 'Enter a vehicle name and a 15-digit IMEI to continue.'}
         </Text>
         <Button
           disabled={!requiredComplete}
@@ -420,6 +517,106 @@ export function DeviceCreateForm({ initialDevice, onSuccess, onCancel }: DeviceC
           onPress={() => void submit()}
         />
       </View>
+    </View>
+  );
+}
+
+const DEVICE_TYPE_OPTIONS: {
+  description?: string;
+  icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
+  label: string;
+  value: DeviceSourceType;
+}[] = [
+  {
+    description: 'Register a tracker and bind it to a vehicle.',
+    icon: 'router-wireless',
+    label: 'Create GPS Device',
+    value: 'GPS_DEVICE',
+  },
+  {
+    // Mobile GPS deliberately has no description. It was the same sentence three
+    // times over -- selector card, dropdown row and hero subtitle -- so the
+    // option now shows just its label and icon.
+    icon: 'cellphone-marker',
+    label: 'Mobile GPS',
+    value: 'MOBILE_GPS',
+  },
+];
+
+function DeviceTypeSelector({
+  onChange,
+  onToggle,
+  open,
+  value,
+}: {
+  onChange: (value: DeviceSourceType) => void;
+  onToggle: () => void;
+  open: boolean;
+  value: DeviceSourceType;
+}) {
+  const { colors: c } = useTheme();
+  const styles = React.useMemo(() => makeStyles(c), [c]);
+  const selected = DEVICE_TYPE_OPTIONS.find((option) => option.value === value)!;
+
+  return (
+    <View style={styles.deviceTypeField}>
+      <FieldLabel>Choose device type</FieldLabel>
+      <Pressable
+        accessibilityLabel={`Choose device type. ${selected.label} selected`}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        onPress={onToggle}
+        style={[styles.deviceTypeSelected, open && styles.deviceTypeSelectedOpen]}>
+        <View style={styles.deviceTypeIcon}>
+          <MaterialCommunityIcons color={c.primary} name={selected.icon} size={22} />
+        </View>
+        <View style={styles.deviceTypeCopy}>
+          <Text style={styles.deviceTypeTitle}>{selected.label}</Text>
+          {selected.description ? (
+            <Text style={styles.deviceTypeDescription}>{selected.description}</Text>
+          ) : null}
+        </View>
+        <MaterialCommunityIcons
+          color={c.textSecondary}
+          name={open ? 'chevron-up' : 'chevron-down'}
+          size={20}
+        />
+      </Pressable>
+
+      {open ? (
+        <View style={styles.deviceTypeMenu}>
+          {DEVICE_TYPE_OPTIONS.map((option, index) => {
+            const active = option.value === value;
+            return (
+              <Pressable
+                accessibilityRole="radio"
+                accessibilityState={{ checked: active }}
+                key={option.value}
+                onPress={() => onChange(option.value)}
+                style={[
+                  styles.deviceTypeOption,
+                  index > 0 && styles.deviceTypeOptionDivider,
+                  active && styles.deviceTypeOptionActive,
+                ]}>
+                <View style={styles.deviceTypeIcon}>
+                  <MaterialCommunityIcons color={c.primary} name={option.icon} size={21} />
+                </View>
+                <View style={styles.deviceTypeCopy}>
+                  <Text style={[styles.deviceTypeTitle, active && { color: c.primary }]}>
+                    {option.label}
+                  </Text>
+                  {option.description ? (
+                    <Text style={styles.deviceTypeDescription}>{option.description}</Text>
+                  ) : null}
+                </View>
+                {active ? (
+                  <MaterialCommunityIcons color={c.primary} name="check-circle" size={19} />
+                ) : null}
+              </Pressable>
+            );
+          })}
+        </View>
+      ) : null}
     </View>
   );
 }
@@ -455,42 +652,6 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
   const { colors: c } = useTheme();
   const styles = React.useMemo(() => makeStyles(c), [c]);
   return <Text style={styles.fieldLabel}>{children}</Text>;
-}
-
-/** Single-select chip row that also allows clearing the current choice. */
-function OptionRow({
-  emptyText,
-  onSelect,
-  options,
-  selectedId,
-}: {
-  emptyText: string;
-  onSelect: (id: number | undefined) => void;
-  options: { id: number; label: string }[];
-  selectedId?: number;
-}) {
-  const { colors: c } = useTheme();
-  const styles = React.useMemo(() => makeStyles(c), [c]);
-  if (options.length === 0) return <Text style={styles.emptyOption}>{emptyText}</Text>;
-  return (
-    <View style={styles.chipRow}>
-      {options.map((option) => {
-        const active = selectedId === option.id;
-        return (
-          <Pressable
-            accessibilityRole="button"
-            accessibilityState={{ selected: active }}
-            key={option.id}
-            onPress={() => onSelect(active ? undefined : option.id)}
-            style={[styles.chip, active && styles.chipActive]}>
-            <Text numberOfLines={1} style={[styles.chipText, active && styles.chipTextActive]}>
-              {option.label}
-            </Text>
-          </Pressable>
-        );
-      })}
-    </View>
-  );
 }
 
 function Segmented<T extends string>({
@@ -534,6 +695,62 @@ function oneYearFromNow() {
 const makeStyles = (c: ThemeColors) =>
   StyleSheet.create({
     root: { gap: spacing.md },
+    deviceTypeField: { gap: spacing.sm },
+    deviceTypeSelected: {
+      alignItems: 'center',
+      backgroundColor: c.surface,
+      borderColor: c.primary,
+      borderRadius: radius.md,
+      borderWidth: StyleSheet.hairlineWidth * 2,
+      flexDirection: 'row',
+      gap: spacing.sm,
+      minHeight: 64,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: spacing.sm,
+    },
+    deviceTypeSelectedOpen: {
+      borderBottomLeftRadius: 0,
+      borderBottomRightRadius: 0,
+    },
+    deviceTypeMenu: {
+      backgroundColor: c.surface,
+      borderBottomLeftRadius: radius.md,
+      borderBottomRightRadius: radius.md,
+      borderColor: c.border,
+      borderTopWidth: 0,
+      borderWidth: StyleSheet.hairlineWidth * 2,
+      marginTop: -spacing.sm,
+      overflow: 'hidden',
+    },
+    deviceTypeOption: {
+      alignItems: 'center',
+      flexDirection: 'row',
+      gap: spacing.sm,
+      minHeight: 58,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: spacing.sm,
+    },
+    deviceTypeOptionActive: { backgroundColor: c.accentSoft },
+    deviceTypeOptionDivider: {
+      borderTopColor: c.divider,
+      borderTopWidth: StyleSheet.hairlineWidth,
+    },
+    deviceTypeIcon: {
+      alignItems: 'center',
+      backgroundColor: c.accentSoft,
+      borderRadius: radius.sm,
+      height: 36,
+      justifyContent: 'center',
+      width: 36,
+    },
+    deviceTypeCopy: { flex: 1, minWidth: 0 },
+    deviceTypeTitle: { color: c.textPrimary, fontSize: typography.label, fontWeight: '800' },
+    deviceTypeDescription: {
+      color: c.textMuted,
+      fontSize: 10.5,
+      lineHeight: 14,
+      marginTop: 2,
+    },
     hero: {
       alignItems: 'center',
       backgroundColor: c.surface,
@@ -662,21 +879,6 @@ const makeStyles = (c: ThemeColors) =>
 
     pairRow: { flexDirection: 'row', gap: spacing.sm },
     pairItem: { flex: 1, gap: spacing.md, minWidth: 0 },
-
-    chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
-    chip: {
-      backgroundColor: c.surfaceAlt,
-      borderColor: c.border,
-      borderRadius: radius.pill,
-      borderWidth: StyleSheet.hairlineWidth * 2,
-      maxWidth: '100%',
-      paddingHorizontal: spacing.md,
-      paddingVertical: 8,
-    },
-    chipActive: { backgroundColor: c.primary, borderColor: c.primary },
-    chipText: { color: c.textSecondary, fontSize: typography.caption, fontWeight: '700' },
-    chipTextActive: { color: c.onPrimary, fontWeight: '900' },
-    emptyOption: { color: c.textMuted, fontSize: typography.caption },
 
     segmented: {
       backgroundColor: c.surfaceAlt,
