@@ -5,10 +5,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   AppState,
+  type AppStateStatus,
   LayoutChangeEvent,
   PanResponder,
   Platform,
   Pressable,
+  ScrollView,
   StyleSheet,
   Text,
   useWindowDimensions,
@@ -24,25 +26,46 @@ import {
 import MapView, { Marker } from '@/src/components/maps/NativeMap';
 import {
   sanitizeRouteCoordinates,
+  splitRouteCoordinates,
   StableBaseRoute,
   StableRouteLine,
 } from '@/src/components/StableRouteLayers';
 import { VehicleMarker, markerCategory } from '@/src/components/VehicleMarker';
 import { vehicleSprite } from '@/src/components/vehicleMarkerSprites';
+import { useMatchedHistoryRoute } from '@/src/hooks/useMatchedHistoryRoute';
 import { apiErrorMessage } from '@/src/services/apiError';
+import { coordinateOf } from '@/src/services/gpsPipeline';
 import { useGetDevicePlaybackQuery } from '@/src/services/devicesApi';
 import { getMapStyleInfo } from '@/src/services/mapStyle';
+import { advancePlaybackElapsed } from '@/src/services/playbackClock';
 import {
-  buildPlaybackTrack,
   haversineKm,
   sampleAt,
+  routeSegments,
+  travelledRouteSegments,
   type PlaybackTrack,
 } from '@/src/services/playbackEngine';
 import { normalizeHeading } from '@/src/services/vehicleMarkerAssets';
 import { useTheme } from '@/src/theme/ThemeProvider';
-import type { PlaybackEventMarker, PlaybackStopMarker } from '@/src/types/api';
+import type {
+  PlaybackEventMarker,
+  PlaybackResponse,
+  PlaybackStopMarker,
+  PlaybackTimelineSegment,
+} from '@/src/types/api';
 
-const SPEEDS = [0.5, 1, 2, 4, 8] as const;
+// Bright navigation palette. Playback should read like a focused journey view,
+// not a black diagnostics console, regardless of the surrounding app theme.
+import {
+  localDayRangeIso,
+  shiftDate,
+  todayStr,
+} from '@/src/services/localDates';
+
+const SPEEDS = [0.5, 1, 2, 4] as const;
+const ROUTE_BLUE = '#1473E6';
+const ROUTE_BLUE_AURA = 'rgba(45, 174, 255, 0.30)';
+const ROUTE_BLUE_BASE = 'rgba(75, 151, 235, 0.48)';
 type CameraMode = 'follow' | 'chase' | 'cinematic' | 'drone' | 'top' | 'overview';
 const CAMERAS: { id: CameraMode; icon: string; label: string }[] = [
   { id: 'follow', icon: 'navigation-variant', label: 'Follow' },
@@ -53,34 +76,14 @@ const CAMERAS: { id: CameraMode; icon: string; label: string }[] = [
   { id: 'overview', icon: 'fit-to-page-outline', label: 'Overview' },
 ];
 
-// Cinematic overlay palette (fixed night-scene glass, independent of app theme).
 const G = {
-  glass: 'rgba(10,14,22,0.66)',
-  glassStrong: 'rgba(8,11,18,0.82)',
-  hair: 'rgba(255,255,255,0.12)',
-  text: '#EAF1F8',
-  sub: '#9FB2C4',
-  track: 'rgba(255,255,255,0.14)',
+  glass: 'rgba(255,255,255,0.92)',
+  glassStrong: 'rgba(255,255,255,0.97)',
+  hair: 'rgba(20,75,94,0.14)',
+  text: '#123247',
+  sub: '#607783',
+  track: 'rgba(18,50,71,0.12)',
 };
-
-/** Returns today as a YYYY-MM-DD string in local time. */
-function todayStr(): string {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-
-/** Shift a YYYY-MM-DD string by `delta` days. */
-function shiftDate(dateStr: string, delta: number): string {
-  const d = new Date(`${dateStr}T12:00:00`);
-  d.setDate(d.getDate() + delta);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
 
 /** Format YYYY-MM-DD to human label ("Today", "Yesterday", or "23 Jul"). */
 function labelDate(dateStr: string): string {
@@ -141,12 +144,46 @@ function getCalendarDays(year: number, month: number) {
   return days;
 }
 
+function formatDuration(totalSeconds: number | null | undefined): string {
+  const seconds = Math.max(0, Math.round(Number(totalSeconds) || 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${remainder}s`;
+  return `${remainder}s`;
+}
+
+function formatHistoryTime(value: string | null | undefined): string {
+  if (!value) return 'Not available';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Not available';
+  return date.toLocaleString([], {
+    day: '2-digit',
+    hour: 'numeric',
+    minute: '2-digit',
+    month: 'short',
+  });
+}
+
+function timelinePresentation(segment: PlaybackTimelineSegment) {
+  switch (segment.type) {
+    case 'STOPPED':
+      return { color: '#DC2626', icon: 'map-marker-radius-outline', label: `Stop ${segment.stopIndex ?? ''}`.trim() } as const;
+    case 'NO_DATA':
+      return { color: '#64748B', icon: 'signal-off', label: 'No GPS signal' } as const;
+    default:
+      return { color: '#087C73', icon: 'navigation-variant-outline', label: 'Moving' } as const;
+  }
+}
+
 export default function TripPlaybackScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { colors } = useTheme();
   const params = useLocalSearchParams<{
     deviceId?: string;
+    imei?: string;
     name?: string;
     category?: string;
     make?: string;
@@ -154,8 +191,52 @@ export default function TripPlaybackScreen() {
     speed?: string;
     heading?: string;
   }>();
-  const deviceId = Number(params.deviceId);
-  const devicePreferenceKey = String(deviceId);
+
+  /**
+   * Route params, validated before anything reads them.
+   *
+   * expo-router hands back `string | string[]` - a param repeated in the URL
+   * arrives as an array - and every value here is optional in practice
+   * regardless of the type annotation, because a deep link or a caller that
+   * omitted one produces exactly the same shape. `Number(['7'])` is 7 but
+   * `Number(['7','8'])` is NaN, so the first value is taken explicitly rather
+   * than relying on coercion.
+   */
+  const vehicle = useMemo(() => {
+    const first = (value: string | string[] | undefined): string | undefined =>
+      Array.isArray(value) ? value[0] : value;
+    const rawId = first(params.deviceId);
+    const parsedId = rawId == null || rawId.trim() === '' ? Number.NaN : Number(rawId);
+    const id = Number.isSafeInteger(parsedId) && parsedId > 0 ? parsedId : null;
+    const name = first(params.name)?.trim();
+    return {
+      id,
+      imei: first(params.imei)?.trim() || null,
+      name: name || (id != null ? `Vehicle #${id}` : 'Vehicle'),
+      category: first(params.category)?.trim() || '',
+    };
+  }, [params.category, params.deviceId, params.imei, params.name]);
+  const deviceId = vehicle.id;
+
+  /**
+   * Back must never strand the user or throw.
+   *
+   * `router.back()` on a stack with nothing behind it - Playback reached from a
+   * notification or a cold deep link - has no destination. Falling back to this
+   * vehicle's own detail screen keeps the documented flow (Playback -> Vehicle
+   * Details) intact however the screen was reached.
+   */
+  const goBack = useCallback(() => {
+    if (router.canGoBack()) {
+      router.back();
+      return;
+    }
+    if (deviceId != null) {
+      router.replace({ pathname: '/device-profile', params: { id: String(deviceId) } });
+      return;
+    }
+    router.replace('/(app)/map');
+  }, [deviceId, router]);
 
   // Date-range filter — defaults to today.
   const today = todayStr();
@@ -172,23 +253,32 @@ export default function TripPlaybackScreen() {
   const [calYear, setCalYear] = useState(() => new Date().getFullYear());
   const [calMonth, setCalMonth] = useState(() => new Date().getMonth());
 
-  const fromIso = useMemo(() => `${activeFromDate}T00:00:00.000Z`, [activeFromDate]);
-  const toIso = useMemo(() => `${activeToDate}T23:59:59.999Z`, [activeToDate]);
+  // The chosen dates are LOCAL calendar days. Appending a Z read them as UTC,
+  // so east of Greenwich the window started hours into the day and everything
+  // before dawn fell into the previous one - which is how a day with a real trip
+  // on it came back empty.
+  const { from: fromIso, to: toIso } = useMemo(
+    () => localDayRangeIso(activeFromDate, activeToDate),
+    [activeFromDate, activeToDate]
+  );
 
   const isInvalidRange = draftFromDate > draftToDate;
 
   const { data, isFetching, isError, error, refetch } = useGetDevicePlaybackQuery(
-    { deviceId, from: fromIso, to: toIso },
-    { skip: !Number.isFinite(deviceId) }
+    // Keyed by THIS vehicle's id, so the cache entry, the in-flight request and
+    // the response all belong to the vehicle whose Playback icon was tapped.
+    // Nothing on this screen reads live-tracking state.
+    { deviceId: deviceId ?? 0, from: fromIso, to: toIso },
+    { refetchOnMountOrArgChange: true, skip: deviceId == null }
   );
 
-  const [playing, setPlaying] = useState(true);
-  const [appActive, setAppActive] = useState(AppState.currentState === 'active');
+  const [playing, setPlaying] = useState(false);
+  const [appActive, setAppActive] = useState(() => isForeground(AppState.currentState));
   const [speed, setSpeed] = useState<(typeof SPEEDS)[number]>(1);
   const [camera, setCamera] = useState<CameraMode>('cinematic');
   const [cameraCommandId, setCameraCommandId] = useState(0);
+  const [showHistoryDetails, setShowHistoryDetails] = useState(false);
   const [ui, setUi] = useState(0); // throttled progress for UI (0..1)
-  const [mapReady, setMapReady] = useState(false);
 
   const progressRef = useRef(0);
   const playingRef = useRef(playing);
@@ -204,7 +294,9 @@ export default function TripPlaybackScreen() {
   }, []);
 
 
-  const track = useMemo(() => buildPlaybackTrack(data?.points ?? []), [data?.points]);
+  // The route is the road the backend matched this history onto, and the track
+  // rides that road. Nothing here joins raw fixes into a line.
+  const { track } = useMatchedHistoryRoute(data);
   const points = track.points;
   /** A day only has playable history when there are at least two real fixes. */
   const hasTrack = points.length >= 2;
@@ -212,42 +304,69 @@ export default function TripPlaybackScreen() {
 
   /**
    * Rewind whenever the loaded date range changes.
+   *
+   * Keyed on the range and on whether there is a route, NOT on `data`: the cache
+   * hands back a new object on every refetch, and rewinding on those threw the
+   * playhead back to the start and forced playback on again mid-trip.
    */
   useEffect(() => {
     progressRef.current = 0;
     setUi(0);
-    setPlaying(hasTrack);
-  }, [data, hasTrack, activeFromDate, activeToDate]);
+    setPlaying(false);
+  }, [hasTrack, activeFromDate, activeToDate]);
 
   // Real trip duration (for the clock readout) and event tick fractions.
   const timing = useMemo(() => {
     if (points.length < 2) return { start: 0, end: 1, durationMin: 0 };
-    const start = new Date(points[0].t).getTime();
-    const end = start + track.totalDurationMs;
+    const firstPointTime = points[0]?.t ? new Date(points[0].t).getTime() : 0;
+    const start = Number.isFinite(firstPointTime) && firstPointTime > 0 ? firstPointTime : Date.now();
+    const duration = Math.max(1000, track.totalDurationMs || (points.length * 2000));
+    const end = start + duration;
     return { start, end, durationMin: Math.max(0, (end - start) / 60000) };
   }, [points, track.totalDurationMs]);
 
   const eventTicks = useMemo(() => {
     if (!data || timing.end <= timing.start) return [];
-    return data.events.map((e) => ({
+    return (data.events ?? []).map((e) => ({
       frac: Math.max(0, Math.min(1, (new Date(e.t).getTime() - timing.start) / (timing.end - timing.start))),
       type: e.eventType,
     }));
   }, [data, timing]);
 
   // 60fps clock — advances the ref (drives 3D) and throttles UI state at ~12fps.
+  const screenMountedRef = useRef(true);
+  useEffect(() => {
+    screenMountedRef.current = true;
+    return () => {
+      screenMountedRef.current = false;
+    };
+  }, []);
+
   useEffect(() => {
     let raf: number;
+    let cancelled = false;
     let lastUi = 0;
     let last = Date.now();
     const tick = () => {
+      // Re-scheduling FIRST and cancelling on the way out is what guarantees a
+      // single loop: the effect owns exactly one handle, and a re-run (speed,
+      // range, vehicle, app state) cancels its predecessor before the next
+      // frame. `cancelled` closes the one-frame window where a queued callback
+      // can still fire after cancelAnimationFrame.
+      if (cancelled || !screenMountedRef.current) return;
       raf = requestAnimationFrame(tick);
       const now = Date.now();
-      const dt = Math.min(0.05, (now - last) / 1000);
+      const frameDeltaMs = Math.min(50, now - last);
       last = now;
-      if (appActive && playingRef.current && points.length >= 2 && mapReady) {
-        progressRef.current +=
-          ((dt * 1000) / Math.max(1, track.totalDurationMs)) * speedRef.current;
+      if (appActive && playingRef.current && points.length >= 2) {
+        const durationMs = Math.max(1, track.totalDurationMs);
+        const nextElapsedMs = advancePlaybackElapsed(
+          progressRef.current * durationMs,
+          frameDeltaMs,
+          durationMs,
+          speedRef.current
+        );
+        progressRef.current = nextElapsedMs / durationMs;
         if (progressRef.current >= 1) {
           progressRef.current = 1;
           setPlaying(false);
@@ -259,12 +378,15 @@ export default function TripPlaybackScreen() {
       }
     };
     raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [appActive, mapReady, points.length, track.totalDurationMs]);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+    };
+  }, [appActive, points.length, track.totalDurationMs]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
-      setAppActive(state === 'active');
+      setAppActive(isForeground(state));
     });
     return () => subscription.remove();
   }, []);
@@ -286,7 +408,7 @@ export default function TripPlaybackScreen() {
         onPanResponderMove: (e) => {
           if (trackWidth.current > 0) seek(e.nativeEvent.locationX / trackWidth.current);
         },
-      }),
+      }).panHandlers,
     []
   );
 
@@ -304,7 +426,7 @@ export default function TripPlaybackScreen() {
     if (progressRef.current >= 1) restart();
     else setPlaying((p) => !p);
   }, [haptic, restart]);
-  const handleMapReady = useCallback(() => setMapReady(true), []);
+  const handleMapReady = useCallback(() => undefined, []);
 
   const openFilterModal = useCallback(() => {
     haptic();
@@ -360,14 +482,19 @@ export default function TripPlaybackScreen() {
     }
   }, [haptic]);
 
-  if (!Number.isFinite(deviceId)) {
-    return <Center text="No vehicle selected." />;
+  if (deviceId == null) {
+    return <Center onBack={goBack} text="No vehicle selected." />;
   }
 
   const currentSample = hasTrack ? sampleAt(track, ui * track.totalDurationMs) : null;
   const curSpeed = Math.round(currentSample?.speed ?? 0);
   const elapsedMin = hasTrack ? timing.durationMin * ui : 0;
   const coveredDistanceKm = currentSample?.distanceKm ?? 0;
+  // Totals belong to the backend's validated GPS sequence. Measuring the
+  // rendered road geometry or the simplified client track inflates distance
+  // and can shift durations around stops.
+  const journeyDistanceKm = data?.summary?.distanceKm ?? data?.distanceKm ?? 0;
+  const journeySeconds = data?.summary?.totalSeconds ?? Math.round(track.totalDurationMs / 1000);
 
   return (
     <SafeAreaView edges={['bottom']} style={styles.root}>
@@ -379,14 +506,14 @@ export default function TripPlaybackScreen() {
       {hasTrack && data ? (
         <CinematicTripMap
           accent={colors.primary}
-          category={params.category}
+          category={vehicle.category}
           cameraCommandId={cameraCommandId}
           cameraMode={camera}
-          events={data.events}
+          events={data.events ?? []}
           onReady={handleMapReady}
           playing={appActive && playing}
           speed={speed}
-          stops={data.stops}
+          stops={data.stops ?? []}
           track={track}
           ui={ui}
         />
@@ -409,10 +536,15 @@ export default function TripPlaybackScreen() {
           ) : (
             <>
               <MaterialCommunityIcons color={G.sub} name="map-marker-off-outline" size={44} />
-              <Text style={styles.placeholderTitle}>No history available</Text>
+              {/* The screen stays open and fully usable on an empty range - the
+                  date filter above is still mounted - so the user can pick
+                  another period instead of being returned to Vehicle Details. */}
+              <Text style={styles.placeholderTitle}>
+                No history data available for the selected period
+              </Text>
               <Text style={styles.placeholderText}>
                 {activeFromDate === activeToDate
-                  ? `${labelDate(activeFromDate)} has no recorded trip for this vehicle.`
+                  ? `${labelDate(activeFromDate)} has no recorded trip for ${vehicle.name}.`
                   : `No recorded trips between ${labelDate(activeFromDate)} and ${labelDate(activeToDate)}.`}
                 {' Use the filter above to select another date range.'}
               </Text>
@@ -424,14 +556,14 @@ export default function TripPlaybackScreen() {
 
       {/* Top bar */}
       <View style={[styles.topBar, { paddingTop: insets.top + 8 }]}>
-        <Pressable accessibilityLabel="Back" hitSlop={12} onPress={() => router.back()} style={styles.iconBtn}>
+        <Pressable accessibilityLabel="Back" hitSlop={12} onPress={goBack} style={styles.iconBtn}>
           <MaterialCommunityIcons color={G.text} name="arrow-left" size={22} />
         </Pressable>
         <View style={styles.titleWrap}>
-          <Text numberOfLines={1} style={styles.title}>{params.name ?? `Vehicle #${deviceId}`}</Text>
+          <Text numberOfLines={1} style={styles.title}>{vehicle.name}</Text>
           <Text numberOfLines={1} style={styles.subtitle}>
             {hasTrack && data
-              ? `${data.distanceKm.toFixed(1)} km · ${Math.round(timing.durationMin)} min · ${data.returnedPoints} pts`
+              ? `${journeyDistanceKm.toFixed(1)} km · ${formatDuration(journeySeconds)} · ${data.returnedPoints} GPS pts`
               : isFetching
                 ? 'Loading route history…'
                 : isError
@@ -456,6 +588,19 @@ export default function TripPlaybackScreen() {
           <MaterialCommunityIcons color={G.sub} name="chevron-down" size={14} />
         </Pressable>
         <Pressable
+          accessibilityLabel="Open trip history details"
+          accessibilityRole="button"
+          disabled={!data}
+          hitSlop={10}
+          onPress={() => {
+            haptic();
+            setPlaying(false);
+            setShowHistoryDetails(true);
+          }}
+          style={[styles.iconBtn, !data && styles.deckDisabled]}>
+          <MaterialCommunityIcons color={G.text} name="clipboard-text-clock-outline" size={20} />
+        </Pressable>
+        <Pressable
           accessibilityLabel="Reload trip history"
           accessibilityRole="button"
           disabled={isFetching}
@@ -478,7 +623,7 @@ export default function TripPlaybackScreen() {
           <View style={styles.sceneSignal} />
           <View>
             <Text style={styles.sceneEyebrow}>
-              {ui >= 1 ? 'ROUTE COMPLETE' : 'NATIVE 3D MAP'}
+              {ui >= 1 ? 'ROUTE COMPLETE' : 'GEOAPIFY DRIVE VIEW'}
             </Text>
             <Text style={styles.sceneMode}>
               {ui >= 1
@@ -537,7 +682,7 @@ export default function TripPlaybackScreen() {
           <View
             style={styles.track}
             onLayout={onTrackLayout}
-            {...(hasTrack ? pan.panHandlers : {})}>
+            {...(hasTrack ? pan : {})}>
             <View style={[styles.trackFill, { width: `${ui * 100}%`, backgroundColor: colors.primary }]} />
             {eventTicks.map((t, i) => (
               <View key={i} style={[styles.tick, { left: `${t.frac * 100}%`, backgroundColor: G.text }]} />
@@ -681,7 +826,6 @@ export default function TripPlaybackScreen() {
             {/* Days Grid */}
             <View style={styles.daysGrid}>
               {getCalendarDays(calYear, calMonth).map((cell, idx) => {
-                const isSelected = cell.dateStr === (pickerTarget === 'from' ? draftFromDate : draftToDate);
                 const isFrom = cell.dateStr === draftFromDate;
                 const isTo = cell.dateStr === draftToDate;
                 const inRange = cell.dateStr >= draftFromDate && cell.dateStr <= draftToDate;
@@ -747,6 +891,14 @@ export default function TripPlaybackScreen() {
           </View>
         </View>
       ) : null}
+
+      {showHistoryDetails && data ? (
+        <HistoryDetails
+          data={data}
+          onClose={() => setShowHistoryDetails(false)}
+          vehicleName={vehicle.name}
+        />
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -760,19 +912,215 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function Center({ text, spinner, onRetry }: { text: string; spinner?: boolean; onRetry?: () => void }) {
+function HistoryDetails({
+  data,
+  onClose,
+  vehicleName,
+}: {
+  data: PlaybackResponse;
+  onClose: () => void;
+  vehicleName: string;
+}) {
+  const summary = data.summary;
+  const timeline = data.timeline ?? [];
+  const stops = data.stops ?? [];
+  const rejected = Object.entries(data.rejectedPoints ?? {}).filter(([, count]) => count > 0);
+  const rejectedTotal = rejected.reduce((total, [, count]) => total + count, 0);
+  const distanceKm = summary?.distanceKm ?? data.distanceKm ?? 0;
+
   return (
-    <View style={styles.center}>
-      {spinner ? <ActivityIndicator color="#22c55e" size="large" /> : (
-        <MaterialCommunityIcons color={G.sub} name="movie-open-outline" size={48} />
-      )}
-      <Text style={styles.centerText}>{text}</Text>
-      {onRetry ? (
-        <Pressable onPress={onRetry} style={styles.retry}>
-          <Text style={styles.retryText}>Retry</Text>
-        </Pressable>
-      ) : null}
+    <View style={styles.historyBackdrop}>
+      <Pressable accessibilityLabel="Close trip history" onPress={onClose} style={StyleSheet.absoluteFill} />
+      <View style={styles.historyCard}>
+        <View style={styles.historyHeader}>
+          <View style={styles.historyHeaderCopy}>
+            <Text style={styles.historyEyebrow}>TRIP HISTORY</Text>
+            <Text numberOfLines={1} style={styles.historyTitle}>{vehicleName}</Text>
+            <Text style={styles.historyRange}>
+              {formatHistoryTime(summary?.startTime)} – {formatHistoryTime(summary?.endTime)}
+            </Text>
+          </View>
+          <Pressable accessibilityLabel="Close history details" hitSlop={10} onPress={onClose} style={styles.historyClose}>
+            <MaterialCommunityIcons color={G.text} name="close" size={22} />
+          </Pressable>
+        </View>
+
+        <ScrollView contentContainerStyle={styles.historyContent} showsVerticalScrollIndicator={false}>
+          <View style={styles.historySummaryGrid}>
+            <HistoryMetric icon="map-marker-distance" label="Distance" value={`${distanceKm.toFixed(2)} km`} />
+            <HistoryMetric icon="clock-outline" label="Total time" value={formatDuration(summary?.totalSeconds)} />
+            <HistoryMetric icon="car-arrow-right" label="Moving" value={formatDuration(summary?.movingSeconds)} tone="#087C73" />
+            <HistoryMetric icon="stop-circle-outline" label="Stopped" value={formatDuration(summary?.stoppedSeconds)} tone="#DC2626" />
+            <HistoryMetric icon="signal-off" label="No signal" value={formatDuration(summary?.noDataSeconds)} tone="#64748B" />
+            <HistoryMetric icon="map-marker-check-outline" label="Stops" value={String(summary?.stopCount ?? stops.length)} tone="#D97706" />
+          </View>
+
+          <View style={styles.historySection}>
+            <Text style={styles.historySectionTitle}>Journey endpoints</Text>
+            <HistoryLocation
+              color="#16A34A"
+              label="Started"
+              time={summary?.startLocation?.time ?? summary?.startTime}
+              address={summary?.startLocation?.address}
+              latitude={summary?.startLocation?.lat}
+              longitude={summary?.startLocation?.lng}
+            />
+            <View style={styles.endpointConnector} />
+            <HistoryLocation
+              color="#DC2626"
+              label="Ended"
+              time={summary?.endLocation?.time ?? summary?.endTime}
+              address={summary?.endLocation?.address}
+              latitude={summary?.endLocation?.lat}
+              longitude={summary?.endLocation?.lng}
+            />
+          </View>
+
+          <View style={styles.historySection}>
+            <Text style={styles.historySectionTitle}>Chronological activity</Text>
+            {timeline.length > 0 ? timeline.map((segment, index) => {
+              const presentation = timelinePresentation(segment);
+              const address = segment.type === 'STOPPED'
+                ? segment.startAddress
+                : segment.startAddress && segment.endAddress
+                  ? `${segment.startAddress} → ${segment.endAddress}`
+                  : segment.startAddress ?? segment.endAddress;
+              return (
+                <View key={`${segment.type}-${segment.from}-${index}`} style={styles.timelineDetailRow}>
+                  <View style={[styles.timelineDetailIcon, { backgroundColor: `${presentation.color}14` }]}>
+                    <MaterialCommunityIcons color={presentation.color} name={presentation.icon} size={19} />
+                  </View>
+                  <View style={styles.timelineDetailBody}>
+                    <View style={styles.timelineDetailHeading}>
+                      <Text style={[styles.timelineDetailTitle, { color: presentation.color }]}>{presentation.label}</Text>
+                      <Text style={styles.timelineDetailDuration}>{formatDuration(segment.seconds)}</Text>
+                    </View>
+                    <Text style={styles.timelineDetailTime}>
+                      {formatHistoryTime(segment.from)} – {formatHistoryTime(segment.to)}
+                    </Text>
+                    {address ? <Text numberOfLines={2} style={styles.timelineDetailAddress}>{address}</Text> : null}
+                    {segment.type === 'MOVING' ? (
+                      <Text style={styles.timelineDetailMeta}>
+                        {segment.distanceKm.toFixed(2)} km · avg {segment.averageSpeedKmh.toFixed(1)} km/h · max {segment.maxSpeedKmh.toFixed(1)} km/h
+                      </Text>
+                    ) : null}
+                  </View>
+                </View>
+              );
+            }) : (
+              <Text style={styles.historyEmpty}>No activity segments were recorded in this period.</Text>
+            )}
+          </View>
+
+          {stops.length > 0 ? (
+            <View style={styles.historySection}>
+              <Text style={styles.historySectionTitle}>Stop details</Text>
+              {stops.map((stop) => (
+                <View key={`${stop.index}-${stop.from}`} style={styles.stopDetailRow}>
+                  <View style={styles.stopNumber}><Text style={styles.stopNumberText}>{stop.index}</Text></View>
+                  <View style={styles.stopDetailBody}>
+                    <Text style={styles.stopDetailTitle}>{stop.address || `${stop.lat.toFixed(5)}, ${stop.lng.toFixed(5)}`}</Text>
+                    <Text style={styles.stopDetailMeta}>
+                      {formatHistoryTime(stop.from)} – {formatHistoryTime(stop.to)} · {formatDuration(stop.seconds)}
+                    </Text>
+                    <Text style={styles.stopDetailDistance}>{stop.distanceFromPreviousKm.toFixed(2)} km from previous stop/start</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          ) : null}
+
+          <View style={styles.qualityCard}>
+            <View style={styles.qualityTitleRow}>
+              <MaterialCommunityIcons
+                color={rejectedTotal > 0 ? '#D97706' : '#16A34A'}
+                name={rejectedTotal > 0 ? 'shield-alert-outline' : 'shield-check-outline'}
+                size={21}
+              />
+              <View style={styles.qualityTitleCopy}>
+                <Text style={styles.qualityTitle}>GPS data quality</Text>
+                <Text style={styles.qualitySubtitle}>
+                  {data.returnedPoints} valid of {data.totalPoints} received · {data.matchStatus ?? 'UNMATCHED'} route
+                </Text>
+              </View>
+            </View>
+            {rejected.map(([reason, count]) => (
+              <View key={reason} style={styles.qualityReasonRow}>
+                <Text style={styles.qualityReason}>{reason.replaceAll('_', ' ').toLowerCase()}</Text>
+                <Text style={styles.qualityCount}>{count}</Text>
+              </View>
+            ))}
+          </View>
+        </ScrollView>
+      </View>
     </View>
+  );
+}
+
+function HistoryMetric({ icon, label, tone = G.text, value }: { icon: string; label: string; tone?: string; value: string }) {
+  return (
+    <View style={styles.historyMetric}>
+      <MaterialCommunityIcons color={tone} name={icon as never} size={18} />
+      <Text style={[styles.historyMetricValue, { color: tone }]}>{value}</Text>
+      <Text style={styles.historyMetricLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function HistoryLocation({
+  address,
+  color,
+  label,
+  latitude,
+  longitude,
+  time,
+}: {
+  address?: string | null;
+  color: string;
+  label: string;
+  latitude?: number;
+  longitude?: number;
+  time?: string | null;
+}) {
+  const coordinate = Number.isFinite(latitude) && Number.isFinite(longitude)
+    ? `${latitude!.toFixed(5)}, ${longitude!.toFixed(5)}`
+    : 'Coordinates unavailable';
+  return (
+    <View style={styles.endpointRow}>
+      <View style={[styles.endpointDot, { backgroundColor: color }]} />
+      <View style={styles.endpointBody}>
+        <View style={styles.endpointHeading}>
+          <Text style={styles.endpointLabel}>{label}</Text>
+          <Text style={styles.endpointTime}>{formatHistoryTime(time)}</Text>
+        </View>
+        <Text numberOfLines={2} style={styles.endpointAddress}>{address || coordinate}</Text>
+      </View>
+    </View>
+  );
+}
+
+function Center({ text, spinner, onBack, onRetry }: { text: string; spinner?: boolean; onBack?: () => void; onRetry?: () => void }) {
+  return (
+    <SafeAreaView edges={['top', 'bottom']} style={styles.center}>
+      {onBack ? (
+        <View style={{ width: '100%', paddingHorizontal: 16, paddingTop: 8 }}>
+          <Pressable accessibilityLabel="Back" onPress={onBack} style={styles.iconBtn}>
+            <MaterialCommunityIcons color={G.text} name="arrow-left" size={22} />
+          </Pressable>
+        </View>
+      ) : null}
+      <View style={{ alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12 }}>
+        {spinner ? <ActivityIndicator color="#22c55e" size="large" /> : (
+          <MaterialCommunityIcons color={G.sub} name="movie-open-outline" size={48} />
+        )}
+        <Text style={styles.centerText}>{text}</Text>
+        {onRetry ? (
+          <Pressable onPress={onRetry} style={styles.retry}>
+            <Text style={styles.retryText}>Retry</Text>
+          </Pressable>
+        ) : null}
+      </View>
+    </SafeAreaView>
   );
 }
 
@@ -787,6 +1135,19 @@ function lerpAngle(start: number, end: number, t: number): number {
  * src/components/vehicleMarkerSprites. iOS keeps the vector marker because
  * MapKit has no marker rotation at all.
  */
+/**
+ * Is the app in the foreground?
+ *
+ * Android reports `AppState.currentState` as "unknown" until the native module
+ * has answered, and an app that is already foregrounded never fires a change
+ * event to correct it. Comparing against "active" therefore left the playback
+ * clock gated off for the whole session with no way to recover, so anything not
+ * explicitly backgrounded counts as active.
+ */
+function isForeground(state: AppStateStatus | null | undefined): boolean {
+  return state !== 'background' && state !== 'inactive';
+}
+
 const USE_VEHICLE_SPRITE = Platform.OS === 'android';
 
 type CinematicTripMapProps = {
@@ -811,35 +1172,37 @@ function coordinateAhead(
   heading: number,
   meters: number
 ) {
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return { latitude: 0, longitude: 0 };
+  }
   if (meters <= 0) return { latitude, longitude };
   const distance = meters / 6_371_000;
   const bearing = (normalizeHeading(heading) * Math.PI) / 180;
   const lat1 = (latitude * Math.PI) / 180;
   const lng1 = (longitude * Math.PI) / 180;
-  const lat2 = Math.asin(
-    Math.sin(lat1) * Math.cos(distance) +
-    Math.cos(lat1) * Math.sin(distance) * Math.cos(bearing)
-  );
-  const lng2 =
-    lng1 +
-    Math.atan2(
-      Math.sin(bearing) * Math.sin(distance) * Math.cos(lat1),
-      Math.cos(distance) - Math.sin(lat1) * Math.sin(lat2)
-    );
+  const sinLat1 = Math.sin(lat1);
+  const cosLat1 = Math.cos(lat1);
+  const sinDist = Math.sin(distance);
+  const cosDist = Math.cos(distance);
+  const sinLat2 = sinLat1 * cosDist + cosLat1 * sinDist * Math.cos(bearing);
+  const lat2 = Math.asin(Math.max(-1, Math.min(1, sinLat2)));
+  const y = Math.sin(bearing) * sinDist * cosLat1;
+  const x = cosDist - sinLat1 * Math.sin(lat2);
+  const lng2 = lng1 + Math.atan2(y, x);
+  const resultLat = (lat2 * 180) / Math.PI;
+  const resultLng = (lng2 * 180) / Math.PI;
+  if (!Number.isFinite(resultLat) || !Number.isFinite(resultLng)) {
+    return { latitude, longitude };
+  }
   return {
-    latitude: (lat2 * 180) / Math.PI,
-    longitude: (lng2 * 180) / Math.PI,
+    latitude: resultLat,
+    longitude: resultLng,
   };
 }
 
-function isDisplayCoordinate(latitude: number, longitude: number) {
-  return (
-    Number.isFinite(latitude) &&
-    Number.isFinite(longitude) &&
-    Math.abs(latitude) <= 90 &&
-    Math.abs(longitude) <= 180 &&
-    !(latitude === 0 && longitude === 0)
-  );
+/** The one coordinate gate, shared with every other stage of the pipeline. */
+function isDisplayCoordinate(latitude: unknown, longitude: unknown) {
+  return coordinateOf(latitude, longitude) != null;
 }
 
 /**
@@ -861,6 +1224,27 @@ function CinematicTripMap({
   track,
   ui,
 }: CinematicTripMapProps) {
+  /**
+   * Whether the native map may be mounted AT ALL.
+   *
+   * On Android, constructing react-native-maps' MapView without
+   * `com.google.android.geo.API_KEY` in the manifest throws
+   * `IllegalStateException: API key not found` from
+   * `com.rnmaps.maps.MapView.<init>` — a FATAL EXCEPTION on the main thread, so
+   * the process dies. It is a native crash during view pre-allocation, which
+   * means no JavaScript error boundary, `try`/`catch` or `onError` prop can see
+   * it, let alone stop it.
+   *
+   * `app.config.js` only injects that meta-data when GOOGLE_MAPS_API_KEY is
+   * set, so any build made without the key crashes the instant this screen
+   * mounts its map. That is the whole of "tapping Playback exits the app": Live
+   * Tracking already made this check and fell back to the WebView map, and this
+   * screen simply never made it.
+   */
+  // One provider and one rendering engine on every platform. The previous
+  // native branch silently switched Android playback back to Google Maps and
+  // could crash before React mounted when that key was absent.
+  const useNativeMap = false;
   const mapRef = useRef<MapView>(null);
   const mountedRef = useRef(true);
   const projectionRequestRef = useRef(0);
@@ -872,7 +1256,7 @@ function CinematicTripMap({
   const readyReportedRef = useRef(false);
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
-  const [mapLoaded, setMapLoaded] = useState(Platform.OS === 'web');
+  const [mapLoaded, setMapLoaded] = useState(!useNativeMap);
   const [autoFollow, setAutoFollow] = useState(true);
   const [resumeRequest, setResumeRequest] = useState(0);
   const [mapCameraHeading, setMapCameraHeading] = useState(0);
@@ -896,40 +1280,48 @@ function CinematicTripMap({
     [points]
   );
 
+  const playbackSample = useMemo(
+    () => sampleAt(track, ui * track.totalDurationMs),
+    [track, ui]
+  );
   const cur = useMemo(() => {
-    const sample = sampleAt(track, ui * track.totalDurationMs);
+    const sample = playbackSample;
+    const lat = sample?.latitude ?? points[0]?.lat;
+    const lng = sample?.longitude ?? points[0]?.lng;
     return {
-      lat: sample?.latitude ?? points[0]?.lat ?? 0,
-      lng: sample?.longitude ?? points[0]?.lng ?? 0,
-      heading: sample?.heading ?? 0,
-      speed: sample?.speed ?? 0,
+      // `?? 0` here used to put the vehicle on Null Island whenever no sample
+      // and no first point were available. `hasValidPosition` is what the
+      // marker is gated on instead, so the absence of a position draws no
+      // vehicle rather than drawing one 500 km off the coast of Ghana.
+      lat: lat ?? 0,
+      lng: lng ?? 0,
+      hasValidPosition: isDisplayCoordinate(lat as number, lng as number),
+      heading: Number.isFinite(sample?.heading) ? (sample as { heading: number }).heading : 0,
+      speed: Number.isFinite(sample?.speed) ? (sample as { speed: number }).speed : 0,
       atEnd: sample?.atEnd ?? false,
       completedPointCount: sample?.completedPointCount ?? 0,
       segmentIndex: sample?.segmentIndex ?? 0,
     };
-  }, [points, track, ui]);
-  const completedRouteCoords = useMemo(
-    () =>
-      sanitizeRouteCoordinates(
-        points
-          .slice(0, cur.completedPointCount)
-          .map((point) => ({ latitude: point.lat, longitude: point.lng }))
-      ),
-    [cur.completedPointCount, points]
+  }, [playbackSample, points]);
+  // One polyline per observed run. A coverage gap is left undrawn rather than
+  // closed with a straight line across roads that were never recorded.
+  // Each run is split again on the segment rule before it is drawn. The track's
+  // own runs already break at the coverage gaps the backend flagged; this
+  // catches a step inside a run that no observed stretch of road could be, so a
+  // diagonal can never survive to the polyline.
+  const fullRouteSegments = useMemo(
+    () => routeSegments(track).flatMap((segment) => splitRouteCoordinates(segment)),
+    [track]
   );
-  const progressTail = useMemo(() => {
-    if (cur.atEnd) return [];
-    const start = completedRouteCoords[completedRouteCoords.length - 1];
-    if (
-      !start ||
-      haversineKm(start.latitude, start.longitude, cur.lat, cur.lng) < 0.0005
-    ) {
-      return [];
-    }
-    return [start, { latitude: cur.lat, longitude: cur.lng }];
-  }, [completedRouteCoords, cur]);
+  const travelledRouteSegs = useMemo(
+    () =>
+      travelledRouteSegments(track, playbackSample).flatMap((segment) =>
+        splitRouteCoordinates(segment)
+      ),
+    [playbackSample, track]
+  );
 
-  const styleInfo = getMapStyleInfo('dark');
+  const styleInfo = getMapStyleInfo('bright');
   const webMarkers = useMemo<WebMapMarker[]>(
     () => [
       {
@@ -944,18 +1336,49 @@ function CinematicTripMap({
     ],
     [accent, category, cur, playing]
   );
-  const webPolyline = useMemo<[number, number][]>(
-    () => points.map((p) => [p.lng, p.lat] as [number, number]),
-    [points]
+  const webPolylines = useMemo<[number, number][][]>(
+    () =>
+      travelledRouteSegs.map((segment) =>
+        segment.map((point) => [point.longitude, point.latitude] as [number, number])
+      ),
+    [travelledRouteSegs]
   );
 
   const validEvents = useMemo(
-    () => events.filter((event) => isDisplayCoordinate(event.lat, event.lng)),
+    () => (events ?? []).filter((event) => isDisplayCoordinate(event.lat, event.lng)),
     [events]
   );
   const validStops = useMemo(
-    () => stops.filter((stop) => isDisplayCoordinate(stop.lat, stop.lng)),
+    () => (stops ?? []).filter((stop) => isDisplayCoordinate(stop.lat, stop.lng)),
     [stops]
+  );
+
+  const webHistory = useMemo(
+    () => {
+      const firstPoint = fullRouteSegments[0]?.[0];
+      const lastSegment = fullRouteSegments[fullRouteSegments.length - 1];
+      const lastPoint = lastSegment?.[lastSegment.length - 1];
+      return {
+        routes: fullRouteSegments.map((segment) =>
+        segment.map((point) => [point.longitude, point.latitude] as [number, number])
+      ),
+        stops: validStops.map((stop, index) => ({
+          index: index + 1,
+          lat: stop.lat,
+          lng: stop.lng,
+          active: false,
+        })),
+        events: validEvents.map((event, index) => ({
+          id: `${event.t}-${index}`,
+          lat: event.lat,
+          lng: event.lng,
+          label: event.eventType.replaceAll('_', ' '),
+        })),
+        start: firstPoint ? { lat: firstPoint.latitude, lng: firstPoint.longitude } : null,
+        end: lastPoint ? { lat: lastPoint.latitude, lng: lastPoint.longitude } : null,
+      };
+    },
+    [fullRouteSegments, validEvents, validStops]
   );
 
   const reportReady = useCallback(() => {
@@ -966,12 +1389,12 @@ function CinematicTripMap({
 
   useEffect(() => {
     mountedRef.current = true;
-    if (Platform.OS === 'web') reportReady();
+    if (!useNativeMap) reportReady();
     return () => {
       mountedRef.current = false;
       projectionRequestRef.current += 1;
     };
-  }, [reportReady]);
+  }, [reportReady, useNativeMap]);
 
   useEffect(() => {
     setAutoFollow(true);
@@ -985,7 +1408,9 @@ function CinematicTripMap({
   useEffect(() => {
     if (USE_VEHICLE_SPRITE) return;
     setVehicleTracksView(true);
-    const timer = setTimeout(() => setVehicleTracksView(false), 240);
+    const timer = setTimeout(() => {
+      if (mountedRef.current) setVehicleTracksView(false);
+    }, 240);
     return () => clearTimeout(timer);
   }, [accent, headingBucket, playing]);
 
@@ -1006,29 +1431,37 @@ function CinematicTripMap({
   }, [mapLoaded]);
 
   useEffect(() => {
-    if (Platform.OS === 'web') return;
+    if (!useNativeMap) return;
     void projectVehicle(false);
-  }, [projectVehicle]);
+  }, [projectVehicle, useNativeMap]);
 
   useEffect(() => {
-    if (Platform.OS === 'web' || !mapLoaded || !autoFollow || !mapRef.current) return;
+    if (!useNativeMap || !mapLoaded || !autoFollow || !mapRef.current) return;
+    // A camera animation started against a map that is being torn down is a
+    // native-side call on a released view.
+    if (!mountedRef.current) return;
+    if (!cur.hasValidPosition) return;
 
     const now = Date.now();
     const modeChanged = lastCameraModeRef.current !== cameraMode;
     if (cameraMode === 'overview') {
       if (modeChanged) {
-        mapRef.current.setCamera({ heading: 0, pitch: 0 });
-        setMapCameraHeading(0);
-        if (routeCoords.length === 1) {
-          mapRef.current.animateCamera(
-            { center: routeCoords[0], heading: 0, pitch: 0, zoom: 16 },
-            { duration: 520 }
-          );
-        } else if (routeCoords.length >= 2) {
-          mapRef.current.fitToCoordinates(routeCoords, {
-            edgePadding: mapPadding,
-            animated: true,
-          });
+        try {
+          mapRef.current.setCamera({ heading: 0, pitch: 0 });
+          setMapCameraHeading(0);
+          if (routeCoords.length === 1 && routeCoords[0]) {
+            mapRef.current.animateCamera(
+              { center: routeCoords[0], heading: 0, pitch: 0, zoom: 16 },
+              { duration: 520 }
+            );
+          } else if (routeCoords.length >= 2) {
+            mapRef.current.fitToCoordinates(routeCoords, {
+              edgePadding: mapPadding,
+              animated: true,
+            });
+          }
+        } catch {
+          // Native camera errors are non-fatal
         }
       }
       lastCameraModeRef.current = cameraMode;
@@ -1090,19 +1523,26 @@ function CinematicTripMap({
     }
 
     const center = coordinateAhead(cur.lat, cur.lng, travelHeading, forwardMeters);
+    if (!Number.isFinite(center.latitude) || !Number.isFinite(center.longitude)) return;
+
     const duration = modeChanged ? 550 : Math.min(360, Math.max(180, Math.round(baseInterval * 1.1)));
 
-    mapRef.current.animateCamera(
-      { center, heading, pitch, zoom },
-      { duration }
-    );
-    setMapCameraHeading(heading);
-    lastCameraAtRef.current = now;
-    lastCameraCoordinateRef.current = { latitude: cur.lat, longitude: cur.lng };
-    lastCameraModeRef.current = cameraMode;
+    try {
+      mapRef.current.animateCamera(
+        { center, heading, pitch, zoom },
+        { duration }
+      );
+      setMapCameraHeading(heading);
+      lastCameraAtRef.current = now;
+      lastCameraCoordinateRef.current = { latitude: cur.lat, longitude: cur.lng };
+      lastCameraModeRef.current = cameraMode;
+    } catch {
+      // Native animation errors are non-fatal
+    }
   }, [
     autoFollow,
     cameraMode,
+    cur.hasValidPosition,
     cur.heading,
     cur.lat,
     cur.lng,
@@ -1113,22 +1553,28 @@ function CinematicTripMap({
     resumeRequest,
     routeCoords,
     speed,
+    useNativeMap,
   ]);
 
   const handleNativeMapReady = useCallback(() => {
+    // onMapReady can fire after the screen has been popped - the native view
+    // outlives the React tree for a moment - and setting state then is a leak
+    // that React reports against an unmounted component.
+    if (!mountedRef.current) return;
     setMapLoaded(true);
     reportReady();
   }, [reportReady]);
 
   const syncProjectionDuringCamera = useCallback(() => {
-    void projectVehicle(false);
-  }, [projectVehicle]);
+    if (!autoFollow) void projectVehicle(false);
+  }, [autoFollow, projectVehicle]);
 
   const syncProjectionAfterCamera = useCallback(() => {
-    void projectVehicle(true);
-  }, [projectVehicle]);
+    if (!autoFollow) void projectVehicle(true);
+  }, [autoFollow, projectVehicle]);
 
   const handleWebProjection = useCallback((projection: WebMapProjection) => {
+    if (!mountedRef.current) return;
     setMapCameraHeading(normalizeHeading(projection.heading));
   }, []);
 
@@ -1145,15 +1591,16 @@ function CinematicTripMap({
 
   return (
     <View style={StyleSheet.absoluteFill}>
-      {Platform.OS === 'web' ? (
+      {!useNativeMap ? (
         <FleetWebMap
           cameraMode={cameraMode}
           followSelected={autoFollow}
+          history={webHistory}
           mapStyle={styleInfo.webStyle}
           markers={webMarkers}
           onInteraction={pauseFollowing}
           onProjectionChange={handleWebProjection}
-          polyline={webPolyline}
+          polylines={webPolylines}
           selectedId="vehicle"
           style={StyleSheet.absoluteFillObject}
         />
@@ -1184,14 +1631,24 @@ function CinematicTripMap({
           showsUserLocation={false}
           style={StyleSheet.absoluteFillObject}
           toolbarEnabled={false}>
-          <StableBaseRoute
-            auraColor="rgba(43,230,255,0.22)"
-            coordinates={routeCoords}
-            lineColor="rgba(151,171,190,0.72)"
-            lineWidth={6}
-          />
-          <StableRouteLine color={accent} coordinates={completedRouteCoords} />
-          <StableRouteLine color={accent} coordinates={progressTail} width={6} zIndex={13} />
+          {fullRouteSegments.map((segment, index) => (
+            <StableBaseRoute
+              key={`trip-base-${index}`}
+              auraColor={ROUTE_BLUE_AURA}
+              coordinates={segment}
+              lineColor={ROUTE_BLUE_BASE}
+              lineWidth={6}
+            />
+          ))}
+          {travelledRouteSegs.map((segment, index) => (
+            <StableRouteLine
+              key={`trip-done-${index}`}
+              auraColor={ROUTE_BLUE_AURA}
+              color={ROUTE_BLUE}
+              coordinates={segment}
+              zIndex={13}
+            />
+          ))}
           {validEvents.map((event, index) => (
             <Marker
               key={`${event.t}-${event.eventType}-${index}`}
@@ -1216,7 +1673,7 @@ function CinematicTripMap({
               </View>
             </Marker>
           ))}
-          {USE_VEHICLE_SPRITE ? (
+          {!cur.hasValidPosition ? null : USE_VEHICLE_SPRITE ? (
             <Marker
               anchor={{ x: 0.5, y: 0.5 }}
               coordinate={{ latitude: cur.lat, longitude: cur.lng }}
@@ -1263,8 +1720,8 @@ function CinematicTripMap({
 }
 
 const styles = StyleSheet.create({
-  root: { backgroundColor: '#05070c', flex: 1 },
-  center: { alignItems: 'center', backgroundColor: '#05070c', flex: 1, gap: 12, justifyContent: 'center', padding: 24 },
+  root: { backgroundColor: '#EDF4F7', flex: 1 },
+  center: { alignItems: 'center', backgroundColor: '#EDF4F7', flex: 1, gap: 12, justifyContent: 'center', padding: 24 },
   centerText: { color: G.sub, fontSize: 15, textAlign: 'center' },
   retry: { borderColor: '#22c55e', borderRadius: 10, borderWidth: 1, marginTop: 8, paddingHorizontal: 20, paddingVertical: 10 },
   retryText: { color: '#22c55e', fontWeight: '800' },
@@ -1274,7 +1731,16 @@ const styles = StyleSheet.create({
     alignItems: 'center', backgroundColor: G.glass, borderColor: G.hair, borderRadius: 12, borderWidth: 1,
     height: 40, justifyContent: 'center', width: 40,
   },
-  titleWrap: { flex: 1, minWidth: 0 },
+  titleWrap: {
+    backgroundColor: G.glass,
+    borderColor: G.hair,
+    borderRadius: 12,
+    borderWidth: 1,
+    flex: 1,
+    minWidth: 0,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
   title: { color: G.text, fontSize: 17, fontWeight: '900' },
   subtitle: { color: G.sub, fontSize: 12, marginTop: 1 },
   datePicker: {
@@ -1288,7 +1754,7 @@ const styles = StyleSheet.create({
   mapPlaceholder: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
-    backgroundColor: '#05070c',
+    backgroundColor: '#EDF4F7',
     gap: 10,
     justifyContent: 'center',
     paddingBottom: 200,
@@ -1301,8 +1767,8 @@ const styles = StyleSheet.create({
 
   sceneBadge: {
     alignItems: 'center',
-    backgroundColor: 'rgba(7, 14, 24, 0.8)',
-    borderColor: 'rgba(83, 216, 255, 0.2)',
+    backgroundColor: 'rgba(255,255,255,0.94)',
+    borderColor: 'rgba(20,117,143,0.18)',
     borderRadius: 13,
     borderWidth: 1,
     flexDirection: 'row',
@@ -1313,26 +1779,27 @@ const styles = StyleSheet.create({
     position: 'absolute',
   },
   sceneSignal: {
-    backgroundColor: '#2BE6FF',
+    backgroundColor: '#18B77B',
     borderRadius: 5,
     height: 9,
-    shadowColor: '#2BE6FF',
+    shadowColor: '#18B77B',
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.8,
     shadowRadius: 7,
     width: 9,
   },
-  sceneEyebrow: { color: '#53D8FF', fontSize: 8, fontWeight: '900', letterSpacing: 1.4 },
+  sceneEyebrow: { color: '#087C73', fontSize: 8, fontWeight: '900', letterSpacing: 1.4 },
   sceneMode: { color: G.text, fontSize: 11, fontWeight: '800', marginTop: 1 },
   camRail: { gap: 8, position: 'absolute', right: 14 },
   camBtn: {
     alignItems: 'center', backgroundColor: G.glass, borderColor: G.hair, borderRadius: 12, borderWidth: 1,
-    flexDirection: 'row', gap: 6, height: 40, justifyContent: 'flex-start', paddingHorizontal: 10, width: 92,
+    elevation: 2, flexDirection: 'row', gap: 6, height: 40, justifyContent: 'flex-start', paddingHorizontal: 10,
+    shadowColor: '#173E4D', shadowOffset: { height: 2, width: 0 }, shadowOpacity: 0.1, shadowRadius: 5, width: 92,
   },
   camLabel: { fontSize: 10, fontWeight: '800' },
   carPicker: {
-    backgroundColor: 'rgba(7, 14, 24, 0.82)',
-    borderColor: 'rgba(83, 216, 255, 0.18)',
+    backgroundColor: 'rgba(255,255,255,0.96)',
+    borderColor: G.hair,
     borderRadius: 14,
     borderWidth: 1,
     left: 14,
@@ -1352,7 +1819,7 @@ const styles = StyleSheet.create({
   },
   stopMarker: {
     alignItems: 'center',
-    backgroundColor: '#EAF1F8',
+    backgroundColor: '#FFFFFF',
     borderColor: '#F59E0B',
     borderRadius: 999,
     borderWidth: 2,
@@ -1399,11 +1866,13 @@ const styles = StyleSheet.create({
 
   deck: {
     backgroundColor: G.glassStrong, borderTopColor: G.hair, borderTopLeftRadius: 22, borderTopRightRadius: 22,
-    borderTopWidth: 1, bottom: 0, gap: 14, left: 0, paddingHorizontal: 18, paddingTop: 16, position: 'absolute', right: 0,
+    borderTopWidth: 1, bottom: 0, elevation: 18, gap: 14, left: 0, paddingHorizontal: 18, paddingTop: 16,
+    position: 'absolute', right: 0, shadowColor: '#173E4D', shadowOffset: { height: -8, width: 0 },
+    shadowOpacity: 0.16, shadowRadius: 18,
   },
   statRow: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
   speedBlock: { alignItems: 'flex-end', flexDirection: 'row', gap: 4 },
-  speedValue: { color: G.text, fontSize: 40, fontVariant: ['tabular-nums'], fontWeight: '900', lineHeight: 42 },
+  speedValue: { color: '#087C73', fontSize: 40, fontVariant: ['tabular-nums'], fontWeight: '900', lineHeight: 42 },
   speedUnit: { color: G.sub, fontSize: 13, marginBottom: 6 },
   statPair: { flexDirection: 'row', gap: 18 },
   stat: { alignItems: 'flex-end' },
@@ -1415,19 +1884,141 @@ const styles = StyleSheet.create({
   trackFill: { borderRadius: 999, height: 6 },
   tick: { borderRadius: 1, height: 12, marginLeft: -1, opacity: 0.7, position: 'absolute', top: -3, width: 2 },
   thumb: {
-    backgroundColor: '#0b0f16', borderRadius: 999, borderWidth: 3, height: 18, marginLeft: -9, position: 'absolute',
+    backgroundColor: '#FFFFFF', borderRadius: 999, borderWidth: 3, height: 18, marginLeft: -9, position: 'absolute',
     top: -6, width: 18,
   },
 
-  controls: { alignItems: 'center', flexDirection: 'row', gap: 16, justifyContent: 'space-between' },
+  controls: { alignItems: 'center', flexDirection: 'row', gap: 10, justifyContent: 'space-between' },
   ctrlSmall: {
     alignItems: 'center', backgroundColor: G.glass, borderColor: G.hair, borderRadius: 999, borderWidth: 1,
     height: 46, justifyContent: 'center', width: 46,
   },
   playBtn: { alignItems: 'center', borderRadius: 999, height: 60, justifyContent: 'center', width: 60 },
-  speeds: { flexDirection: 'row', gap: 6 },
-  speedChip: { borderColor: G.hair, borderRadius: 999, borderWidth: 1, paddingHorizontal: 12, paddingVertical: 8 },
+  speeds: { flexDirection: 'row', gap: 4 },
+  speedChip: { borderColor: G.hair, borderRadius: 999, borderWidth: 1, paddingHorizontal: 8, paddingVertical: 8 },
   speedChipText: { fontSize: 13, fontWeight: '800' },
+
+  historyBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    backgroundColor: 'rgba(18, 50, 71, 0.42)',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 26,
+    zIndex: 1100,
+  },
+  historyCard: {
+    backgroundColor: '#F7FAFC',
+    borderColor: 'rgba(20,75,94,0.18)',
+    borderRadius: 24,
+    borderWidth: 1,
+    elevation: 24,
+    maxHeight: '94%',
+    maxWidth: 520,
+    overflow: 'hidden',
+    shadowColor: '#102D3D',
+    shadowOffset: { height: 14, width: 0 },
+    shadowOpacity: 0.28,
+    shadowRadius: 26,
+    width: '100%',
+  },
+  historyHeader: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderBottomColor: G.hair,
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    gap: 12,
+    padding: 18,
+  },
+  historyHeaderCopy: { flex: 1 },
+  historyEyebrow: { color: '#087C73', fontSize: 10, fontWeight: '900', letterSpacing: 1.4 },
+  historyTitle: { color: G.text, fontSize: 22, fontWeight: '900', marginTop: 2 },
+  historyRange: { color: G.sub, fontSize: 11, marginTop: 4 },
+  historyClose: {
+    alignItems: 'center',
+    backgroundColor: '#EFF5F7',
+    borderRadius: 999,
+    height: 40,
+    justifyContent: 'center',
+    width: 40,
+  },
+  historyContent: { gap: 12, padding: 14, paddingBottom: 26 },
+  historySummaryGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  historyMetric: {
+    backgroundColor: '#FFFFFF',
+    borderColor: G.hair,
+    borderRadius: 14,
+    borderWidth: 1,
+    minWidth: '30%',
+    padding: 11,
+    rowGap: 2,
+    width: '31.5%',
+  },
+  historyMetricValue: { fontSize: 15, fontVariant: ['tabular-nums'], fontWeight: '900', marginTop: 3 },
+  historyMetricLabel: { color: G.sub, fontSize: 10, fontWeight: '700' },
+  historySection: {
+    backgroundColor: '#FFFFFF',
+    borderColor: G.hair,
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 14,
+  },
+  historySectionTitle: { color: G.text, fontSize: 14, fontWeight: '900', marginBottom: 12 },
+  endpointRow: { alignItems: 'flex-start', flexDirection: 'row', gap: 10 },
+  endpointDot: { borderRadius: 999, height: 11, marginTop: 4, width: 11 },
+  endpointBody: { flex: 1 },
+  endpointHeading: { alignItems: 'center', flexDirection: 'row', gap: 8, justifyContent: 'space-between' },
+  endpointLabel: { color: G.text, fontSize: 12, fontWeight: '900' },
+  endpointTime: { color: G.sub, fontSize: 10 },
+  endpointAddress: { color: G.sub, fontSize: 11, lineHeight: 16, marginTop: 2 },
+  endpointConnector: { backgroundColor: 'rgba(100,116,139,0.28)', height: 22, marginLeft: 5, width: 1 },
+  timelineDetailRow: {
+    borderBottomColor: 'rgba(20,75,94,0.09)',
+    borderBottomWidth: 1,
+    flexDirection: 'row',
+    gap: 10,
+    paddingVertical: 10,
+  },
+  timelineDetailIcon: { alignItems: 'center', borderRadius: 12, height: 38, justifyContent: 'center', width: 38 },
+  timelineDetailBody: { flex: 1, minWidth: 0 },
+  timelineDetailHeading: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
+  timelineDetailTitle: { fontSize: 12, fontWeight: '900' },
+  timelineDetailDuration: { color: G.text, fontSize: 11, fontVariant: ['tabular-nums'], fontWeight: '800' },
+  timelineDetailTime: { color: G.sub, fontSize: 10, marginTop: 2 },
+  timelineDetailAddress: { color: G.text, fontSize: 11, lineHeight: 15, marginTop: 5 },
+  timelineDetailMeta: { color: '#087C73', fontSize: 10, fontWeight: '700', marginTop: 5 },
+  historyEmpty: { color: G.sub, fontSize: 12, paddingVertical: 8, textAlign: 'center' },
+  stopDetailRow: { flexDirection: 'row', gap: 10, paddingVertical: 8 },
+  stopNumber: {
+    alignItems: 'center',
+    backgroundColor: '#FFF7ED',
+    borderColor: '#FDBA74',
+    borderRadius: 999,
+    borderWidth: 1,
+    height: 28,
+    justifyContent: 'center',
+    width: 28,
+  },
+  stopNumberText: { color: '#C2410C', fontSize: 11, fontWeight: '900' },
+  stopDetailBody: { flex: 1 },
+  stopDetailTitle: { color: G.text, fontSize: 12, fontWeight: '800', lineHeight: 16 },
+  stopDetailMeta: { color: G.sub, fontSize: 10, lineHeight: 14, marginTop: 2 },
+  stopDetailDistance: { color: '#C2410C', fontSize: 10, fontWeight: '700', marginTop: 3 },
+  qualityCard: {
+    backgroundColor: '#EDF7F4',
+    borderColor: 'rgba(8,124,115,0.2)',
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 14,
+  },
+  qualityTitleRow: { alignItems: 'center', flexDirection: 'row', gap: 10 },
+  qualityTitleCopy: { flex: 1 },
+  qualityTitle: { color: G.text, fontSize: 12, fontWeight: '900' },
+  qualitySubtitle: { color: G.sub, fontSize: 10, lineHeight: 14, marginTop: 2 },
+  qualityReasonRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 8 },
+  qualityReason: { color: G.sub, fontSize: 10, textTransform: 'capitalize' },
+  qualityCount: { color: '#D97706', fontSize: 10, fontWeight: '900' },
 
   // Date Range Filter & Modal Styles
   rangeFilterTrigger: {
@@ -1450,22 +2041,22 @@ const styles = StyleSheet.create({
   filterModalBackdrop: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
-    backgroundColor: 'rgba(3, 8, 16, 0.78)',
+    backgroundColor: 'rgba(18, 50, 71, 0.38)',
     justifyContent: 'center',
     paddingHorizontal: 16,
     zIndex: 1000,
   },
   filterModalCard: {
-    backgroundColor: '#0B131E',
-    borderColor: 'rgba(255, 255, 255, 0.14)',
+    backgroundColor: '#FFFFFF',
+    borderColor: G.hair,
     borderRadius: 20,
     borderWidth: 1,
     elevation: 20,
     maxWidth: 380,
     padding: 18,
-    shadowColor: '#000',
+    shadowColor: '#173E4D',
     shadowOffset: { width: 0, height: 12 },
-    shadowOpacity: 0.45,
+    shadowOpacity: 0.24,
     shadowRadius: 20,
     width: '100%',
   },
@@ -1486,8 +2077,8 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   rangeField: {
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderColor: 'rgba(255, 255, 255, 0.12)',
+    backgroundColor: '#F3F8FA',
+    borderColor: G.hair,
     borderRadius: 12,
     borderWidth: 1,
     flex: 1,
@@ -1516,8 +2107,8 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   presetChip: {
-    backgroundColor: 'rgba(255, 255, 255, 0.06)',
-    borderColor: 'rgba(255, 255, 255, 0.1)',
+    backgroundColor: '#F3F8FA',
+    borderColor: G.hair,
     borderRadius: 8,
     borderWidth: 1,
     paddingHorizontal: 10,
@@ -1580,7 +2171,7 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   dayCellTextMuted: {
-    color: 'rgba(255, 255, 255, 0.25)',
+    color: '#B7C5CB',
   },
   validationErrorBox: {
     alignItems: 'center',
@@ -1606,8 +2197,8 @@ const styles = StyleSheet.create({
   },
   filterResetBtn: {
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.05)',
-    borderColor: 'rgba(255, 255, 255, 0.14)',
+    backgroundColor: '#F3F8FA',
+    borderColor: G.hair,
     borderRadius: 12,
     borderWidth: 1,
     flex: 1,

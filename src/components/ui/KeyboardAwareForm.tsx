@@ -1,6 +1,7 @@
 import React, { useCallback, useContext, useEffect, useMemo, useRef } from 'react';
 import {
   Keyboard,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -58,6 +59,12 @@ export type KeyboardAwareFormProps = {
   applyBottomInset?: boolean;
   /** Set false when a tap on the background should not dismiss the keyboard. */
   dismissOnTapOutside?: boolean;
+  /**
+   * Let the scroller use its content height until an ancestor's maxHeight is
+   * reached. Bottom sheets need this; an unconditional flex child has a zero
+   * basis inside a content-sized sheet and leaves only the sheet header visible.
+   */
+  contentSized?: boolean;
   testID?: string;
 };
 
@@ -71,6 +78,7 @@ export function KeyboardAwareForm({
   contentContainerStyle,
   applyBottomInset = true,
   dismissOnTapOutside = true,
+  contentSized = false,
   testID,
 }: KeyboardAwareFormProps) {
   const insets = useSafeAreaInsets();
@@ -128,11 +136,17 @@ export function KeyboardAwareForm({
     <ScrollView
       ref={scrollRef}
       testID={testID}
-      style={style}
+      style={[contentSized && styles.contentSized, style]}
       contentContainerStyle={contentStyle}
+      automaticallyAdjustKeyboardInsets={false}
+      contentInsetAdjustmentBehavior="never"
+      decelerationRate="normal"
       // Buttons and dropdown rows stay tappable while the keyboard is open.
       keyboardShouldPersistTaps="handled"
-      keyboardDismissMode="interactive"
+      keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}
+      nestedScrollEnabled
+      overScrollMode="never"
+      scrollEventThrottle={16}
       showsVerticalScrollIndicator={false}
     >
       {children}
@@ -140,7 +154,10 @@ export function KeyboardAwareForm({
   );
 
   const body = dismissOnTapOutside ? (
-    <Pressable accessible={false} onPress={Keyboard.dismiss} style={styles.flex}>
+    <Pressable
+      accessible={false}
+      onPress={Keyboard.dismiss}
+      style={contentSized ? styles.contentSized : styles.flex}>
       {content}
     </Pressable>
   ) : (
@@ -215,9 +232,11 @@ export function KeyboardBottomSheet({
   const { height } = useWindowDimensions();
   const keyboardHeight = useKeyboardHeight();
   const lift = keyboardHeight > 0 ? Math.max(0, keyboardHeight - insets.bottom) : 0;
+  const safeRatio = Math.max(0.25, Math.min(maxHeightRatio, 1));
+  const availableHeight = Math.max(0, height - insets.top - lift);
 
   return (
-    <View style={[style, { marginBottom: lift, maxHeight: (height - lift) * maxHeightRatio }]}>
+    <View style={[style, { marginBottom: lift, maxHeight: availableHeight * safeRatio }]}>
       {children}
     </View>
   );
@@ -231,4 +250,5 @@ export const dismissKeyboard = () => {
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
+  contentSized: { flexShrink: 1, minHeight: 0 },
 });

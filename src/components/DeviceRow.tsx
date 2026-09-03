@@ -1,8 +1,10 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import React, { useMemo } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { PressableScale } from '@/src/components/ui/Motion';
+import { resolveDeviceRecordState } from '@/src/services/deviceState';
+import { useMobileGpsReadiness } from '@/src/services/mobileGpsStatus';
 import type { DeviceSummary } from '@/src/types/api';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { hexToRgba, radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
@@ -38,15 +40,23 @@ const CATEGORY_ICON: Record<string, React.ComponentProps<typeof MaterialCommunit
 export function DeviceRow({
   device,
   onPress,
+  onDelete,
+  deleting = false,
 }: {
   device: DeviceSummary;
   onPress: () => void;
+  onDelete?: () => void;
+  deleting?: boolean;
 }) {
   const { colors: c, stateColors } = useTheme();
   const styles = useMemo(() => makeStyles(c), [c]);
 
-  const statusColor = stateColors[(device.state ?? '').toUpperCase()] ?? stateColors.NO_DATA;
-  const online = device.gpsValid && device.state !== 'NO_DATA' && device.state !== 'INACTIVE';
+  // One shared calculation, the same one the map, live view and management
+  // use — the row never re-derives a status of its own.
+  const readiness = useMobileGpsReadiness();
+  const resolved = resolveDeviceRecordState(device, readiness);
+  const statusColor = stateColors[resolved.state] ?? stateColors.NO_DATA;
+  const online = device.gpsValid && !resolved.offline;
   // The second line carries whichever locator is actually known. A blank line
   // reads as missing data, so the IMEI stands in when there is no address.
   const secondary = device.address?.trim() || `IMEI ${device.imei}`;
@@ -55,7 +65,7 @@ export function DeviceRow({
     <PressableScale
       haptic
       accessibilityRole="button"
-      accessibilityLabel={`${device.name}, ${formatState(device.state)}`}
+      accessibilityLabel={`${device.name}, ${resolved.label}`}
       onPress={onPress}
       style={styles.row}>
       {/* Status is carried by a spine rather than a pill: it reads as a column
@@ -90,23 +100,34 @@ export function DeviceRow({
           <Text style={styles.unit}> km/h</Text>
         </Text>
         <Text numberOfLines={1} style={[styles.state, { color: statusColor }]}>
-          {formatState(device.state)}
+          {resolved.label}
         </Text>
       </View>
 
       <Text numberOfLines={1} style={styles.age}>
         {formatAge(device.lastUpdate)}
       </Text>
+
+      {onDelete ? (
+        <Pressable
+          accessibilityLabel={`Delete ${device.name}`}
+          accessibilityRole="button"
+          disabled={deleting}
+          hitSlop={8}
+          onPress={(event) => {
+            event.stopPropagation();
+            onDelete();
+          }}
+          style={({ pressed }) => [
+            styles.deleteButton,
+            pressed && !deleting && styles.deleteButtonPressed,
+            deleting && styles.deleteButtonDisabled,
+          ]}>
+          <MaterialCommunityIcons color={c.danger} name="trash-can-outline" size={17} />
+        </Pressable>
+      ) : null}
     </PressableScale>
   );
-}
-
-function formatState(state: string) {
-  const normalized = (state ?? '').toUpperCase();
-  if (normalized === 'RUNNING' || normalized === 'MOVING') return 'Running';
-  if (normalized === 'NO_DATA' || normalized === 'OFFLINE') return 'Offline';
-  if (!normalized) return 'Offline';
-  return normalized.charAt(0) + normalized.slice(1).toLowerCase().replace(/_/g, ' ');
 }
 
 /** Compact relative age — the column is too narrow for a formatted timestamp. */
@@ -166,4 +187,13 @@ const makeStyles = (c: ThemeColors) =>
       textAlign: 'right',
       width: 34,
     },
+    deleteButton: {
+      alignItems: 'center',
+      borderRadius: radius.sm,
+      height: 30,
+      justifyContent: 'center',
+      width: 30,
+    },
+    deleteButtonPressed: { backgroundColor: hexToRgba(c.danger, 0.1) },
+    deleteButtonDisabled: { opacity: 0.45 },
   });

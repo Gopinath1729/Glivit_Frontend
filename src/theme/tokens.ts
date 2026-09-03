@@ -139,13 +139,16 @@ export const schemes: Record<Scheme, ThemeColors> = {
 export const CENTRALIZED_STATUS_COLORS = {
   RUNNING: '#22C55E',
   MOVING: '#22C55E',
+  IDLE: '#F59E0B',
   STOPPED: '#EF4444',
   LOW_ACCURACY: '#F59E0B',
   INACTIVE: '#94A3B8',
   OFFLINE: '#6B7280',
+  // The phone's own location switch is off: actionable by the user, so it is
+  // warned about rather than greyed out like an unreachable tracker.
+  LOCATION_DISABLED: '#F59E0B',
   NO_DATA: '#475569',
   EXPIRED: '#334155',
-  SUSPENDED: '#334155',
   IMMOBILISED: '#EF4444',
   GPS_INVALID: '#F59E0B',
   POWER_DISCONNECTED: '#F59E0B',

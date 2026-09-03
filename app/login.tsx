@@ -5,8 +5,6 @@ import { useRouter } from 'expo-router';
 import React from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import {
-  Alert,
-  Linking,
   Platform,
   Pressable,
   StyleSheet,
@@ -17,6 +15,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { z } from 'zod';
 
+import { env } from '@/src/config/env';
 import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
 import { Button } from '@/src/components/ui/Button';
 import { GlivtLogo } from '@/src/components/GlivtLogo';
@@ -26,8 +25,8 @@ import { authStorage } from '@/src/services/authStorage';
 import { useLoginMutation } from '@/src/services/authApi';
 import { baseApi } from '@/src/services/baseApi';
 import { normalizeCompanyCode } from '@/src/services/tenantIdentity';
-import { clearTenant, setCredentials, setTenant } from '@/src/store/authSlice';
-import { adoptSessionTenant, clearActiveTenant } from '@/src/store/tenantSlice';
+import { clearTenant, setCredentials, setTenant } from '@/src/store/authState';
+import { adoptSessionTenant, clearActiveTenant } from '@/src/store/tenantState';
 import { useAppDispatch, useAppSelector } from '@/src/store/hooks';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
@@ -45,8 +44,15 @@ const DEFAULT_TENANT_CONFIG: TenantConfig = {
   status: 'ACTIVE',
 };
 
+// Members sign in with the email address their Tenant Admin registered. The
+// address is lower-cased before it leaves the device so it matches the
+// normalised value the account was created with.
 const schema = z.object({
-  username: z.string().trim().min(1, 'Username is required'),
+  email: z
+    .string()
+    .trim()
+    .min(1, 'Email is required')
+    .email('Enter a valid email address'),
   password: z.string().min(1, 'Password is required'),
 });
 type FormValues = z.infer<typeof schema>;
@@ -71,7 +77,7 @@ export default function LoginScreen() {
     formState: { errors },
   } = useForm<FormValues>({
     resolver: zodResolver(schema),
-    defaultValues: { username: '', password: '' },
+    defaultValues: { email: '', password: '' },
   });
 
   const openSession = React.useCallback(
@@ -90,7 +96,7 @@ export default function LoginScreen() {
         refreshToken: result.refreshToken,
         user: result.user,
       });
-      dispatch(baseApi.util.resetApiState());
+      baseApi.util.resetApiState();
       dispatch(setTenant({ companyCode: code, tenantConfig: activeConfig }));
       dispatch(
         setCredentials({
@@ -119,7 +125,7 @@ export default function LoginScreen() {
       const result = await login({
         companyCode,
         deviceInfo: `${Platform.OS} app`,
-        username: values.username,
+        email: values.email.trim().toLowerCase(),
         password: values.password,
       }).unwrap();
       await openSession(result, companyCode);
@@ -130,22 +136,10 @@ export default function LoginScreen() {
     }
   });
 
-  const contactProvider = () => {
-    const phone = tenant?.supportPhone;
-    const email = tenant?.supportEmail;
-    if (phone) {
-      Linking.openURL(`tel:${phone}`).catch(() => undefined);
-    } else if (email) {
-      Linking.openURL(`mailto:${email}`).catch(() => undefined);
-    } else {
-      Alert.alert('Contact Service Provider', 'No support contact configured for this account.');
-    }
-  };
-
   const clearCompanyCode = async () => {
     dispatch(clearTenant());
     dispatch(clearActiveTenant());
-    dispatch(baseApi.util.resetApiState());
+    baseApi.util.resetApiState();
     await authStorage.clearAll().catch(() => undefined);
     router.replace('/company-code');
   };
@@ -163,7 +157,19 @@ export default function LoginScreen() {
       <KeyboardAwareForm applyBottomInset={false} contentContainerStyle={styles.grow} style={styles.flex}>
         <SafeAreaView edges={['top', 'bottom']} style={styles.flex}>
         <View style={styles.contentContainer}>
-          
+
+          {/* A build compiled without an API host cannot reach anything, and
+              every request inside it fails as a bare network error. Say so here
+              instead: in a release build there is no console to read, and the
+              cause is a build-time setting, not something the operator can fix
+              by retrying. */}
+          {env.backendConfigurationError ? (
+            <View style={styles.configBanner}>
+              <MaterialCommunityIcons color="#FCA5A5" name="server-off" size={18} />
+              <Text style={styles.configBannerText}>{env.backendConfigurationError}</Text>
+            </View>
+          ) : null}
+
           <View style={styles.upperGroup}>
             <View style={styles.headerGroup}>
               <View style={styles.logo}>
@@ -206,19 +212,20 @@ export default function LoginScreen() {
                 <View style={styles.formRule} />
                 <Controller
                   control={control}
-                  name="username"
+                  name="email"
                   render={({ field: { onChange, onBlur, value } }) => (
                     <TextField
                       autoCapitalize="none"
-                      autoComplete="username"
+                      autoComplete="email"
                       autoCorrect={false}
                       importantForAutofill="yes"
-                      error={errors.username?.message}
-                      label="Username"
+                      error={errors.email?.message}
+                      keyboardType="email-address"
+                      label="Email"
                       onBlur={onBlur}
                       onChangeText={onChange}
-                      placeholder="Username"
-                      textContentType="username"
+                      placeholder="you@company.com"
+                      textContentType="emailAddress"
                       value={value}
                     />
                   )}
@@ -260,12 +267,27 @@ export default function LoginScreen() {
                   />
                 </View>
 
-                <Pressable
-                  accessibilityRole="button"
-                  onPress={contactProvider}
-                  style={styles.link}>
-                  <Text style={styles.linkText}>Forgot Password?</Text>
-                </Pressable>
+                {/* Both self-service routes sit on one row. There is no public
+                    sign-up: an account only exists once a Tenant Admin has
+                    created it, so the second link activates an existing member
+                    rather than registering a new person. */}
+                <View style={styles.linkRow}>
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={anyLoginLoading}
+                    onPress={() => router.push('/forgot-password')}
+                    style={styles.link}>
+                    <Text style={styles.linkText}>Forgot Password?</Text>
+                  </Pressable>
+                  <Text style={styles.linkDivider}>|</Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    disabled={anyLoginLoading}
+                    onPress={() => router.push('/activate-account')}
+                    style={styles.link}>
+                    <Text style={styles.linkText}>Activate Account</Text>
+                  </Pressable>
+                </View>
               </View>
 
             </View>
@@ -348,7 +370,24 @@ const makeStyles = (c: ThemeColors, isSmallScreen: boolean) =>
       top: '41%',
       transform: [{ rotate: '-12deg' }],
     },
-    contentContainer: {
+    configBanner: {
+    alignItems: 'flex-start',
+    backgroundColor: 'rgba(127,29,29,0.35)',
+    borderColor: 'rgba(248,113,113,0.45)',
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 12,
+    padding: 12,
+  },
+  configBannerText: {
+    color: '#FECACA',
+    flex: 1,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  contentContainer: {
       flex: 1,
       alignItems: 'center',
       justifyContent: 'space-between',
@@ -507,8 +546,16 @@ const makeStyles = (c: ThemeColors, isSmallScreen: boolean) =>
       maxWidth: 470,
       width: '100%',
     },
-    link: { alignSelf: 'center', marginTop: isSmallScreen ? 4 : spacing.md, padding: spacing.xs },
+    link: { alignSelf: 'center', padding: spacing.xs },
     linkText: { color: '#69D9F3', fontSize: typography.label, fontWeight: '700' },
+    linkRow: {
+      alignItems: 'center',
+      alignSelf: 'center',
+      flexDirection: 'row',
+      gap: spacing.xs,
+      marginTop: isSmallScreen ? 4 : spacing.md,
+    },
+    linkDivider: { color: 'rgba(255,255,255,0.28)', fontSize: typography.label },
     contactCard: {
       alignItems: 'center',
       backgroundColor: 'rgba(255,255,255,0.055)',

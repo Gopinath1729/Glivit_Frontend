@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
+import { formatDeviceState, normalizeDeviceState } from '@/src/services/deviceState';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { radius, spacing, typography, hexToRgba } from '@/src/theme/tokens';
 
@@ -10,29 +11,25 @@ export function StatusPill({ state }: { state: string }) {
   const styles = useMemo(() => makeStyles(), []);
   
   const color = useMemo(() => {
-    const normalized = (state ?? '').trim().toUpperCase();
-    const colorKey = 
-      normalized === 'ENGINE CUT' || normalized === 'LOCKED' ? 'IMMOBILISED' :
-      normalized === 'GPS ERROR' ? 'GPS_INVALID' :
-      normalized === 'LOW ACCURACY' ? 'LOW_ACCURACY' :
+    const normalized = normalizeDeviceState(state);
+    // Callers pass either a raw DeviceState or one of the friendly labels the
+    // live screen shows. normalizeDeviceState underscores the spaces, so these
+    // aliases are matched in their underscored form.
+    const colorKey =
+      normalized === 'ENGINE_CUT' || normalized === 'LOCKED' ? 'IMMOBILISED' :
+      normalized === 'GPS_ERROR' ? 'GPS_INVALID' :
+      normalized === 'LOW_ACCURACY' ? 'LOW_ACCURACY' :
+      normalized === 'POWER_CUT' ? 'POWER_DISCONNECTED' :
       normalized;
-    return stateColors[colorKey] ?? stateColors[state] ?? stateColors.NO_DATA;
+    return stateColors[colorKey] ?? stateColors[normalized] ?? stateColors.NO_DATA;
   }, [state, stateColors]);
 
   return (
     <View style={[styles.pill, { backgroundColor: hexToRgba(color, 0.13), borderColor: hexToRgba(color, 0.33) }]}>
       <View style={[styles.dot, { backgroundColor: color }]} />
-      <Text style={[styles.text, { color }]}>{formatState(state)}</Text>
+      <Text style={[styles.text, { color }]}>{formatDeviceState(state)}</Text>
     </View>
   );
-}
-
-function formatState(state: string) {
-  const normalized = (state ?? '').toUpperCase();
-  if (normalized === 'RUNNING' || normalized === 'MOVING') return 'Running';
-  if (normalized === 'STOPPED') return 'Stopped';
-  if (normalized === 'OFFLINE' || normalized === 'NO_DATA') return 'Offline';
-  return state.replace(/_/g, ' ');
 }
 
 const makeStyles = () =>

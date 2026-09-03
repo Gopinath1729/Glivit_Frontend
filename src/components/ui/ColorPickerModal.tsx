@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Modal, Pressable, StyleSheet, Text, View, ScrollView } from 'react-native';
+import { Modal, Pressable, StyleSheet, Text, View, ScrollView , Dimensions } from 'react-native';
 import ColorPicker, {
   Panel2,
   HueSlider,
@@ -15,6 +15,8 @@ import ColorPicker, {
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
 import { Button } from './Button';
+
+
 
 interface ColorPickerModalProps {
   visible: boolean;
@@ -247,7 +249,5 @@ const makeStyles = (c: ThemeColors) =>
       color: c.textPrimary,
     },
   });
-
-import { Dimensions } from 'react-native';
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 

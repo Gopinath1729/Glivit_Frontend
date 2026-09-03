@@ -6,7 +6,6 @@ import React, { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Linking,
   Modal,
   Platform,
   Pressable,
@@ -24,6 +23,12 @@ import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
 import { ErrorRetryView, LoadingView } from '@/src/components/ui/StateViews';
 import { P } from '@/src/constants/permissions';
 import { apiErrorMessage } from '@/src/services/apiError';
+import {
+  formatDeviceState,
+  resolveDeviceRecordState,
+  type ResolvedDeviceState,
+} from '@/src/services/deviceState';
+import { useMobileGpsReadiness } from '@/src/services/mobileGpsStatus';
 import { useGetDeviceQuery } from '@/src/services/devicesApi';
 import { nativeMapsAvailable } from '@/src/services/mapStyle';
 import {
@@ -89,7 +94,11 @@ export default function DeviceProfileScreen() {
 
   const { data, isLoading, isFetching, isError, error, refetch } = useGetDeviceQuery(id, {
     skip: !validId,
+    pollingInterval: 30_000,
+    skipPollingIfUnfocused: true,
   });
+
+  const readiness = useMobileGpsReadiness();
 
   if (!validId) {
     return <ErrorRetryView message="This vehicle link is invalid." onRetry={() => router.back()} />;
@@ -97,11 +106,9 @@ export default function DeviceProfileScreen() {
   if (isLoading) return <LoadingView label="Loading vehicle details…" />;
   if (isError || !data) return <ErrorRetryView message={apiErrorMessage(error)} onRetry={refetch} />;
 
-  const stateColor = stateColors[data.state] ?? stateColors.NO_DATA;
-  const callDriver = () => {
-    if (data.driverPhone) Linking.openURL(`tel:${data.driverPhone}`).catch(() => undefined);
-  };
-
+  // The same resolved status the vehicle list and map show for this device.
+  const resolvedState = resolveDeviceRecordState(data, readiness);
+  const stateColor = stateColors[resolvedState.state] ?? stateColors.NO_DATA;
   const openLiveTrack = () =>
     router.push({
       pathname: '/live-track',
@@ -113,18 +120,36 @@ export default function DeviceProfileScreen() {
       },
     });
 
-  const openPlayback = () =>
+  /**
+   * Opens Playback for THIS vehicle.
+   *
+   * Every value is coerced to a defined string before it is handed to the
+   * router. `data` is typed as complete, but it is a network payload: a field
+   * the API omitted arrives as `undefined`, and an undefined param value throws
+   * inside expo-router's URL builder — from an onPress handler, with no error
+   * boundary above it, which exits the app rather than showing a broken screen.
+   *
+   * `deviceId` is the one param the destination cannot work without, so it is
+   * checked rather than defaulted; the rest are presentational and fall back.
+   */
+  const openPlayback = () => {
+    if (!Number.isSafeInteger(data.id) || data.id <= 0) return;
     router.push({
       pathname: '/trip-playback',
       params: {
         deviceId: String(data.id),
-        name: data.name,
-        category: data.category,
-        model: data.model ?? '',
-        speed: String(data.speed ?? 0),
-        heading: String(data.course ?? 0),
+        // Carried so the Playback screen can identify the vehicle on its own,
+        // without a second lookup, and so the header never falls back to a
+        // bare "#id" for a device whose name has not loaded.
+        imei: typeof data.imei === 'string' ? data.imei : '',
+        name: typeof data.name === 'string' && data.name.trim() ? data.name : `Vehicle ${data.id}`,
+        category: typeof data.category === 'string' ? data.category : '',
+        model: typeof data.model === 'string' ? data.model : '',
+        speed: String(Number.isFinite(data.speed) ? data.speed : 0),
+        heading: String(Number.isFinite(data.course) ? data.course : 0),
       },
     });
+  };
 
   return (
     <View style={styles.screen}>
@@ -136,6 +161,7 @@ export default function DeviceProfileScreen() {
           isFetching={isFetching}
           onBack={() => router.back()}
           onRefresh={() => refetch()}
+          resolvedState={resolvedState}
           safeTop={insets.top}
           stateColor={stateColor}
         />
@@ -144,13 +170,6 @@ export default function DeviceProfileScreen() {
           <View style={styles.actionDeck}>
             <QuickAction color={c.primary} icon="crosshairs-gps" label="Live" onPress={openLiveTrack} primary />
             <QuickAction color={c.info} icon="map-clock-outline" label="Playback" onPress={openPlayback} />
-            <QuickAction
-              color={data.driverPhone ? c.success : c.textMuted}
-              disabled={!data.driverPhone}
-              icon="phone-outline"
-              label="Driver"
-              onPress={callDriver}
-            />
             <QuickAction
               color={c.warning}
               icon="folder-multiple-outline"
@@ -180,6 +199,7 @@ function VehicleHero({
   isFetching,
   onBack,
   onRefresh,
+  resolvedState,
   safeTop,
   stateColor,
 }: {
@@ -187,6 +207,8 @@ function VehicleHero({
   isFetching: boolean;
   onBack: () => void;
   onRefresh: () => void;
+  /** Resolved once by the screen so the hero cannot show a different status. */
+  resolvedState: ResolvedDeviceState;
   safeTop: number;
   stateColor: string;
 }) {
@@ -219,7 +241,7 @@ function VehicleHero({
               category={markerCategory(data.category)}
               color={stateColor}
               heading={data.course ?? 0}
-              moving={data.state === 'RUNNING' && (data.speed ?? 0) > 0}
+              moving={resolvedState.state === 'RUNNING' && (data.speed ?? 0) > 0}
               selected
               size={96}
             />
@@ -261,7 +283,7 @@ function VehicleHero({
         <View style={styles.heroEyebrowRow}>
           <View style={[styles.heroStatus, { borderColor: hexToRgba(stateColor, 0.6) }]}>
             <View style={[styles.heroStatusDot, { backgroundColor: stateColor }]} />
-            <Text style={[styles.heroStatusText, { color: stateColor }]}>{formatState(data.state)}</Text>
+            <Text style={[styles.heroStatusText, { color: stateColor }]}>{resolvedState.label}</Text>
           </View>
           <Text style={styles.heroCategory}>{formatLabel(data.category)}</Text>
         </View>
@@ -313,10 +335,10 @@ function Overview({ data, stateColor }: { data: DeviceDetail; stateColor: string
         <DetailRow label="Last update" value={formatDateTime(data.lastUpdate)} />
       </DetailCard>
 
-      <DetailCard icon="account-tie" title="Driver & assignment">
-        <DetailRow label="Driver" value={data.driverName ?? 'Unassigned'} />
-        <DetailRow label="Phone" value={data.driverPhone ?? 'Not added'} />
-        <DetailRow label="Project" value={data.projectId ? `Project #${data.projectId}` : 'Unassigned'} />
+      <DetailCard icon="account-outline" title="Driver details">
+        <DetailRow label="Driver" value={data.driverName ?? 'Not added'} />
+        <DetailRow label="Contact" value={data.driverPhone ?? 'Not added'} />
+        <DetailRow label="Address" value={data.driverAddress ?? 'Not added'} />
       </DetailCard>
 
       <DetailCard icon="car-info" title="Vehicle & tracker">
@@ -325,7 +347,7 @@ function Overview({ data, stateColor }: { data: DeviceDetail; stateColor: string
         <DetailRow label="Tracking source" value={isMobileGps ? 'Mobile GPS' : 'GPS tracker'} />
         {isMobileGps ? null : <DetailRow label="Model" value={data.model ?? 'Not added'} />}
         {isMobileGps ? null : <DetailRow label="IMEI" value={data.imei} mono />}
-        <DetailRow label="Tracker status" value={formatState(data.status)} />
+        <DetailRow label="Tracker status" value={formatDeviceState(data.status)} />
         <DetailRow label="Subscription expiry" value={formatDate(data.expiryDate)} />
       </DetailCard>
 
@@ -856,13 +878,6 @@ function expiryTone(value?: string | null): { key: 'valid' | 'soon' | 'expired';
   if (days < 0) return { key: 'expired', label: `Expired ${formatDate(value)}` };
   if (days <= 30) return { key: 'soon', label: days === 0 ? 'Expires today' : `Expires in ${days}d` };
   return { key: 'valid', label: `Valid until ${formatDate(value)}` };
-}
-
-function formatState(value?: string | null) {
-  const normalized = (value ?? '').toUpperCase();
-  if (normalized === 'RUNNING' || normalized === 'MOVING') return 'Running';
-  if (normalized === 'NO_DATA' || normalized === 'OFFLINE') return 'Offline';
-  return normalized ? formatLabel(normalized) : 'Offline';
 }
 
 function formatLabel(value?: string | null) {

@@ -4,13 +4,13 @@ import { apiErrorMessage } from '@/src/services/apiError';
 import { authStorage } from '@/src/services/authStorage';
 import { abortInFlightRequests, baseApi } from '@/src/services/baseApi';
 import { tenantStorage } from '@/src/services/tenantStorage';
-import { setActiveTenantSession } from '@/src/store/authSlice';
+import { setActiveTenantSession } from '@/src/store/authState';
 import {
   switchCompleted,
   switchFailed,
   switchStarted,
   switchSucceeded,
-} from '@/src/store/tenantSlice';
+} from '@/src/store/tenantState';
 import type { AppDispatch, RootState } from '@/src/store/store';
 import type { TenantSummary, TenantSwitchResponse } from '@/src/types/api';
 
@@ -41,14 +41,14 @@ type SwitchTrigger = (args: { id: number; deviceInfo?: string }) => {
  *     rejection (unauthorised, disabled, offline) leaves the app exactly as it was.
  *  2. Cancel every request already on the wire, so no previous-tenant response can
  *     land in the cache the new tenant is about to render from.
- *  3. Persist the new session before touching Redux. Secure storage is the commit
+ *  3. Persist the new session before touching in-memory state. Secure storage is the commit
  *     point: if the write fails, the switch is abandoned rather than leaving a live
  *     session that a restart would not remember.
- *  4. Commit the new tenant to Redux (auth + tenant slices in the same tick) and
+ *  4. Commit the new tenant to the store (auth + tenant state in the same tick) and
  *     bump the tenant epoch. From this instant every request carries the new tenant,
  *     every screen keyed on the epoch resets, and every in-flight response from the
  *     old tenant is discarded by the base query.
- *  5. Reset RTK Query completely. Not invalidation — a full reset, so no cached
+ *  5. Reset the query cache completely. Not invalidation — a full reset, so no cached
  *     vehicles, geofences, reports, notifications or dashboard counts from the old
  *     tenant can be shown for even one frame while the new data loads. Screens fall
  *     back to their loading placeholders.
@@ -114,7 +114,7 @@ export async function switchActiveTenant(params: {
     // Active tenant only: the home tenant that owns this login is unchanged.
     await authStorage.saveActiveTenant(tenant.companyCode, tenant);
 
-    // 4. Commit the new tenant. Both slices in one tick: no render can observe the
+    // 4. Commit the new tenant. Auth and tenant in one tick: no render can observe the
     //    new token alongside the old tenant identity, or vice versa.
     dispatch(
       setActiveTenantSession({
@@ -128,7 +128,7 @@ export async function switchActiveTenant(params: {
 
     // 5. Drop every cached response. Screens show loading/empty states until the new
     //    tenant's data arrives, rather than the previous tenant's data.
-    dispatch(baseApi.util.resetApiState());
+    baseApi.util.resetApiState();
 
     // 6. The previous tenant's cached local values must not be inherited.
     await tenantStorage.clearTenantScope(previousTenantId);
@@ -148,7 +148,7 @@ export async function switchActiveTenant(params: {
     // errors; a reset refetches them against the restored tenant.
     const message = errorMessage(error);
     dispatch(switchFailed({ user: previousUser, message }));
-    dispatch(baseApi.util.resetApiState());
+    baseApi.util.resetApiState();
     return { ok: false, message };
   } finally {
     switchInProgress = false;

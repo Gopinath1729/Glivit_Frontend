@@ -3,6 +3,7 @@ import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Alert,
   type LayoutChangeEvent,
   Pressable,
   RefreshControl,
@@ -18,8 +19,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { DeviceRow, DEVICE_ROW_HEIGHT } from '@/src/components/DeviceRow';
 import { EmptyView, ErrorRetryView, LoadingView } from '@/src/components/ui/StateViews';
 import { apiErrorMessage } from '@/src/services/apiError';
-import { useGetAllDevicesQuery } from '@/src/services/devicesApi';
+import { useDeleteDeviceMutation, useGetAllDevicesQuery } from '@/src/services/devicesApi';
+import { resolveDeviceRecordState } from '@/src/services/deviceState';
+import { useMobileGpsReadiness } from '@/src/services/mobileGpsStatus';
 import { dedupeByVehicle } from '@/src/services/vehicleIdentity';
+import { P } from '@/src/constants/permissions';
+import { useHasPermission } from '@/src/store/hooks';
 import type { DeviceSummary } from '@/src/types/api';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { hexToRgba, radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
@@ -33,7 +38,10 @@ const STATE_FILTERS: { key: string; label: string }[] = [
   { key: '', label: 'All' },
   { key: 'RUNNING', label: 'Running' },
   { key: 'STOPPED', label: 'Stopped' },
-  { key: 'NO_DATA', label: 'Offline' },
+  // Covers every non-reporting state, not just OFFLINE: a device that has
+  // never reported (NO_DATA), one with no GPS fix, and an expired one all
+  // belong here. The rows themselves name the specific reason.
+  { key: 'OFFLINE', label: 'Not Reporting' },
 ];
 
 export default function VehiclesScreen() {
@@ -43,6 +51,7 @@ export default function VehiclesScreen() {
   const { colors: c, stateColors } = useTheme();
   const styles = useMemo(() => makeStyles(c), [c]);
   const { state: stateFilter } = useLocalSearchParams<{ state?: string }>();
+  const canDelete = useHasPermission(P.DELETE_DEVICE);
 
   const [rawSearch, setRawSearch] = useState('');
   const [search, setSearch] = useState('');
@@ -50,6 +59,8 @@ export default function VehiclesScreen() {
   const [viewportHeight, setViewportHeight] = useState(0);
   const [toolbarHeight, setToolbarHeight] = useState(0);
   const [paginationHeight, setPaginationHeight] = useState(0);
+  const [deletingVehicleId, setDeletingVehicleId] = useState<number | null>(null);
+  const [deleteDevice] = useDeleteDeviceMutation();
 
   const pageSize = useMemo(() => {
     const availableHeight = viewportHeight || window.height;
@@ -77,30 +88,36 @@ export default function VehiclesScreen() {
 
   useEffect(() => setPage(0), [stateFilter]);
 
-  const { data, isLoading, isFetching, isError, error, refetch } = useGetAllDevicesQuery({
-    search: search || undefined,
-  });
+  const { data, isLoading, isFetching, isError, error, refetch } = useGetAllDevicesQuery(
+    { search: search || undefined },
+    { pollingInterval: 30_000, skipPollingIfUnfocused: true }
+  );
 
   // One row per vehicle: two trackers on the same vehicle are one vehicle.
   const allVehicles = useMemo(
     () => dedupeByVehicle(Array.isArray(data) ? data : []),
     [data]
   );
+  // Chips and rows must agree, so both bucket the SAME resolved status the row
+  // itself renders — not the raw server field, which can be a stale RUNNING.
+  const readiness = useMobileGpsReadiness();
+  const bucketOf = useCallback(
+    (vehicle: DeviceSummary) => stateBucket(resolveDeviceRecordState(vehicle, readiness).state),
+    [readiness]
+  );
   const counts = useMemo(() => {
-    const tally: Record<string, number> = { RUNNING: 0, STOPPED: 0, NO_DATA: 0 };
+    const tally: Record<string, number> = { RUNNING: 0, STOPPED: 0, OFFLINE: 0 };
     for (const vehicle of allVehicles) {
-      const bucket = stateBucket(vehicle.state);
+      const bucket = bucketOf(vehicle);
       tally[bucket] = (tally[bucket] ?? 0) + 1;
     }
     return tally;
-  }, [allVehicles]);
+  }, [allVehicles, bucketOf]);
 
   const filteredVehicles = useMemo(
     () =>
-      stateFilter
-        ? allVehicles.filter((vehicle) => stateBucket(vehicle.state) === stateFilter)
-        : allVehicles,
-    [allVehicles, stateFilter]
+      stateFilter ? allVehicles.filter((vehicle) => bucketOf(vehicle) === stateFilter) : allVehicles,
+    [allVehicles, bucketOf, stateFilter]
   );
 
   const totalVehicles = filteredVehicles.length;
@@ -157,6 +174,34 @@ export default function VehiclesScreen() {
     (vehicle: DeviceSummary) =>
       router.push({ pathname: '/device-profile' as never, params: { id: String(vehicle.id) } }),
     [router]
+  );
+
+  const confirmDeleteVehicle = useCallback(
+    (vehicle: DeviceSummary) => {
+      Alert.alert(
+        'Delete vehicle permanently?',
+        `This erases ${vehicle.vehicleName || vehicle.name} and ALL data related to it — its tracker, complete location history, trips, alerts, commands and documents.
+
+This cannot be undone.`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Delete everything',
+            style: 'destructive',
+            onPress: () => {
+              setDeletingVehicleId(vehicle.id);
+              void deleteDevice(vehicle.id)
+                .unwrap()
+                .catch((error) =>
+                  Alert.alert('Vehicle not deleted', apiErrorMessage(error))
+                )
+                .finally(() => setDeletingVehicleId(null));
+            },
+          },
+        ]
+      );
+    },
+    [deleteDevice]
   );
 
   if (isLoading && allVehicles.length === 0) {
@@ -239,7 +284,13 @@ export default function VehiclesScreen() {
           {visibleVehicles.length > 0 ? (
             <View style={styles.rows}>
               {visibleVehicles.map((vehicle) => (
-                <DeviceRow key={vehicle.id} device={vehicle} onPress={() => openVehicle(vehicle)} />
+                <DeviceRow
+                  deleting={deletingVehicleId === vehicle.id}
+                  device={vehicle}
+                  key={vehicle.id}
+                  onDelete={canDelete ? () => confirmDeleteVehicle(vehicle) : undefined}
+                  onPress={() => openVehicle(vehicle)}
+                />
               ))}
             </View>
           ) : (
@@ -300,11 +351,10 @@ export default function VehiclesScreen() {
 function stateBucket(state?: string | null): string {
   const normalized = (state ?? '').toUpperCase();
   if (normalized === 'RUNNING' || normalized === 'MOVING') return 'RUNNING';
-  // IDLE is retired; legacy rows still carrying it bucket as stopped.
-  if (normalized === 'STOPPED' || normalized === 'IMMOBILISED' || normalized === 'IDLE') {
+  if (normalized === 'STOPPED' || normalized === 'IDLE' || normalized === 'IMMOBILISED') {
     return 'STOPPED';
   }
-  return 'NO_DATA';
+  return 'OFFLINE';
 }
 
 function paginationWindow(current: number, total: number, maximum: number): number[] {

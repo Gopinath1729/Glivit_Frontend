@@ -6,14 +6,17 @@ import React, { useEffect } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import 'react-native-reanimated';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { Provider } from 'react-redux';
 
 import { authStorage } from '@/src/services/authStorage';
+// Side-effect import, and it has to stay one. The background location task must
+// be DEFINED before the OS can hand a fix back to a relaunched app, which
+// happens before any screen mounts -- so defining it inside a component or a
+// lazy import means every background update after a cold start is dropped.
 import '@/src/services/mobileGpsBackgroundTask';
 import { BrandSplash } from '@/src/components/BrandSplash';
 import { TenantSwitchOverlay } from '@/src/components/TenantSwitchOverlay';
-import { hydrate } from '@/src/store/authSlice';
-import { adoptSessionTenant } from '@/src/store/tenantSlice';
+import { hydrate } from '@/src/store/authState';
+import { adoptSessionTenant } from '@/src/store/tenantState';
 import {
   useAppDispatch,
   useAuth,
@@ -21,7 +24,6 @@ import {
   useIsAuthenticated,
   useTenantSwitchState,
 } from '@/src/store/hooks';
-import { store } from '@/src/store/store';
 import { ThemeProvider, useTheme } from '@/src/theme/ThemeProvider';
 
 /** Status bar content color is dynamically adapted based on header color and active route. */
@@ -145,10 +147,18 @@ function RootNavigator() {
         </Stack.Protected>
         <Stack.Protected guard={hasTenant && !authenticated}>
           <Stack.Screen name="login" />
+          {/* Both live behind the same guard as Login: they act on an existing
+              member of the already-chosen tenant, and a signed-in user has no
+              use for either. */}
+          <Stack.Screen name="activate-account" />
+          <Stack.Screen name="forgot-password" />
         </Stack.Protected>
         <Stack.Protected guard={authenticated}>
           <Stack.Screen name="device-profile" />
           <Stack.Screen name="live-track" />
+          {/* Turns this phone into one of the fleet's trackers. Registered here
+              rather than under (app) because it keeps reporting while the tab
+              navigator is not mounted. */}
           <Stack.Screen name="tracker-mode" />
           <Stack.Screen name="trip-playback" />
           <Stack.Screen name="(app)" />
@@ -164,25 +174,24 @@ export default function RootLayout() {
   const handleReady = React.useCallback(() => setBooted(true), []);
   const handleSplashFinished = React.useCallback(() => setSplashDone(true), []);
 
+  // The app store is a module singleton rather than a context value, so there is
+  // no provider to mount here: any component can read it through
+  // `useAppSelector` from the moment the bundle loads.
   return (
-    <Provider store={store}>
-      <GestureHandlerRootView style={{ flex: 1 }}>
-        <SafeAreaProvider>
-          <ThemeProvider>
-            <Bootstrapper onReady={handleReady}>
-              <RootNavigator />
-              <TenantSwitchGate />
-            </Bootstrapper>
-            <ThemedStatusBar />
-            {/* Sits above the navigator so the app can mount and settle behind
-                it; it only fades out once boot has finished, which is why a slow
-                cold start never shows a half-built screen. */}
-            {splashDone ? null : (
-              <BrandSplash onFinished={handleSplashFinished} ready={booted} />
-            )}
-          </ThemeProvider>
-        </SafeAreaProvider>
-      </GestureHandlerRootView>
-    </Provider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <ThemeProvider>
+          <Bootstrapper onReady={handleReady}>
+            <RootNavigator />
+            <TenantSwitchGate />
+          </Bootstrapper>
+          <ThemedStatusBar />
+          {/* Sits above the navigator so the app can mount and settle behind
+              it; it only fades out once boot has finished, which is why a slow
+              cold start never shows a half-built screen. */}
+          {splashDone ? null : <BrandSplash onFinished={handleSplashFinished} ready={booted} />}
+        </ThemeProvider>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }

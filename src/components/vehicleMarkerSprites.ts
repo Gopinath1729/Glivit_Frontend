@@ -75,7 +75,6 @@ export function vehicleSpriteState(state?: string | null): VehicleSpriteState {
     case 'INACTIVE':
       return 'inactive';
     case 'EXPIRED':
-    case 'SUSPENDED':
       return 'expired';
     default:
       return 'no_data';

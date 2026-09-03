@@ -1,7 +1,7 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import React from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { FlatList, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Chip } from '@/src/components/ui/ModulePrimitives';
@@ -15,10 +15,11 @@ import { useTheme } from '@/src/theme/ThemeProvider';
 import { hexToRgba, radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
 import type { ManagedUserDto, TenantMemberRole } from '@/src/types/api';
 
-const FILTERS: TenantMemberRole[] = ['ALL', 'ADMIN', 'USER', 'DRIVER'];
+const FILTERS: TenantMemberRole[] = ['ALL', 'ADMIN', 'USER'];
 const PAGE_SIZE = 50;
 
 export default function TenantDetailsScreen() {
+  const router = useRouter();
   const params = useLocalSearchParams<{ tenantId?: string | string[] }>();
   const rawTenantId = Array.isArray(params.tenantId) ? params.tenantId[0] : params.tenantId;
   const parsedTenantId = Number(rawTenantId);
@@ -69,115 +70,81 @@ export default function TenantDetailsScreen() {
   const statusColor =
     selected.status === 'ACTIVE' ? c.success : selected.status === 'DISABLED' ? c.danger : c.warningOrange;
 
+  const memberRows = members.data?.content ?? [];
+
   return (
-    <ScrollView
-      contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + spacing.xl }]}
-      style={styles.screen}>
-      <View style={styles.tenantCard}>
-        <View style={styles.headingRow}>
-          <View style={styles.headingCopy}>
-            <Text style={styles.title}>{selected.name}</Text>
-            <Text style={styles.company}>{selected.companyName}</Text>
-          </View>
-          <View
-            style={[
-              styles.statusPill,
-              {
-                backgroundColor: hexToRgba(statusColor, 0.12),
-                borderColor: hexToRgba(statusColor, 0.32),
-              },
-            ]}>
-            <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
-            <Text style={[styles.statusText, { color: statusColor }]}>{selected.status}</Text>
-          </View>
-        </View>
-
-        <View style={styles.detailsGrid}>
-          <Detail icon="identifier" label="Tenant ID" value={selected.tenantId} />
-          <Detail icon="account-outline" label="Administrator" value={selected.adminName ?? 'Not set'} />
-          <Detail icon="email-outline" label="Admin Email" value={selected.adminEmail ?? 'Not set'} />
-          <Detail icon="phone-outline" label="Phone Number" value={selected.adminPhone ?? 'Not set'} />
-          <Detail icon="calendar-blank-outline" label="Created" value={formatDate(selected.createdAt)} />
-        </View>
-      </View>
-
-      <View style={styles.membersCard}>
-        <View style={styles.sectionHeading}>
-          <View>
-            <Text style={styles.sectionTitle}>Members</Text>
-            <Text style={styles.sectionHint}>Only members belonging to {selected.name}</Text>
-          </View>
-          {members.data ? (
-            <Text style={styles.memberCount}>{members.data.totalElements}</Text>
-          ) : null}
-        </View>
-
-        <View style={styles.filterRow}>
-          {FILTERS.map((value) => (
-            <Chip
-              key={value}
-              active={filter === value}
-              label={filterLabel(value)}
-              onPress={() => selectFilter(value)}
-            />
-          ))}
-        </View>
-
-        {members.isLoading || members.isFetching ? (
-          <LoadingView label="Loading members…" />
-        ) : members.isError ? (
-          <ErrorRetryView
-            message={apiErrorMessage(members.error, 'Tenant members could not be loaded')}
-            onRetry={() => void members.refetch()}
-          />
-        ) : (members.data?.content.length ?? 0) === 0 ? (
+    <View style={styles.screen}>
+      <FlatList
+        contentContainerStyle={[
+          styles.content,
+          { paddingBottom: Math.max(insets.bottom, 16) + 88 },
+        ]}
+        data={memberRows}
+        keyExtractor={(item) => String(item.id)}
+        ListEmptyComponent={
           <EmptyView
             icon="account-group-outline"
-            message={`No ${filterLabel(filter).toLowerCase()} members are assigned to this tenant.`}
+            message={
+              filter === 'ALL'
+                ? 'No members have been assigned to this tenant yet.'
+                : `No members with the ${filter} role in this tenant.`
+            }
             title="No members found"
           />
-        ) : (
-          <View style={styles.memberList}>
-            {members.data!.content.map((member) => (
-              <MemberRow key={member.id} member={member} />
-            ))}
-          </View>
-        )}
+        }
+        ListHeaderComponent={
+          <View style={styles.headerSection}>
+            <View style={styles.tenantCard}>
+              <View style={styles.headingRow}>
+                <View style={styles.headingCopy}>
+                  <Text style={styles.title}>{selected.name}</Text>
+                  <Text style={styles.company}>{selected.companyName}</Text>
+                </View>
+                <View
+                  style={[
+                    styles.statusPill,
+                    {
+                      backgroundColor: hexToRgba(statusColor, 0.12),
+                      borderColor: hexToRgba(statusColor, 0.32),
+                    },
+                  ]}>
+                  <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
+                  <Text style={[styles.statusText, { color: statusColor }]}>{selected.status}</Text>
+                </View>
+              </View>
 
-        {(members.data?.totalPages ?? 0) > 1 ? (
-          <View style={styles.pagination}>
-            <PageButton
-              disabled={members.data?.first ?? true}
-              icon="chevron-left"
-              label="Previous"
-              onPress={() => setPage((value) => Math.max(0, value - 1))}
-            />
-            <Text style={styles.pageText}>
-              Page {page + 1} of {members.data?.totalPages ?? 1}
-            </Text>
-            <PageButton
-              disabled={members.data?.last ?? true}
-              icon="chevron-right"
-              label="Next"
-              onPress={() => setPage((value) => value + 1)}
-            />
-          </View>
-        ) : null}
-      </View>
-    </ScrollView>
-  );
-}
+              <View style={styles.detailsGrid}>
+                <Detail icon="identifier" label="Tenant ID" value={selected.tenantId} />
+                <Detail icon="account-outline" label="Administrator" value={selected.adminName ?? 'Not set'} />
+                <Detail icon="email-outline" label="Admin Email" value={selected.adminEmail ?? 'Not set'} />
+                <Detail icon="phone-outline" label="Phone Number" value={selected.adminPhone ?? 'Not set'} />
+                <Detail icon="calendar-blank-outline" label="Created" value={formatDate(selected.createdAt)} />
+              </View>
+            </View>
 
-function Detail({ icon, label, value }: { icon: React.ComponentProps<typeof MaterialCommunityIcons>['name']; label: string; value: string }) {
-  const { colors: c } = useTheme();
-  const styles = React.useMemo(() => makeStyles(c), [c]);
-  return (
-    <View style={styles.detailRow}>
-      <MaterialCommunityIcons color={c.textMuted} name={icon} size={17} />
-      <View style={styles.detailCopy}>
-        <Text style={styles.detailLabel}>{label}</Text>
-        <Text selectable style={styles.detailValue}>{value}</Text>
-      </View>
+            <View style={styles.rosterHeader}>
+              <View>
+                <Text style={styles.rosterTitle}>Organization Members</Text>
+                <Text style={styles.rosterSubtitle}>
+                  {members.data?.totalElements ?? memberRows.length} total members
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.filtersRow}>
+              {FILTERS.map((f) => (
+                <Chip
+                  active={filter === f}
+                  key={f}
+                  label={f === 'ALL' ? 'All Roles' : formatRole(f)}
+                  onPress={() => selectFilter(f)}
+                />
+              ))}
+            </View>
+          </View>
+        }
+        renderItem={({ item }) => <MemberRow member={item} />}
+      />
     </View>
   );
 }
@@ -185,100 +152,163 @@ function Detail({ icon, label, value }: { icon: React.ComponentProps<typeof Mate
 function MemberRow({ member }: { member: ManagedUserDto }) {
   const { colors: c } = useTheme();
   const styles = React.useMemo(() => makeStyles(c), [c]);
+
+  const status = (member.status || 'ACTIVE').toUpperCase();
+  const statusColor =
+    status === 'ACTIVE'
+      ? c.success
+      : status === 'PENDING_ACTIVATION'
+        ? c.warningOrange
+        : c.danger;
+
   return (
-    <View style={styles.memberRow}>
-      <View style={styles.avatar}>
-        <MaterialCommunityIcons
-          color={c.primary}
-          name={member.role === 'DRIVER' ? 'steering' : 'account-outline'}
-          size={20}
-        />
+    <View style={styles.memberCard}>
+      <View style={styles.memberAvatar}>
+        <Text style={styles.memberAvatarText}>
+          {initials(member.name || member.username)}
+        </Text>
       </View>
-      <View style={styles.memberCopy}>
-        <View style={styles.memberNameRow}>
-          <Text numberOfLines={1} style={styles.memberName}>{member.name}</Text>
-          <Text style={styles.roleBadge}>{roleLabel(member.role)}</Text>
+      <View style={styles.memberInfo}>
+        <Text numberOfLines={1} style={styles.memberName}>
+          {member.name || member.username}
+        </Text>
+        <Text numberOfLines={1} style={styles.memberEmail}>
+          {member.email || member.username}
+        </Text>
+        <View style={styles.memberTags}>
+          <Text style={styles.memberRole}>{formatRole(member.role)}</Text>
+          {member.mobile ? <Text style={styles.memberPhone}>• {member.mobile}</Text> : null}
         </View>
-        <Text numberOfLines={1} style={styles.memberMeta}>{member.email ?? member.username}</Text>
-        {member.mobile ? <Text style={styles.memberMeta}>{member.mobile}</Text> : null}
       </View>
-      <View style={[styles.activeDot, member.status !== 'ACTIVE' && styles.disabledDot]} />
+      <View
+        style={[
+          styles.statusPill,
+          {
+            backgroundColor: hexToRgba(statusColor, 0.12),
+            borderColor: hexToRgba(statusColor, 0.32),
+          },
+        ]}>
+        <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
+        <Text style={[styles.statusText, { color: statusColor }]}>{status}</Text>
+      </View>
     </View>
   );
 }
 
-function PageButton({ disabled, icon, label, onPress }: { disabled: boolean; icon: 'chevron-left' | 'chevron-right'; label: string; onPress: () => void }) {
+function Detail({
+  icon,
+  label,
+  value,
+}: {
+  icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
+  label: string;
+  value: string;
+}) {
   const { colors: c } = useTheme();
   const styles = React.useMemo(() => makeStyles(c), [c]);
   return (
-    <Pressable
-      accessibilityRole="button"
-      disabled={disabled}
-      onPress={onPress}
-      style={({ pressed }) => [styles.pageButton, disabled && styles.pageButtonDisabled, pressed && !disabled && { opacity: 0.75 }]}>
-      {icon === 'chevron-left' ? <MaterialCommunityIcons color={disabled ? c.textMuted : c.primary} name={icon} size={17} /> : null}
-      <Text style={[styles.pageButtonText, disabled && { color: c.textMuted }]}>{label}</Text>
-      {icon === 'chevron-right' ? <MaterialCommunityIcons color={disabled ? c.textMuted : c.primary} name={icon} size={17} /> : null}
-    </Pressable>
+    <View style={styles.detailRow}>
+      <MaterialCommunityIcons color={c.textMuted} name={icon} size={16} />
+      <Text numberOfLines={1} style={styles.detailText}>
+        <Text style={styles.detailLabel}>{label}: </Text>
+        {value}
+      </Text>
+    </View>
   );
 }
 
-function filterLabel(role: TenantMemberRole) {
-  if (role === 'ALL') return 'All';
-  if (role === 'ADMIN') return 'Admin';
-  if (role === 'USER') return 'User';
-  return 'Driver';
+function formatRole(role: string): string {
+  return role.charAt(0) + role.slice(1).toLowerCase().replace(/_/g, ' ');
 }
 
-function roleLabel(role: ManagedUserDto['role']) {
-  if (role === 'DRIVER') return 'Driver';
-  if (role === 'COMPANY_USER') return 'User';
-  return 'Admin';
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return 'US';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
-function formatDate(value?: string | null) {
+function formatDate(value?: string | null): string {
   if (!value) return '—';
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return '—';
-  return new Intl.DateTimeFormat([], { day: '2-digit', month: 'short', year: 'numeric' }).format(parsed);
+  return new Intl.DateTimeFormat([], {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+  }).format(parsed);
 }
 
 const makeStyles = (c: ThemeColors) =>
   StyleSheet.create({
     screen: { backgroundColor: c.pageBackground, flex: 1 },
-    content: { gap: spacing.md, padding: spacing.md },
-    tenantCard: { backgroundColor: c.surface, borderColor: c.border, borderRadius: radius.lg, borderWidth: StyleSheet.hairlineWidth * 2, gap: spacing.md, padding: spacing.md },
-    headingRow: { alignItems: 'flex-start', flexDirection: 'row', gap: spacing.sm },
+    content: { gap: spacing.sm, padding: spacing.md },
+    headerSection: { gap: spacing.md, marginBottom: spacing.xs },
+    tenantCard: {
+      backgroundColor: c.surface,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      borderWidth: StyleSheet.hairlineWidth * 2,
+      gap: spacing.sm,
+      padding: spacing.md,
+    },
+    headingRow: {
+      alignItems: 'flex-start',
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+    },
     headingCopy: { flex: 1, minWidth: 0 },
-    title: { color: c.textPrimary, fontSize: typography.h2, fontWeight: '900' },
-    company: { color: c.textSecondary, fontSize: typography.caption, marginTop: 2 },
-    statusPill: { alignItems: 'center', borderRadius: radius.pill, borderWidth: 1, flexDirection: 'row', gap: 5, paddingHorizontal: spacing.sm, paddingVertical: 4 },
-    statusDot: { borderRadius: 99, height: 6, width: 6 },
+    title: { color: c.textPrimary, fontSize: typography.h2, fontWeight: '800' },
+    company: { color: c.textSecondary, fontSize: typography.body, marginTop: 2 },
+    detailsGrid: { gap: 6, marginTop: spacing.xs },
+    detailRow: { alignItems: 'center', flexDirection: 'row', gap: 8 },
+    detailText: { color: c.textSecondary, flex: 1, fontSize: typography.body },
+    detailLabel: { color: c.textMuted, fontWeight: '700' },
+    rosterHeader: {
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      alignItems: 'center',
+      marginTop: spacing.sm,
+    },
+    rosterTitle: { color: c.textPrimary, fontSize: typography.body, fontWeight: '800' },
+    rosterSubtitle: { color: c.textMuted, fontSize: typography.caption, marginTop: 1 },
+    filtersRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs },
+    memberCard: {
+      alignItems: 'center',
+      backgroundColor: c.surface,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      borderWidth: StyleSheet.hairlineWidth * 2,
+      flexDirection: 'row',
+      gap: spacing.sm,
+      padding: spacing.md,
+    },
+    memberAvatar: {
+      alignItems: 'center',
+      backgroundColor: c.accentSoft,
+      borderColor: c.primary,
+      borderRadius: radius.pill,
+      borderWidth: 1.5,
+      height: 40,
+      justifyContent: 'center',
+      width: 40,
+    },
+    memberAvatarText: { color: c.primary, fontSize: 14, fontWeight: '800' },
+    memberInfo: { flex: 1, minWidth: 0 },
+    memberName: { color: c.textPrimary, fontSize: typography.body, fontWeight: '700' },
+    memberEmail: { color: c.textMuted, fontSize: typography.caption, marginTop: 1 },
+    memberTags: { flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 3 },
+    memberRole: { color: c.primary, fontSize: 11, fontWeight: '700' },
+    memberPhone: { color: c.textMuted, fontSize: 11 },
+    statusPill: {
+      alignItems: 'center',
+      borderRadius: radius.pill,
+      borderWidth: StyleSheet.hairlineWidth * 2,
+      flexDirection: 'row',
+      gap: 4,
+      paddingHorizontal: spacing.sm,
+      paddingVertical: 3,
+    },
+    statusDot: { borderRadius: 999, height: 6, width: 6 },
     statusText: { fontSize: 10, fontWeight: '900' },
-    detailsGrid: { gap: spacing.sm },
-    detailRow: { alignItems: 'center', flexDirection: 'row', gap: spacing.sm },
-    detailCopy: { flex: 1, minWidth: 0 },
-    detailLabel: { color: c.textMuted, fontSize: 10, fontWeight: '700', textTransform: 'uppercase' },
-    detailValue: { color: c.textPrimary, fontSize: typography.caption, fontWeight: '700', marginTop: 1 },
-    membersCard: { backgroundColor: c.surface, borderColor: c.border, borderRadius: radius.lg, borderWidth: StyleSheet.hairlineWidth * 2, gap: spacing.md, padding: spacing.md },
-    sectionHeading: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
-    sectionTitle: { color: c.textPrimary, fontSize: typography.body, fontWeight: '900' },
-    sectionHint: { color: c.textMuted, fontSize: 11, marginTop: 2 },
-    memberCount: { backgroundColor: c.accentSoft, borderRadius: radius.pill, color: c.primary, fontSize: typography.caption, fontWeight: '900', minWidth: 28, overflow: 'hidden', paddingHorizontal: 8, paddingVertical: 4, textAlign: 'center' },
-    filterRow: { alignItems: 'center', alignSelf: 'flex-start', flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, justifyContent: 'flex-start' },
-    memberList: { borderColor: c.border, borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth * 2, overflow: 'hidden' },
-    memberRow: { alignItems: 'center', backgroundColor: c.surface, borderBottomColor: c.divider, borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: 'row', gap: spacing.sm, padding: spacing.sm },
-    avatar: { alignItems: 'center', backgroundColor: c.accentSoft, borderRadius: radius.pill, height: 38, justifyContent: 'center', width: 38 },
-    memberCopy: { flex: 1, minWidth: 0 },
-    memberNameRow: { alignItems: 'center', flexDirection: 'row', gap: spacing.xs },
-    memberName: { color: c.textPrimary, flexShrink: 1, fontSize: typography.label, fontWeight: '800' },
-    roleBadge: { backgroundColor: c.surfaceAlt, borderRadius: radius.pill, color: c.textSecondary, fontSize: 9, fontWeight: '800', overflow: 'hidden', paddingHorizontal: 6, paddingVertical: 2 },
-    memberMeta: { color: c.textSecondary, fontSize: 11, marginTop: 1 },
-    activeDot: { backgroundColor: c.success, borderRadius: 99, height: 8, width: 8 },
-    disabledDot: { backgroundColor: c.textMuted },
-    pagination: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
-    pageButton: { alignItems: 'center', borderColor: c.border, borderRadius: radius.sm, borderWidth: 1, flexDirection: 'row', gap: 2, paddingHorizontal: spacing.sm, paddingVertical: 7 },
-    pageButtonDisabled: { opacity: 0.55 },
-    pageButtonText: { color: c.primary, fontSize: 11, fontWeight: '800' },
-    pageText: { color: c.textSecondary, fontSize: 11, fontWeight: '700' },
   });

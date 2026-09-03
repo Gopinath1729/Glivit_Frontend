@@ -3,7 +3,7 @@ import { Platform } from 'react-native';
 import { AnimatedRegion, MarkerAnimated } from 'react-native-maps';
 import { VehicleMarker, markerCategory } from '@/src/components/VehicleMarker';
 import { vehicleSprite } from '@/src/components/vehicleMarkerSprites';
-import { normalizeHeading } from '@/src/services/playbackEngine';
+import { markerRotationFor, normalizeHeading } from '@/src/services/geoMath';
 import type { FleetTarget } from '@/src/services/fleetLivePositions';
 import type { DeviceSummary } from '@/src/types/api';
 
@@ -96,7 +96,9 @@ export const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
   }, [device.id, targetsRef]);
 
   const markerSize = isSelected ? 64 : 52;
-  const course = normalizeHeading(device.course ?? 0);
+  // The vehicle artwork's own orientation offset is applied here, in the one
+  // shared helper, rather than being re-derived per call site.
+  const course = markerRotationFor(device.course ?? 0);
   // A flat sprite is rotated by the map itself, so it wants the true bearing.
   // The vector marker draws its own cone into a billboard the SDK never turns,
   // so that one has to be handed the bearing relative to the camera instead.

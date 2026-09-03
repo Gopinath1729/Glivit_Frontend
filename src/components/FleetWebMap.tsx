@@ -30,6 +30,20 @@ export type WebMapGeofence = {
   color?: string;
 };
 
+/**
+ * Recorded-history overlay: the complete travelled route as one line per
+ * observed run (a break between runs is coverage the tracker never reported,
+ * so it is left undrawn rather than closed with a straight line), plus the
+ * detected stops.
+ */
+export type WebMapHistoryOverlay = {
+  routes: [number, number][][];
+  stops: { index: number; lat: number; lng: number; active: boolean }[];
+  events?: { id: string | number; lat: number; lng: number; label?: string }[];
+  start?: { lat: number; lng: number } | null;
+  end?: { lat: number; lng: number } | null;
+};
+
 export type WebMapCameraMode =
   | 'follow'
   | 'chase'
@@ -55,7 +69,12 @@ type FleetWebMapProps = {
   markers: WebMapMarker[];
   mapStyle: MapStyleSpec;
   cameraMode?: WebMapCameraMode;
+  /** Every currently-travelled route run, kept separate across GPS gaps. */
+  polylines?: [number, number][][];
+  /** Legacy single-run input. Prefer `polylines` for live tracking/playback. */
   polyline?: [number, number][]; // [lng, lat] pairs
+  /** Recorded route + stop markers drawn beneath the live polyline. */
+  history?: WebMapHistoryOverlay;
   /** Circular geofences to draw as ground-accurate rings. */
   geofences?: WebMapGeofence[];
   selectedId?: string | number | null;
@@ -81,7 +100,9 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
     cameraMode = 'follow',
     markers,
     mapStyle,
+    polylines,
     polyline,
+    history,
     geofences,
     selectedId,
     followSelected = false,
@@ -97,8 +118,9 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
   const webRef = useRef<EmbeddedWebViewHandle>(null);
   const markersRef = useRef(markers);
   const lastSyncedMarkersRef = useRef<object | null>(null);
-  const lastSyncedRouteRef = useRef<[number, number][] | null>(null);
+  const lastSyncedRouteRef = useRef<[number, number][][] | null>(null);
   const lastSyncedGeofencesRef = useRef<object | null>(null);
+  const lastSyncedHistoryRef = useRef<object | null>(null);
   markersRef.current = markers;
   const [reloadKey, setReloadKey] = useState(0);
   const [status, setStatus] = useState<WebMapStatus>('loading');
@@ -145,7 +167,13 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
     }),
     [cameraMode, followSelected, markers]
   );
-  const routeCoordinates = useMemo(() => sanitizeWebRoute(polyline ?? []), [polyline]);
+  const routeCoordinates = useMemo(
+    () =>
+      (polylines ?? (polyline ? [polyline] : []))
+        .map((line) => sanitizeWebRoute(line))
+        .filter((line) => line.length >= 2),
+    [polyline, polylines]
+  );
   const geofencePayload = useMemo(
     () =>
       (geofences ?? [])
@@ -178,10 +206,38 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
 
   const syncRoute = useCallback(() => {
     webRef.current?.injectJavaScript(
-      `window.__glivtSyncRoute && window.__glivtSyncRoute(${JSON.stringify(routeCoordinates)}); true;`
+      `window.__glivtSyncRoutes && window.__glivtSyncRoutes(${JSON.stringify(routeCoordinates)}); true;`
     );
     lastSyncedRouteRef.current = routeCoordinates;
   }, [routeCoordinates]);
+
+  const historyPayload = useMemo(
+    () => ({
+      routes: (history?.routes ?? [])
+        .map((line) => sanitizeWebRoute(line))
+        .filter((line) => line.length >= 2),
+      stops: (history?.stops ?? []).filter((stop) => isValidWebCoordinate(stop.lat, stop.lng)),
+      events: (history?.events ?? []).filter((event) =>
+        isValidWebCoordinate(event.lat, event.lng)
+      ),
+      start:
+        history?.start && isValidWebCoordinate(history.start.lat, history.start.lng)
+          ? history.start
+          : null,
+      end:
+        history?.end && isValidWebCoordinate(history.end.lat, history.end.lng)
+          ? history.end
+          : null,
+    }),
+    [history]
+  );
+
+  const syncHistory = useCallback(() => {
+    webRef.current?.injectJavaScript(
+      `window.__glivtSyncHistory && window.__glivtSyncHistory(${JSON.stringify(historyPayload)}); true;`
+    );
+    lastSyncedHistoryRef.current = historyPayload;
+  }, [historyPayload]);
 
   const syncGeofences = useCallback(() => {
     webRef.current?.injectJavaScript(
@@ -193,15 +249,17 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
   const syncAll = useCallback(
     (fit = false) => {
       webRef.current?.injectJavaScript(
-        `window.__glivtSyncRoute && window.__glivtSyncRoute(${JSON.stringify(routeCoordinates)});` +
+        `window.__glivtSyncRoutes && window.__glivtSyncRoutes(${JSON.stringify(routeCoordinates)});` +
+          `window.__glivtSyncHistory && window.__glivtSyncHistory(${JSON.stringify(historyPayload)});` +
           `window.__glivtSyncGeofences && window.__glivtSyncGeofences(${JSON.stringify(geofencePayload)});` +
           `window.__glivtSyncMarkers && window.__glivtSyncMarkers(${JSON.stringify(markerPayload)}, ${fit ? 'true' : 'false'}); true;`
       );
       lastSyncedRouteRef.current = routeCoordinates;
+      lastSyncedHistoryRef.current = historyPayload;
       lastSyncedGeofencesRef.current = geofencePayload;
       lastSyncedMarkersRef.current = markerPayload;
     },
-    [geofencePayload, markerPayload, routeCoordinates]
+    [geofencePayload, historyPayload, markerPayload, routeCoordinates]
   );
 
   useEffect(() => {
@@ -209,6 +267,7 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
     setErrorMessage('');
     lastSyncedMarkersRef.current = null;
     lastSyncedRouteRef.current = null;
+    lastSyncedHistoryRef.current = null;
     lastSyncedGeofencesRef.current = null;
   }, [html, reloadKey]);
 
@@ -249,6 +308,12 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
       syncRoute();
     }
   }, [routeCoordinates, status, syncRoute]);
+
+  useEffect(() => {
+    if (status === 'ready' && lastSyncedHistoryRef.current !== historyPayload) {
+      syncHistory();
+    }
+  }, [historyPayload, status, syncHistory]);
 
   // Zones are pushed like markers and the route: on ready, and whenever the set
   // changes. That is what makes a newly saved geofence appear without a reload,
@@ -404,14 +469,18 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
   <link href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
   <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <style>
-    html, body, #map { margin: 0; padding: 0; height: 100%; width: 100%; background: #09111d; }
+    html, body, #map { margin: 0; padding: 0; height: 100%; width: 100%; background: #edf4f7; }
     #map:after {
       content: ''; position: absolute; inset: 0; pointer-events: none;
-      background: radial-gradient(circle at 50% 48%, transparent 35%, rgba(3,9,18,.16) 100%);
+      background: radial-gradient(circle at 50% 46%, transparent 48%, rgba(22,73,91,.07) 100%);
     }
+    .maplibregl-ctrl-attrib { font: 9px/1.2 system-ui, sans-serif; opacity: .82; }
     .glivt-marker {
       width: 60px; height: 68px; display: flex; align-items: center; justify-content: center;
-      transition: transform .22s cubic-bezier(.2,.8,.2,1), filter .22s ease;
+      /* MapLibre owns this element's translate transform. React already feeds
+         interpolated positions at animation-frame cadence; transitioning that
+         transform again makes the marker trail the GPS by another 220 ms. */
+      transition: filter .18s ease;
       transform-origin: center;
     }
     .glivt-marker:before {
@@ -494,8 +563,9 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
         var STYLE = ${JSON.stringify(mapStyle)};
         var BASE_READY = false;
         var MARKERS = [];
-        var LINE = [];
+        var LINES = [];
         var GEOFENCES = [];
+        var HISTORY = { routes: [], stops: [] };
         if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
         if (typeof STYLE === 'string' && STYLE.indexOf('https://') !== 0) {
           throw new Error('Map style URL must use HTTPS.');
@@ -507,7 +577,10 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
           zoom: 10.8,
           pitch: 38,
           bearing: -8,
-          attributionControl: false,
+          // The Geoapify style carries the required Geoapify, OpenMapTiles and
+          // OpenStreetMap credits. Keeping MapLibre's control enabled renders
+          // those attributions automatically.
+          attributionControl: true,
           fadeDuration: 80,
           maxPitch: 70
         });
@@ -517,11 +590,15 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
         var cameraMode = 'follow';
         var followSelected = false;
         var lastCameraAt = 0;
+        var lastCameraCoordinate = null;
+        var lastCameraBearing = 0;
         var lastProjectionAt = 0;
         var lastBaseError = '';
 
         function fitToData() {
-          var pts = MARKERS.map(function (m) { return [m.lng, m.lat]; }).concat(LINE);
+          var pts = MARKERS.map(function (m) { return [m.lng, m.lat]; });
+          LINES.forEach(function (line) { pts = pts.concat(line); });
+          (HISTORY.routes || []).forEach(function (line) { pts = pts.concat(line); });
           map.stop();
           if (pts.length === 1) { map.setCenter(pts[0]); map.setZoom(14); }
           else if (pts.length > 1) {
@@ -542,6 +619,22 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
         function normalizedHeading(value) {
           var heading = Number.isFinite(value) ? value : 0;
           return ((heading % 360) + 360) % 360;
+        }
+
+        function angularDifference(a, b) {
+          return Math.abs((((normalizedHeading(a) - normalizedHeading(b)) % 360) + 540) % 360 - 180);
+        }
+
+        function groundDistanceMeters(a, b) {
+          if (!a || !b) return Number.POSITIVE_INFINITY;
+          var toRad = function (value) { return value * Math.PI / 180; };
+          var dLat = toRad(b.lat - a.lat);
+          var dLng = toRad(b.lng - a.lng);
+          var latA = toRad(a.lat);
+          var latB = toRad(b.lat);
+          var h = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+            Math.cos(latA) * Math.cos(latB) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+          return 6371008.8 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
         }
 
         function normalizedCategory(value) {
@@ -607,11 +700,6 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
           var marker = MARKERS.find(function (item) { return item.id === selectedMarkerId; });
           if (!marker) return;
           var now = Date.now();
-          if (!shouldFit && now - lastCameraAt < 320) {
-            reportProjection(false);
-            return;
-          }
-          lastCameraAt = now;
           var profile =
             cameraMode === 'chase'
               ? { bearing: normalizedHeading(marker.heading), duration: 420, offset: [0, 88], pitch: 52, zoom: 16.0 }
@@ -622,11 +710,32 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
                   : cameraMode === 'top'
                     ? { bearing: 0, duration: 380, offset: [0, 0], pitch: 0, zoom: 16.2 }
                     : { bearing: 0, duration: 400, offset: [0, 58], pitch: 28, zoom: 15.4 };
-          map.stop();
+
+          // Marker coordinates arrive at animation-frame cadence. Restarting a
+          // 400-480ms camera ease every 320ms meant no ease ever completed: the
+          // map oscillated around its target and the whole Live Track page
+          // appeared to shake. Follow only meaningful movement/rotation, and
+          // never schedule a new camera animation before the previous one has
+          // had time to settle.
+          if (!shouldFit) {
+            var movement = groundDistanceMeters(lastCameraCoordinate, marker);
+            var bearingChange = angularDifference(profile.bearing, lastCameraBearing);
+            if (movement < 2 && bearingChange < 3) {
+              reportProjection(false);
+              return;
+            }
+            if (now - lastCameraAt < 620) {
+              reportProjection(false);
+              return;
+            }
+          }
+          lastCameraAt = now;
+          lastCameraCoordinate = { lat: marker.lat, lng: marker.lng };
+          lastCameraBearing = profile.bearing;
           map.easeTo({
             center: [marker.lng, marker.lat],
             bearing: profile.bearing,
-            duration: shouldFit ? Math.max(560, profile.duration) : profile.duration,
+            duration: shouldFit ? Math.max(560, profile.duration) : Math.min(540, profile.duration),
             offset: profile.offset,
             pitch: profile.pitch,
             zoom: profile.zoom,
@@ -656,16 +765,56 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
 
         map.on('load', function () {
           var labelLayerId = firstLabelLayerId();
-          map.addSource('route', { type: 'geojson', data: { type:'Feature', properties:{}, geometry:{ type:'LineString', coordinates: [] } } });
+          map.addSource('route', { type: 'geojson', data: emptyCollection() });
           map.addLayer({ id:'route-aura', type:'line', source:'route',
             layout:{ 'line-cap':'round','line-join':'round' },
-            paint:{ 'line-color':'rgba(22, 163, 74, 0.18)','line-width':18, 'line-blur':8 } }, labelLayerId);
+            paint:{ 'line-color':'rgba(0, 122, 255, 0.24)',
+                    'line-width':['interpolate',['linear'],['zoom'],8,8,14,15,18,22],
+                    'line-blur':6 } }, labelLayerId);
           map.addLayer({ id:'route-shadow', type:'line', source:'route',
             layout:{ 'line-cap':'round','line-join':'round' },
-            paint:{ 'line-color':'rgba(3, 12, 22, 0.55)','line-width':11 } }, labelLayerId);
+            paint:{ 'line-color':'rgba(255,255,255,0.96)',
+                    'line-width':['interpolate',['linear'],['zoom'],8,6,14,10,18,14] } }, labelLayerId);
           map.addLayer({ id:'route', type:'line', source:'route',
             layout:{ 'line-cap':'round','line-join':'round' },
-            paint:{ 'line-color':'#16A34A','line-width':5 } }, labelLayerId);
+            paint:{ 'line-color':'#0878FF',
+                    'line-width':['interpolate',['linear'],['zoom'],8,3,14,6,18,9] } }, labelLayerId);
+
+          // Recorded history sits beneath the live/progress route: one muted
+          // line per observed run (never joined across a coverage gap) plus a
+          // red numbered circle for every detected stop.
+          map.addSource('history-route', { type:'geojson', data: emptyCollection() });
+          map.addLayer({ id:'history-route', type:'line', source:'history-route',
+            layout:{ 'line-cap':'round','line-join':'round' },
+            paint:{ 'line-color':'rgba(151,171,190,0.75)','line-width':5 } }, 'route-aura');
+          map.addSource('history-stops', { type:'geojson', data: emptyCollection() });
+          map.addLayer({ id:'history-stops', type:'circle', source:'history-stops',
+            paint:{ 'circle-color':'#EF4444',
+                    'circle-radius':['case',['get','active'],11,8],
+                    'circle-stroke-color':'#FFFFFF',
+                    'circle-stroke-width':['case',['get','active'],3,1.5] } }, labelLayerId);
+          map.addLayer({ id:'history-stop-labels', type:'symbol', source:'history-stops',
+            layout:{ 'text-field':['get','label'], 'text-size':10,
+                     'text-font':['Noto Sans Regular'], 'text-allow-overlap':true },
+            paint:{ 'text-color':'#FFFFFF' } }, labelLayerId);
+          map.addSource('history-events', { type:'geojson', data: emptyCollection() });
+          map.addLayer({ id:'history-events', type:'circle', source:'history-events',
+            paint:{ 'circle-color':'#F59E0B', 'circle-radius':7,
+                    'circle-stroke-color':'#FFFFFF', 'circle-stroke-width':2 } }, labelLayerId);
+          map.addLayer({ id:'history-event-labels', type:'symbol', source:'history-events',
+            layout:{ 'text-field':['get','label'], 'text-size':9,
+                     'text-font':['Noto Sans Regular'], 'text-offset':[0,1.45],
+                     'text-allow-overlap':false },
+            paint:{ 'text-color':'#8A4A00', 'text-halo-color':'#FFFFFF',
+                    'text-halo-width':1.2 } }, labelLayerId);
+          map.addSource('history-terminals', { type:'geojson', data: emptyCollection() });
+          map.addLayer({ id:'history-terminals', type:'circle', source:'history-terminals',
+            paint:{ 'circle-color':['get','color'], 'circle-radius':9,
+                    'circle-stroke-color':'#FFFFFF', 'circle-stroke-width':2.5 } }, labelLayerId);
+          map.addLayer({ id:'history-terminal-labels', type:'symbol', source:'history-terminals',
+            layout:{ 'text-field':['get','label'], 'text-size':10,
+                     'text-font':['Noto Sans Regular'], 'text-allow-overlap':true },
+            paint:{ 'text-color':'#FFFFFF' } }, labelLayerId);
 
           // Geofences sit beneath the route and markers so a vehicle is never
           // obscured by the zone it is sitting in.
@@ -806,15 +955,71 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
           syncGeofenceSource();
         };
 
-        window.__glivtSyncRoute = function (line) {
-          LINE = Array.isArray(line) ? line : [];
+        window.__glivtSyncRoutes = function (lines) {
+          LINES = Array.isArray(lines) ? lines : [];
           if (!BASE_READY) return;
           var routeSource = map.getSource('route');
           if (routeSource) {
             routeSource.setData({
-              type:'Feature',
-              properties:{},
-              geometry:{ type:'LineString', coordinates: LINE }
+              type:'FeatureCollection',
+              features: LINES.map(function (line) {
+                return { type:'Feature', properties:{}, geometry:{ type:'LineString', coordinates: line } };
+              })
+            });
+          }
+        };
+        window.__glivtSyncHistory = function (payload) {
+          HISTORY = payload && typeof payload === 'object' ? payload : { routes: [], stops: [] };
+          if (!BASE_READY) return;
+          var routeSource = map.getSource('history-route');
+          if (routeSource) {
+            routeSource.setData({
+              type:'FeatureCollection',
+              features: (HISTORY.routes || []).map(function (line) {
+                return { type:'Feature', properties:{}, geometry:{ type:'LineString', coordinates: line } };
+              })
+            });
+          }
+          var stopSource = map.getSource('history-stops');
+          if (stopSource) {
+            stopSource.setData({
+              type:'FeatureCollection',
+              features: (HISTORY.stops || []).map(function (stop) {
+                return {
+                  type:'Feature',
+                  properties:{ label: String(stop.index), active: Boolean(stop.active) },
+                  geometry:{ type:'Point', coordinates: [stop.lng, stop.lat] }
+                };
+              })
+            });
+          }
+          var eventSource = map.getSource('history-events');
+          if (eventSource) {
+            eventSource.setData({
+              type:'FeatureCollection',
+              features: (HISTORY.events || []).map(function (event) {
+                return {
+                  type:'Feature',
+                  properties:{ label: event.label || '' },
+                  geometry:{ type:'Point', coordinates: [event.lng, event.lat] }
+                };
+              })
+            });
+          }
+          var terminalSource = map.getSource('history-terminals');
+          if (terminalSource) {
+            var terminals = [];
+            if (HISTORY.start) terminals.push({ point:HISTORY.start, label:'A', color:'#16A34A' });
+            if (HISTORY.end) terminals.push({ point:HISTORY.end, label:'B', color:'#1473E6' });
+            terminalSource.setData({
+              type:'FeatureCollection',
+              features: terminals.map(function (terminal) {
+                return {
+                  type:'Feature',
+                  properties:{ label:terminal.label, color:terminal.color },
+                  geometry:{ type:'Point', coordinates:[terminal.point.lng, terminal.point.lat] }
+                };
+              })
             });
           }
         };
@@ -859,7 +1064,10 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
             delete markerEls[id];
           });
 
-          if (cameraModeChanged) lastCameraAt = 0;
+          if (cameraModeChanged) {
+            lastCameraAt = 0;
+            lastCameraCoordinate = null;
+          }
           applyCamera(Boolean(shouldFit || cameraModeChanged));
           reportVisibleMarkers();
           reportProjection(true);
@@ -870,6 +1078,7 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
           if (markerEls[id]) markerEls[id].classList.add('selected');
           if (followSelected) {
             lastCameraAt = 0;
+            lastCameraCoordinate = null;
             applyCamera(true);
           }
         };
@@ -938,8 +1147,8 @@ function WebMapStateOverlay({
 }
 
 const styles = StyleSheet.create({
-  container: { backgroundColor: '#09111D', flex: 1, overflow: 'hidden' },
-  web: { backgroundColor: '#09111D', flex: 1 },
+  container: { backgroundColor: '#EDF4F7', flex: 1, overflow: 'hidden' },
+  web: { backgroundColor: '#EDF4F7', flex: 1 },
   overlay: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
@@ -948,14 +1157,14 @@ const styles = StyleSheet.create({
   },
   panel: {
     alignItems: 'center',
-    backgroundColor: 'rgba(8, 16, 28, 0.96)',
-    borderColor: 'rgba(255,255,255,0.13)',
+    backgroundColor: 'rgba(255, 255, 255, 0.97)',
+    borderColor: 'rgba(20, 75, 94, 0.14)',
     borderRadius: 20,
     borderWidth: 1,
     maxWidth: 310,
     paddingHorizontal: 20,
     paddingVertical: 18,
-    shadowColor: '#020712',
+    shadowColor: '#173E4D',
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.3,
     shadowRadius: 24,
@@ -981,7 +1190,7 @@ const styles = StyleSheet.create({
     marginTop: 12,
   },
   title: {
-    color: '#F2F8FD',
+    color: '#123247',
     fontSize: 16,
     fontWeight: '900',
     letterSpacing: 0,
@@ -989,7 +1198,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   message: {
-    color: '#8FA5B9',
+    color: '#5B7180',
     fontSize: 12,
     fontWeight: '600',
     letterSpacing: 0,

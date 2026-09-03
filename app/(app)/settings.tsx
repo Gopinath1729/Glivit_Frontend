@@ -1,3 +1,4 @@
+import { useRouter } from 'expo-router';
 import React, { useMemo } from 'react';
 import { Alert, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 
@@ -18,6 +19,7 @@ const THEME_MODES: { value: ThemeMode; label: string }[] = [
 ];
 
 export default function SettingsScreen() {
+  const router = useRouter();
   const { colors: c, mode, setMode } = useTheme();
   const styles = useMemo(() => makeStyles(c), [c]);
   const { data, isLoading, isError, error, refetch } = useGetSettingsQuery();
@@ -120,6 +122,23 @@ export default function SettingsScreen() {
           label="Notification sound"
           value={draft.notificationSound}
           onValueChange={(notificationSound) => setDraft((v) => v && { ...v, notificationSound })}
+        />
+      </Card>
+
+      {/* Password rotation lives on its own screen rather than inline here:
+          it is the one control on this page that is not a preference, and
+          mixing it into the Save Settings button would tie a credential change
+          to an unrelated save. */}
+      <Card style={styles.card}>
+        <Text style={styles.title}>Security</Text>
+        <Text style={styles.hint}>
+          Change the password you sign in with. You will need your current password.
+        </Text>
+        <Button
+          label="Change password"
+          icon="lock-reset"
+          onPress={() => router.push('/change-password')}
+          variant="secondary"
         />
       </Card>
 

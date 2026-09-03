@@ -10,14 +10,16 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useLogoutMutation } from '@/src/services/authApi';
 import { authStorage } from '@/src/services/authStorage';
+import { closeLivePositionStream } from '@/src/services/livePositionStream';
 import { baseApi } from '@/src/services/baseApi';
-import { clearSession } from '@/src/store/authSlice';
+import { clearSession } from '@/src/store/authState';
+import { liveVehiclesCleared } from '@/src/store/liveVehiclesState';
 import { useAppDispatch, useAppSelector } from '@/src/store/hooks';
-import { clearActiveTenant } from '@/src/store/tenantSlice';
+import { clearActiveTenant } from '@/src/store/tenantState';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
-import { ColorPickerModal } from './ui/ColorPickerModal';
 import { useGetProfileImageQuery } from '@/src/services/operationsApi';
+import { stopTracking } from '@/src/services/phoneTracker';
 
 const PROFILE_IMG_KEY = 'glivt.profile.imageUri';
 
@@ -29,13 +31,12 @@ interface ProfilePanelProps {
 export function ProfilePanel({ visible, onClose }: ProfilePanelProps) {
   const router = useRouter();
   const dispatch = useAppDispatch();
-  const { colors: c, mode, setMode, colors, setPrimaryColor, autoFollowVehicle, setAutoFollowVehicle } = useTheme();
+  const { colors: c, isDark, setMode } = useTheme();
   const insets = useSafeAreaInsets();
-  const styles = useMemo(() => makeStyles(c, insets, mode), [c, insets, mode]);
+  const styles = useMemo(() => makeStyles(c, insets), [c, insets]);
   const user = useAppSelector((s) => s.auth.user);
   
   const [logout] = useLogoutMutation();
-  const [showColorPicker, setShowColorPicker] = useState(false);
   const [profileUri, setProfileUri] = useState<string | null>(null);
 
   // Sync profile photo with database
@@ -70,9 +71,16 @@ export function ProfilePanel({ visible, onClose }: ProfilePanelProps) {
           } catch {
             // Best-effort
           }
+          await stopTracking().catch(() => undefined);
+          // The live position stream is shared across screens and reference
+          // counted, so a screen unmounting is not enough to close it. Logging
+          // out has to close it explicitly, or the old session keeps an
+          // authenticated stream open and the next login sees two.
+          closeLivePositionStream();
+          dispatch(liveVehiclesCleared());
           dispatch(clearSession());
           dispatch(clearActiveTenant());
-          dispatch(baseApi.util.resetApiState());
+          baseApi.util.resetApiState();
           await authStorage.clearSession().catch(() => undefined);
           onClose();
           router.replace('/login');
@@ -113,39 +121,35 @@ export function ProfilePanel({ visible, onClose }: ProfilePanelProps) {
           </LinearGradient>
 
           <View style={styles.menu}>
-            {user?.role === 'SUPER_ADMIN' && (
-              <Pressable style={styles.menuItem} onPress={() => { onClose(); router.push('/manage-tenants' as never); }}>
-                <MaterialCommunityIcons name="office-building-cog" size={24} color="#0F172A" />
-                <Text style={styles.menuItemText}>Switch Tenant</Text>
-              </Pressable>
-            )}
-
             <View style={styles.menuItem}>
-              <MaterialCommunityIcons name="theme-light-dark" size={24} color="#0F172A" />
+              <MaterialCommunityIcons name="theme-light-dark" size={24} color={c.textPrimary} />
               <Text style={styles.menuItemText}>Dark Mode</Text>
               <Switch 
-                value={mode === 'dark'} 
+                value={isDark}
                 onValueChange={(val) => setMode(val ? 'dark' : 'light')} 
-                trackColor={{ true: '#0F172A', false: '#CBD5E1' }} 
-                thumbColor={c.white}
+                trackColor={{ true: c.primary, false: c.borderStrong }}
+                thumbColor={c.onPrimary}
               />
             </View>
 
-            <Pressable style={styles.menuItem} onPress={() => { onClose(); router.push('/timeline' as never); }}>
-              <MaterialCommunityIcons name="chart-timeline-variant" size={24} color="#0F172A" />
-              <Text style={styles.menuItemText}>Your Timeline</Text>
+            <Pressable
+              style={styles.menuItem}
+              onPress={() => {
+                onClose();
+                router.push('/manage-tenants' as never);
+              }}>
+              <MaterialCommunityIcons name="office-building-cog-outline" size={24} color={c.textPrimary} />
+              <Text style={styles.menuItemText}>Tenant Management</Text>
+              <MaterialCommunityIcons name="chevron-right" size={20} color={c.textMuted} />
             </Pressable>
 
-            <View style={styles.menuItem}>
-              <MaterialCommunityIcons name="navigation-variant-outline" size={24} color="#0F172A" />
-              <Text style={styles.menuItemText}>Auto Follow Vehicle</Text>
-              <Switch 
-                value={autoFollowVehicle} 
-                onValueChange={setAutoFollowVehicle} 
-                trackColor={{ true: '#0F172A', false: '#CBD5E1' }} 
-                thumbColor={c.white}
-              />
-            </View>
+            {/* Members change their own password; nobody else can set it for
+                them, so this is the only place inside the app that does it. */}
+            <Pressable style={styles.menuItem} onPress={() => { onClose(); router.push('/change-password' as never); }}>
+              <MaterialCommunityIcons name="lock-reset" size={24} color={c.textPrimary} />
+              <Text style={styles.menuItemText}>Change Password</Text>
+              <MaterialCommunityIcons name="chevron-right" size={20} color={c.textMuted} />
+            </Pressable>
 
             <View style={styles.divider} />
 
@@ -153,25 +157,18 @@ export function ProfilePanel({ visible, onClose }: ProfilePanelProps) {
               style={({ pressed }) => [styles.logoutButton, pressed && styles.logoutButtonPressed]} 
               onPress={onLogout}
             >
-              <MaterialCommunityIcons name="logout" size={24} color="#DC2626" />
+              <MaterialCommunityIcons name="logout" size={24} color={c.danger} />
               <Text style={styles.logoutText}>Logout</Text>
             </Pressable>
           </View>
         </Animated.View>
       </Animated.View>
 
-      <ColorPickerModal 
-        visible={showColorPicker} 
-        onClose={() => setShowColorPicker(false)} 
-        color={colors.primary} 
-        onColorChange={setPrimaryColor} 
-      />
-
     </>
   );
 }
 
-const makeStyles = (c: ThemeColors, insets: any, mode: string) =>
+const makeStyles = (c: ThemeColors, insets: { bottom: number }) =>
   StyleSheet.create({
     backdrop: {
       position: 'absolute',
@@ -194,7 +191,7 @@ const makeStyles = (c: ThemeColors, insets: any, mode: string) =>
       justifyContent: 'center',
     },
     panel: {
-      backgroundColor: mode === 'dark' ? c.surfaceElevated : '#F8FAFC',
+      backgroundColor: c.pageBackground,
       borderTopLeftRadius: radius.xl,
       borderTopRightRadius: radius.xl,
       paddingBottom: Math.max(insets.bottom, spacing.lg),
@@ -284,24 +281,17 @@ const makeStyles = (c: ThemeColors, insets: any, mode: string) =>
       paddingVertical: spacing.md,
       borderRadius: radius.md,
       borderWidth: 2,
-      borderColor: '#DC2626',
-      backgroundColor: '#FFFFFF',
+      borderColor: c.danger,
+      backgroundColor: c.surface,
       gap: spacing.sm,
       marginTop: spacing.sm,
     },
     logoutButtonPressed: {
-      backgroundColor: '#FEF2F2',
+      backgroundColor: 'rgba(239, 68, 68, 0.10)',
     },
     logoutText: {
       fontSize: typography.body,
       fontWeight: '800',
-      color: '#DC2626',
-    },
-    colorPreview: {
-      width: 24,
-      height: 24,
-      borderRadius: 12,
-      borderWidth: 1,
-      borderColor: c.border,
+      color: c.danger,
     },
   });

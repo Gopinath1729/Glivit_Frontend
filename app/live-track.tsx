@@ -6,8 +6,9 @@ import {
   ActivityIndicator,
   Animated,
   AppState,
-  Image,
+  type AppStateStatus,
   type LayoutChangeEvent,
+  LayoutAnimation,
   Linking,
   Modal,
   PanResponder,
@@ -18,6 +19,7 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  UIManager,
   useWindowDimensions,
   View,
 } from 'react-native';
@@ -25,9 +27,7 @@ import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context'
 
 import {
   loadMapPreferences,
-  saveMapPreferences,
   type MapPreferences,
-  type MapTypeOption,
   DEFAULT_MAP_PREFERENCES,
 } from '@/src/services/mapPreferencesStorage';
 
@@ -39,35 +39,40 @@ import {
   type WebMapProjection,
 } from '@/src/components/FleetWebMap';
 import MapView, { Marker } from '@/src/components/maps/NativeMap';
-import {
-  sanitizeRouteCoordinates,
-  StableRouteLine,
-  StableBaseRoute,
-} from '@/src/components/StableRouteLayers';
+import { splitRouteCoordinates, StableRouteLine } from '@/src/components/StableRouteLayers';
 import {
   VehicleMarker,
   markerCategory as markerCategoryFor,
   vehicleMarkerCanvas,
 } from '@/src/components/VehicleMarker';
 import { vehicleSprite } from '@/src/components/vehicleMarkerSprites';
-import { env } from '@/src/config/env';
-import { useGetAllDevicesQuery, useGetDeviceQuery, useGetDevicePlaybackQuery } from '@/src/services/devicesApi';
+import { useLiveRoadTrack } from '@/src/hooks/useLiveRoadTrack';
+import { useMatchedHistoryRoute } from '@/src/hooks/useMatchedHistoryRoute';
+import { describeMatchStatus } from '@/src/services/matchedRoute';
+import { resolveDeviceState, stateColorFor } from '@/src/services/deviceState';
+import { useLocationDisabledFor } from '@/src/services/mobileGpsStatus';
+import {
+  useGetAllDevicesQuery,
+  useGetDevicePlaybackQuery,
+  useGetDeviceQuery,
+} from '@/src/services/devicesApi';
 import {
   getMapStyleInfo,
-  getNativeMapProviderLabel,
-  nativeMapsAvailable,
 } from '@/src/services/mapStyle';
 import {
-  buildPlaybackTrack,
   haversineKm,
   lerpAngle,
   normalizeHeading,
+  routeSegments,
   sampleAt,
-  type PlaybackTrack,
+  type PlaybackCoordinate,
 } from '@/src/services/playbackEngine';
-import { useLivePositions } from '@/src/services/livePositions';
+import { markerRotationFor } from '@/src/services/geoMath';
+import { traceCoord, traceGps } from '@/src/services/gpsDiagnostics';
+import { mergeLiveTrailHistory, progressLiveTrail } from '@/src/services/liveRouteTrail';
+import { useLivePositions, useSmoothedLivePosition } from '@/src/services/livePositions';
 
-import type { DeviceSummary, PlaybackTrackPoint, PlaybackResponse, PlaybackStopMarker, PlaybackEventMarker } from '@/src/types/api';
+import type { DeviceSummary, PlaybackTrackPoint } from '@/src/types/api';
 
 /** Length of the vehicle glyph itself. */
 const LIVE_VEHICLE_SIZE = 52;
@@ -82,6 +87,26 @@ const LIVE_STATUS_CIRCLE_SIZE = 56;
 const OVERLAY_GAP = 10;
 /** Height assumed for the collapsed sheet before it has been measured. */
 const COLLAPSED_SHEET_FALLBACK = 118;
+/** Height of the sheet's drag-handle row. The content pane below it is sized
+ *  against this, so the two must stay in step or the History scroll view ends
+ *  up taller than the sheet and its last card falls off the bottom. */
+// Old-architecture Android needs layout animations switched on explicitly. The
+// call is a no-op under Fabric and absent on iOS, so it is guarded rather than
+// branched on the architecture, which the app cannot reliably detect.
+if (Platform.OS === 'android') {
+  UIManager.setLayoutAnimationEnabledExperimental?.(true);
+}
+
+const SHEET_HANDLE_HEIGHT = 56;
+/** `bottomSheetContent` vertical padding, top and bottom. */
+const SHEET_VERTICAL_PADDING = 20;
+/** Short enough to feel immediate, long enough not to look like a jump. */
+const SHEET_RESIZE_ANIMATION = {
+  duration: 180,
+  create: { type: 'easeInEaseOut', property: 'opacity' },
+  update: { type: 'easeInEaseOut' },
+  delete: { type: 'easeInEaseOut', property: 'opacity' },
+} as const;
 /** Size of every floating action button, so the rails line up pixel-for-pixel. */
 const CONTROL_BUTTON_SIZE = 44;
 const CAMERA_MIN_GAP_MS = 560;
@@ -92,6 +117,8 @@ const LIVE_TRANSITION_MIN_MS = 420;
 const LIVE_TRANSITION_MAX_MS = 3600;
 /** How often the live catch-up pushes a new position into React state (~30fps). */
 const LIVE_PUBLISH_INTERVAL_MS = 33;
+/** How long the marker takes to glide from one accepted fix to the next. */
+const LIVE_MARKER_EASE_MS = 1_000;
 
 type CameraMode = 'follow' | 'chase' | 'cinematic' | 'top' | 'drone' | 'overview';
 const CAMERA_MODES: Record<
@@ -112,33 +139,9 @@ const CAMERA_MODES: Record<
   drone: { label: 'Drone', icon: 'orbit', pitch: 42, zoom: 14.2, forwardMeters: 34, bearingFollowsHeading: true },
   overview: { label: 'Overview', icon: 'fit-to-page-outline', pitch: 0, zoom: 12, forwardMeters: 0, bearingFollowsHeading: false },
 };
-const CAMERA_MODE_ORDER: CameraMode[] = ['follow', 'chase', 'cinematic', 'top', 'drone', 'overview'];
-const CINEMATIC_CAMERAS: {
-  id: CameraMode;
-  icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
-  label: string;
-}[] = [
-    { id: 'cinematic', icon: 'movie-open', label: 'Cinematic' },
-    { id: 'follow', icon: 'navigation-variant', label: 'Follow' },
-    { id: 'chase', icon: 'car-sports', label: 'Chase' },
-    { id: 'drone', icon: 'orbit', label: 'Drone' },
-    { id: 'top', icon: 'crosshairs-gps', label: 'Top' },
-    { id: 'overview', icon: 'fit-to-page-outline', label: 'Overview' },
-  ];
-
 const CONTACT_PHONE = '+919876543210';
 
 type MapLoadState = 'loading' | 'ready' | 'error';
-/** react-native-maps base layers, cycled by the map-type control. */
-type NativeMapType = 'standard' | 'satellite' | 'hybrid';
-const MAP_TYPE_ORDER: NativeMapType[] = ['standard', 'satellite', 'hybrid'];
-const MAP_TYPE_LABEL: Record<NativeMapType, string> = {
-  standard: 'Normal map',
-  satellite: 'Satellite map',
-  hybrid: 'Hybrid map',
-};
-const MAP_ZOOM_MIN = 3;
-const MAP_ZOOM_MAX = 20;
 type RouteMapOptionId =
   | 'parking'
   | 'refresh'
@@ -167,27 +170,10 @@ type Coordinate = {
   longitude: number;
 };
 
-const ROUTE_TOOLS: {
-  id: RouteMapOptionId;
-  icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
-  label: string;
-}[] = [
-    { id: 'follow', icon: 'navigation-variant', label: 'Follow' },
-    { id: 'location', icon: 'crosshairs-gps', label: 'Center' },
-    { id: 'refresh', icon: 'refresh', label: 'Restart' },
-    { id: 'parking', icon: 'parking', label: 'Park' },
-    { id: 'traffic', icon: 'road-variant', label: 'Route' },
-    { id: 'mapType', icon: 'layers-outline', label: 'Map style' },
-    { id: 'night', icon: 'weather-night', label: 'Night' },
-    { id: 'direction', icon: 'map-marker-path', label: 'Next' },
-    { id: 'history', icon: 'history', label: 'History' },
-    { id: 'alert', icon: 'alert-outline', label: 'Alert' },
-    { id: 'call', icon: 'phone-outline', label: 'Support' },
-  ];
-
-// The one and only tracking-route colour. Kept as a single constant so the live
-// route can never drift into gradients, traffic/speed tints, or a second hue.
-const ROUTE_GREEN = '#16A34A';
+// The one and only tracking-route colour: a vivid road blue with a restrained
+// cyan aura, legible over both street and satellite maps.
+const ROUTE_BLUE = '#1473E6';
+const ROUTE_BLUE_AURA = 'rgba(45, 174, 255, 0.30)';
 
 const BRAND = {
   green: '#118a36',
@@ -218,14 +204,37 @@ function offsetCoordinate(
   };
 }
 
-function simplifyRouteForRender(coordinates: Coordinate[], maxPoints = 2_000): Coordinate[] {
-  const validCoordinates = sanitizeRouteCoordinates(coordinates);
-  if (validCoordinates.length <= 2) return validCoordinates;
-  const meaningful = [validCoordinates[0]];
-  for (let index = 1; index < validCoordinates.length; index += 1) {
-    const point = validCoordinates[index];
+/**
+ * Is the app in the foreground?
+ *
+ * Android reports `AppState.currentState` as "unknown" until the native module
+ * has answered, and an app that is already foregrounded never fires a change
+ * event to correct it. Comparing against "active" therefore left the playback
+ * clock gated off for the whole session with no way to recover, so anything not
+ * explicitly backgrounded counts as active.
+ */
+function isForeground(state: AppStateStatus | null | undefined): boolean {
+  return state !== 'background' && state !== 'inactive';
+}
+
+/**
+ * Thins ONE already-validated run for rendering.
+ *
+ * Deliberately takes and returns a single run. It used to take a flat
+ * coordinate list and quietly drop any vertex that failed validation, which
+ * joins the two survivors either side of it with a straight line - the artefact
+ * the vertex was dropped to avoid. Splitting is
+ * {@link splitRouteCoordinates}'s job and happens BEFORE this; by the time a
+ * run reaches here every vertex in it is known good and known adjacent, so
+ * thinning cannot invent a segment.
+ */
+function thinRunForRender(coordinates: Coordinate[], maxPoints = 2_000): Coordinate[] {
+  if (coordinates.length <= 2) return coordinates;
+  const meaningful = [coordinates[0]];
+  for (let index = 1; index < coordinates.length; index += 1) {
+    const point = coordinates[index];
     const previous = meaningful[meaningful.length - 1];
-    const isLast = index === validCoordinates.length - 1;
+    const isLast = index === coordinates.length - 1;
     if (
       isLast ||
       haversineKm(previous.latitude, previous.longitude, point.latitude, point.longitude) >= 0.002
@@ -239,6 +248,13 @@ function simplifyRouteForRender(coordinates: Coordinate[], maxPoints = 2_000): C
   const last = meaningful[meaningful.length - 1];
   if (reduced[reduced.length - 1] !== last) reduced.push(last);
   return reduced;
+}
+
+/** Validate-then-split-then-thin, in that order, for a whole coordinate list. */
+function renderableRuns(coordinates: Coordinate[], maxPoints = 2_000): Coordinate[][] {
+  return splitRouteCoordinates(coordinates)
+    .map((run) => thinRunForRender(run, maxPoints))
+    .filter((run) => run.length >= 2);
 }
 
 /**
@@ -291,8 +307,11 @@ const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
 
   // The vector marker draws its own heading cone into a billboard the SDK never
   // turns, so it must be given the bearing relative to the camera. A flat
-  // sprite is rotated by the map itself and wants the true bearing.
-  const screenHeading = ((heading - cameraHeading) % 360 + 360) % 360;
+  // sprite is rotated by the map itself and wants the true bearing. Both go
+  // through markerRotationFor, so the vehicle artwork's own orientation offset
+  // is applied in exactly one place for both platforms.
+  const mapRotation = markerRotationFor(heading);
+  const screenHeading = normalizeHeading(mapRotation - cameraHeading);
 
   // Android bakes a custom marker view into a 100x100 pixel square taken from
   // its top-left corner under the New Architecture, which for a centred car is
@@ -306,7 +325,7 @@ const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
         flat
         identifier="live-vehicle"
         image={vehicleSprite(state, showStatusCircle)}
-        rotation={((heading % 360) + 360) % 360}
+        rotation={mapRotation}
         tappable={false}
         tracksViewChanges={false}
         zIndex={40}
@@ -341,38 +360,6 @@ const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
   );
 });
 
-const MONTH_NAMES = [
-  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
-];
-
-function todayStr(): string {
-  const d = new Date();
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-
-function shiftDate(dateStr: string, delta: number): string {
-  const d = new Date(`${dateStr}T12:00:00`);
-  d.setDate(d.getDate() + delta);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-
-function labelDate(dateStr: string): string {
-  const today = todayStr();
-  if (dateStr === today) return 'Today';
-  if (dateStr === shiftDate(today, -1)) return 'Yesterday';
-  const parts = dateStr.split('-');
-  const monthIdx = parseInt(parts[1] ?? '1', 10) - 1;
-  const day = parts[2] ? parseInt(parts[2], 10) : '';
-  return `${day} ${MONTH_NAMES[monthIdx] || ''}`;
-}
-
 export default function VehicleTrackerScreen() {
   const router = useRouter();
   const navigation = useNavigation();
@@ -382,30 +369,70 @@ export default function VehicleTrackerScreen() {
     name?: string;
     subtitle?: string;
   }>();
-  // Real route playback for the selected device. Falls back to the demo route
-  // only when no device is passed or the app is in offline demo mode.
+  // Real route playback for the selected device.
   const deviceId = params.deviceId ? Number(params.deviceId) : undefined;
-  const devicePreferenceKey = String(deviceId ?? 'demo');
-  // A real, tenant-scoped device is selected (not the offline/demo screen).
-  const hasRealDevice = deviceId != null && !Number.isNaN(deviceId) && !env.demoMode;
+  // A real, tenant-scoped device is selected.
+  const hasRealDevice = deviceId != null && !Number.isNaN(deviceId);
   const validDeviceId = deviceId != null && !Number.isNaN(deviceId);
   const { data: deviceDetail, refetch: refetchDevice } = useGetDeviceQuery(deviceId as number, {
     skip: !validDeviceId,
   });
-  const vehicleName =
-    params.name ?? deviceDetail?.name ?? 'TN20CM7677 (VinothKumar Srinivas)';
-  const vehicleSubtitle =
-    params.subtitle ??
-    deviceDetail?.address ??
-    'Kuppalamadugu, Uthukkottai, Thiruvallur, Tamil Nadu';
+  // No fabricated fallbacks. A hardcoded registration and address here read as
+  // real vehicle data on a screen whose entire job is to report where a real
+  // vehicle actually is, and they showed up for any device whose detail had not
+  // loaded yet.
+  const vehicleName = params.name ?? deviceDetail?.name ?? 'Vehicle';
+  const vehicleSubtitle = params.subtitle ?? deviceDetail?.address ?? 'Locating…';
   const vehicleCategory = params.category ?? deviceDetail?.category ?? 'CAR';
-  // Live position stream (SSE for real devices; a one-fix-at-a-time simulator in
-  // demo mode). This is the ONLY source of movement on this LIVE screen — no
-  // recorded history is fetched or merged and no demo route is pre-loaded, so
-  // nothing is ever drawn ahead of the vehicle. Recorded playback lives entirely
-  // on the separate Route Playback / History screen.
+  // The tenant's live SSE stream, filtered to this device. This is the ONLY
+  // source of movement on this LIVE screen: there is no simulator, no demo
+  // route and no synthesised track behind it. The current trip's already
+  // accepted history is restored below only so an app restart cannot erase the
+  // travelled line; nothing is ever drawn ahead of the vehicle. Full recorded
+  // playback lives entirely on the separate Route Playback / History screen.
   const liveEnabled = validDeviceId;
-  const live = useLivePositions(liveEnabled ? deviceId : undefined, deviceDetail?.state);
+  // The device's own state is deliberately NOT passed in. It used to be, and
+  // because it sat in the subscription's dependency list every state change
+  // (RUNNING -> IDLE -> STOPPED, refetched on a timer) tore the stream down and
+  // rebuilt it - losing every fix that landed during the reconnect. The stream
+  // is shared and its lifetime depends only on which device is selected.
+  const live = useLivePositions(liveEnabled ? deviceId : undefined);
+  const hydrationRangeRef = useRef<{ deviceId: number; from: string; to: string } | null>(null);
+  if (
+    deviceId != null &&
+    live.latest?.deviceId === deviceId &&
+    live.tripStartedAt != null &&
+    Number.isFinite(live.tripStartedAt)
+  ) {
+    const from = new Date(live.tripStartedAt).toISOString();
+    if (
+      hydrationRangeRef.current?.deviceId !== deviceId ||
+      hydrationRangeRef.current?.from !== from
+    ) {
+      // Freeze the cutoff at the first live snapshot for this trip. A query
+      // whose `to` advances every second continually refetches; omitting it can
+      // briefly return a point newer than the marker and draw the line ahead of
+      // the vehicle. SSE owns everything after this exact boundary.
+      hydrationRangeRef.current = {
+        deviceId,
+        from,
+        to: new Date(live.lastEventAt ?? Date.now()).toISOString(),
+      };
+    }
+  } else if (hydrationRangeRef.current) {
+    hydrationRangeRef.current = null;
+  }
+  const liveTripFrom = hydrationRangeRef.current?.from;
+  const liveTripTo = hydrationRangeRef.current?.to;
+  const { data: liveTripPlayback } = useGetDevicePlaybackQuery(
+    { deviceId: deviceId as number, from: liveTripFrom, to: liveTripTo },
+    { skip: !validDeviceId || !liveTripFrom || !liveTripTo }
+  );
+  const { track: hydratedLiveTrack } = useMatchedHistoryRoute(liveTripPlayback);
+  const hydratedLiveTrail = useMemo(
+    () => routeSegments(hydratedLiveTrack),
+    [hydratedLiveTrack]
+  );
   // Fleet roster for the in-screen vehicle switcher. Selecting a different
   // vehicle re-points every data source on this screen (device detail, live SSE
   // stream, route buffer, camera) rather than only swapping the 3D model.
@@ -429,80 +456,21 @@ export default function VehicleTrackerScreen() {
       ignition: deviceDetail?.ignition ?? null,
     };
   }, [deviceDetail]);
-  const [appActive, setAppActive] = useState(AppState.currentState === 'active');
-  const [activeTab, setActiveTab] = useState<'live' | 'history' | 'cinematic'>('live');
-  const today = todayStr();
-  const [activeFromDate, setActiveFromDate] = useState(today);
-  const [activeToDate, setActiveToDate] = useState(today);
-  const [historyPlaying, setHistoryPlaying] = useState(false);
-  const [historySpeed, setHistorySpeed] = useState<0.5 | 1 | 2 | 4 | 8>(1);
+  const [appActive, setAppActive] = useState(() => isForeground(AppState.currentState));
 
-  const fromIso = useMemo(() => `${activeFromDate}T00:00:00.000Z`, [activeFromDate]);
-  const toIso = useMemo(() => `${activeToDate}T23:59:59.999Z`, [activeToDate]);
-
-  const { data: playbackData, isFetching: isPlaybackFetching } = useGetDevicePlaybackQuery(
-    { deviceId: deviceId ?? 0, from: fromIso, to: toIso },
-    { skip: !deviceId || activeTab !== 'history' }
-  );
-
-  // The travelled route is EXACTLY the accepted live fixes of the current trip
-  // (livePositions resets this buffer when a new trip starts). Before the first
-  // fix we show only the seed position, so the green line always begins where the
-  // live trip began and grows behind the vehicle as new coordinates arrive.
-  const track = useMemo<PlaybackTrack>(() => {
-    if (activeTab === 'history' && playbackData?.points) {
-      return buildPlaybackTrack(playbackData.points);
-    }
-    if (live.points.length > 0) return buildPlaybackTrack(live.points);
-    return buildPlaybackTrack(seedPoint ? [seedPoint] : []);
-  }, [activeTab, playbackData, live.points, seedPoint]);
-
-  useEffect(() => {
-    elapsedMsRef.current = 0;
-    setElapsedMs(0);
-    setHistoryPlaying(false);
-  }, [playbackData]);
-
-  // 60fps clock for History playback
-  useEffect(() => {
-    if (activeTab !== 'history' || !historyPlaying || track.points.length < 2) return;
-    let raf: number;
-    let lastUi = 0;
-    let last = Date.now();
-    const tick = () => {
-      raf = requestAnimationFrame(tick);
-      const now = Date.now();
-      const dt = Math.min(0.05, (now - last) / 1000);
-      last = now;
-      if (appActive) {
-        let nextElapsed = elapsedMsRef.current + (dt * 1000) * historySpeed;
-        if (nextElapsed >= track.totalDurationMs) {
-          nextElapsed = track.totalDurationMs;
-          setHistoryPlaying(false);
-        }
-        elapsedMsRef.current = nextElapsed;
-        if (now - lastUi > 40) {
-          lastUi = now;
-          setElapsedMs(nextElapsed);
-        }
-      }
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [activeTab, historyPlaying, historySpeed, appActive, track.points.length, track.totalDurationMs]);
-  const seekHistory = useCallback((frac: number) => {
-    const clamped = Math.max(0, Math.min(1, frac));
-    const nextElapsed = clamped * track.totalDurationMs;
-    elapsedMsRef.current = nextElapsed;
-    setElapsedMs(nextElapsed);
-  }, [track.totalDurationMs]);
-
-  const route = useMemo<Coordinate[]>(
-    () => track.points.map((p) => ({ latitude: p.lat, longitude: p.lng })),
-    [track]
-  );
+  // Live fixes arrive already validated and road-matched, so this is pure
+  // in-memory bookkeeping. Recorded-range playback (Journey Summary, Journey
+  // Timeline) remains on the separate Route Playback screen; the small history
+  // query above only hydrates the current trip's travelled live line.
+  const track = useLiveRoadTrack(live.points, seedPoint);
   // Distance travelled so far on the current live trip (grows with the route).
-  const totalDistanceKm = track.totalDistanceKm;
+  /**
+   * Trip distance, measured by the backend from validated GPS coordinates.
+   *
+   * The ingest pipeline accumulates it as each fix is accepted. It is never
+   * derived from the polyline, the animated marker or the road-matched geometry.
+   */
+  const totalDistanceKm = live.tripDistanceKm;
   const insets = useSafeAreaInsets();
   const { height, width } = useWindowDimensions();
   const mapRef = useRef<MapView>(null);
@@ -546,14 +514,27 @@ export default function VehicleTrackerScreen() {
   const [isFollowing, setIsFollowing] = useState(true);
   const [autoFollowSuspended, setAutoFollowSuspended] = useState(false);
   const [cameraMode, setCameraMode] = useState<CameraMode>('follow');
-  const [cinematicMode, setCinematicMode] = useState(false);
-  const [markerCategoryOverride, setMarkerCategoryOverride] = useState<string | null>(null);
+  const [cinematicMode] = useState(false);
+  const [markerCategoryOverride] = useState<string | null>(null);
   // Bottom sheet detent: collapsed shows only the summary; expanded shows all.
   const [sheetExpanded, setSheetExpanded] = useState(true);
   const [sheetHeight, setSheetHeight] = useState(0);
-  const [collapsedSheetHeight, setCollapsedSheetHeight] = useState(0);
+  const [collapsedSheetHeight] = useState(0);
   const [toolsExpanded, setToolsExpanded] = useState(false);
-  const [isTrafficVisible, setIsTrafficVisible] = useState(true);
+  /**
+   * Whether the travelled route line is drawn.
+   *
+   * Owned by this screen and defaulted ON. It used to be the SAME flag as the
+   * map's traffic layer, and was re-read from the stored map preferences on
+   * every focus - where `details.traffic` defaults to false. So the travelled
+   * route was hidden by default, and reappeared only if somebody happened to
+   * enable traffic; navigating away and back hid it again. That is the "route
+   * line keeps disappearing" fault, and it had nothing to do with the geometry.
+   * Traffic is now read from `mapPreferences.details.traffic` where it belongs
+   * (see `showsTraffic` on the MapView) and this flag only ever changes when the
+   * operator presses the Route control.
+   */
+  const [isRouteVisible, setIsRouteVisible] = useState(true);
   const [isNightMode, setIsNightMode] = useState(false);
   const [isSatelliteMode, setIsSatelliteMode] = useState(false);
   const [isAlertActive, setIsAlertActive] = useState(false);
@@ -582,7 +563,7 @@ export default function VehicleTrackerScreen() {
       duration: 250,
       useNativeDriver: true,
     }).start();
-  }, [tooltipVisible]);
+  }, [tooltipAnim, tooltipVisible]);
 
   const tooltipStyle = {
     opacity: tooltipAnim,
@@ -594,16 +575,16 @@ export default function VehicleTrackerScreen() {
 
   useEffect(() => {
     const sub = navigation.addListener('focus', () => {
-      void loadMapPreferences().then((prefs) => {
-        setMapPreferences(prefs);
-        setIsTrafficVisible(prefs.details.traffic);
-      });
+      // Map layer preferences only. The travelled route's visibility is NOT one
+      // of them and is deliberately not touched here - re-applying a stored
+      // preference on every focus is what kept switching the route line off.
+      void loadMapPreferences().then(setMapPreferences);
     });
     return sub;
   }, [navigation]);
   const [showsUserLocation, setShowsUserLocation] = useState(false);
-  const [isFullScreen, setIsFullScreen] = useState(false);
-  const [controlsExpanded, setControlsExpanded] = useState(true);
+  // Full screen was removed with its control; the layout is always windowed.
+  const isFullScreen = false;
   const [mapSize, setMapSize] = useState({ height, width });
   const [overlayHeights, setOverlayHeights] = useState({
     camera: 46,
@@ -615,16 +596,108 @@ export default function VehicleTrackerScreen() {
 
   const sample = useMemo(() => sampleAt(track, elapsedMs), [track, elapsedMs]);
   elapsedMsRef.current = elapsedMs;
-  liveFollowingRef.current = activeTab === 'live' && isLiveFollowing;
+  liveFollowingRef.current = isLiveFollowing;
   trackDurationRef.current = track.totalDurationMs;
-  const vehicleCoordinate = useMemo<Coordinate>(
-    () =>
-      sample
-        ? { latitude: sample.latitude, longitude: sample.longitude }
-        : route[0] ?? { latitude: 0, longitude: 0 },
-    [sample, route]
+  /**
+   * The drawn position, eased toward the newest road-matched fix.
+   *
+   * Rendering is driven by an animation frame over values already in memory, so
+   * it is completely independent of the network: a slow routing service or a
+   * dropped stream can delay the NEXT position, never the current one's motion.
+   */
+  const smoothedLive = useSmoothedLivePosition(
+    live.displayPosition,
+    live.displayHeading,
+    LIVE_MARKER_EASE_MS,
+    // A fix that broke the route is placed, not eased: there is no observed
+    // ground between the two coordinates for the marker to travel over, so
+    // animating it drives the vehicle through whatever is there.
+    live.displayDiscontinuous
   );
-  const heading = sample?.heading ?? 0;
+  const completeLiveTrail = useMemo(
+    () => mergeLiveTrailHistory(hydratedLiveTrail, live.trail),
+    [hydratedLiveTrail, live.trail]
+  );
+  const liveProgress = useMemo(
+    () => progressLiveTrail(completeLiveTrail, smoothedLive.position),
+    [completeLiveTrail, smoothedLive.position]
+  );
+
+  // Final stage of the trace: the coordinate and rotation the marker is actually
+  // given. Fired per ACCEPTED fix, not per animation frame - the easing runs at
+  // 60fps and tracing it would bury every other line. Together with the
+  // `[gps:matched]` line above it this is what proves the point the pipeline
+  // accepted is the point that got drawn.
+  useEffect(() => {
+    if (!live.displayPosition) return;
+    traceGps('render', deviceId ?? 'live', {
+      stage: 'marker',
+      drawn: traceCoord(live.displayPosition.latitude, live.displayPosition.longitude),
+      raw: traceCoord(live.rawPosition?.latitude, live.rawPosition?.longitude),
+      heading: live.displayHeading,
+      rotation: markerRotationFor(live.displayHeading),
+      gpsTime: live.lastEventAt,
+      quality: live.quality,
+    });
+  }, [
+    deviceId,
+    live.displayHeading,
+    live.displayPosition,
+    live.lastEventAt,
+    live.quality,
+    live.rawPosition,
+  ]);
+
+  /**
+   * The last coordinate we were ever confident about.
+   *
+   * This is the whole of the "the vehicle must not disappear" contract on the
+   * render side. A dropped stream, a rejected fix, a refetch that came back
+   * without a position, a tab switch, a remount - none of them produce a
+   * coordinate, and every one of them used to fall through to (0, 0) or to no
+   * marker at all. They now fall through to here instead, and the marker stays
+   * exactly where it was while its freshness label does the talking.
+   */
+  const lastKnownCoordinateRef = useRef<Coordinate | null>(null);
+  /**
+   * Which vehicle the sticky coordinate above belongs to.
+   *
+   * Without this the ref survived a vehicle switch, so selecting a second
+   * vehicle drew its marker at the FIRST one's last position until a fix for
+   * the new one arrived - on a parked fleet, minutes. It is the same class of
+   * fault as a stale cached coordinate, just held in a ref instead of a cache.
+   */
+  const lastKnownDeviceRef = useRef<number | undefined>(deviceId);
+  if (lastKnownDeviceRef.current !== deviceId) {
+    lastKnownDeviceRef.current = deviceId;
+    lastKnownCoordinateRef.current = null;
+  }
+  const vehicleCoordinate = useMemo<Coordinate>(() => {
+    const candidate: Coordinate | null =
+      liveProgress.position ??
+      smoothedLive.position ??
+      (sample ? { latitude: sample.latitude, longitude: sample.longitude } : null);
+
+    const resolved =
+      candidate ??
+      (seedPoint ? { latitude: seedPoint.lat, longitude: seedPoint.lng } : null) ??
+      lastKnownCoordinateRef.current;
+
+    if (resolved) lastKnownCoordinateRef.current = resolved;
+    // Only ever reached before anything at all has been received, and the
+    // marker is not rendered in that state (see hasVehicleCoordinate).
+    return resolved ?? { latitude: 0, longitude: 0 };
+  }, [liveProgress.position, sample, seedPoint, smoothedLive.position]);
+
+  /**
+   * True once any position has been established, and never false again for the
+   * life of this screen. Gating the marker on the CURRENT frame having a sample
+   * is what made the vehicle blink out whenever the track was momentarily empty
+   * - between a vehicle switch and its first fix, across a trip reset, during a
+   * refetch - and reappear minutes later when the next packet happened to land.
+   */
+  const hasVehicleCoordinate = lastKnownCoordinateRef.current != null;
+  const heading = smoothedLive.heading;
   // Live values change on every animation frame. Callbacks read them through a
   // ref instead of closing over them, so their identity stays stable and the
   // memoised bottom sheet is not re-rendered (and its native-driven transform
@@ -633,12 +706,48 @@ export default function VehicleTrackerScreen() {
   liveRef.current = { coordinate: vehicleCoordinate, heading };
   // The rendered route only depends on accepted GPS history, never on the
   // per-frame playback position, so it is not rebuilt on every animation frame.
-  const renderRoute = useMemo(() => simplifyRouteForRender(route), [route]);
-  const completedRoute = useMemo(() => {
-    if (activeTab !== 'history') return [];
-    const maxIdx = Math.max(1, sample?.completedPointCount ?? 0);
-    return route.slice(0, maxIdx + 1).map((p) => ({ latitude: p.latitude, longitude: p.longitude }));
-  }, [activeTab, route, sample?.completedPointCount]);
+  const renderRoute = useMemo(
+    () => completeLiveTrail.flatMap((run) => renderableRuns(run)).flat(),
+    [completeLiveTrail]
+  );
+  /**
+   * The live route as one polyline per observed run.
+   *
+   * The live buffer has coverage gaps too — a tunnel, a dead zone, a tracker
+   * that dropped out — and a flat coordinate list forces the map to close every
+   * one of them with a straight line through whatever it crosses. Splitting on
+   * the same runs history uses means a break is drawn as a break.
+   */
+  const liveRouteSegments = useMemo<PlaybackCoordinate[][]>(() => {
+    // `live.trail` is already the travelled route in chronological order: road
+    // geometry where the backend matched it, and the segment between two
+    // ACCEPTED points where it did not. Nothing is filtered or re-derived here,
+    // so the line cannot be affected by the marker, the status, the follow mode
+    // or a rerender - it only ever changes when a new point is accepted.
+    // Keep the route source stable between accepted GPS fixes. Clipping the
+    // polyline to the per-frame eased marker caused the entire GeoJSON source
+    // to be replaced ~30 times per second, competing with camera easing and
+    // making the page visibly shake. The accepted route advances once per real
+    // fix; only the marker is animated between those endpoints.
+    return completeLiveTrail.flatMap((segment) => renderableRuns(segment));
+  }, [completeLiveTrail]);
+  // Route diagnostics are emitted once per accepted fix. `liveProgress` changes
+  // every animation frame; tracing that value would produce ~30 log records a
+  // second and hide the GPS packet that caused the movement.
+  useEffect(() => {
+    const segments = live.trail.flatMap((segment) => renderableRuns(segment));
+    traceGps('render', deviceId ?? 'live', {
+      stage: 'route',
+      runs: segments.length,
+      vertices: segments.reduce((total, segment) => total + segment.length, 0),
+      lastVertex: segments.length
+        ? traceCoord(
+            segments[segments.length - 1][segments[segments.length - 1].length - 1].latitude,
+            segments[segments.length - 1][segments[segments.length - 1].length - 1].longitude
+          )
+        : 'none',
+    });
+  }, [deviceId, live.trail]);
   const trackStartMs = useMemo(() => {
     const start = track.points[0]?.t ? Date.parse(track.points[0].t) : Number.NaN;
     return Number.isFinite(start) ? start : null;
@@ -653,47 +762,90 @@ export default function VehicleTrackerScreen() {
     );
   }, [track.totalDurationMs, trackStartMs]);
 
-  const coveredKm = sample?.distanceKm ?? 0;
-  // Speed is the live-reported value at the current fix — never synthesized.
-  const reportedSpeed = Math.max(0, Math.round(sample?.speed ?? 0));
+  // The vehicle is always at the newest fix, so covered and total are the same
+  // backend number.
+  const coveredKm = live.tripDistanceKm;
+  // The backend's canonical speedKmh for the newest accepted fix - already
+  // converted from the device's own unit exactly once, at ingest, and already
+  // smoothed and clamped there. It is never recomputed, rescaled or estimated
+  // on this side.
+  const reportedSpeed = Math.max(0, Math.round(live.speedKmh));
   const isLiveStale =
     live.quality === 'stale' ||
     (liveAgeSec != null && liveAgeSec >= LIVE_STALE_AFTER_SEC);
   const isLowAccuracy = live.quality === 'low_accuracy';
   const hasInvalidLiveFix = live.quality === 'invalid' && !live.latest;
   const liveState = live.latest?.state?.trim().toUpperCase();
-  const isStopped = liveState === 'STOPPED' || (!liveState && deviceDetail?.state === 'STOPPED');
   // A remotely cut or locked vehicle cannot be moving whatever the last GPS fix
   // said, so immobilisation outranks the live stream. The flag is refetched when
   // a command invalidates the device cache.
   const isImmobilised = Boolean(deviceDetail?.immobilised || deviceDetail?.locked);
-  const currentSpeed = (isImmobilised || isStopped) ? 0 : reportedSpeed;
+  // This login's own phone tracker, with its location switch off.
+  const locationDisabled = useLocationDisabledFor(deviceId);
+  /**
+   * The single, shared status calculation — the same one the vehicle list, the
+   * map and management render.
+   *
+   * This screen used to derive its own answer from stream connectivity, speed
+   * and ignition, and only honoured the server's state when it happened to be
+   * STOPPED or IDLE. Anything else (OFFLINE included) fell through to
+   * "Running", so an open SSE socket made a three-hour-old fix look like a
+   * moving vehicle while the list correctly showed it Offline.
+   */
+  const resolvedState = useMemo(
+    () =>
+      resolveDeviceState({
+        serverState: liveState || deviceDetail?.state,
+        // The newest fix wins: the stream carries fresher telemetry than the
+        // periodically-refetched device record.
+        // The GPS clock of the newest fix, not when the packet arrived. A device
+        // replaying an old buffer is receiving data now but is not reporting
+        // where the vehicle is now, and must not be presented as live.
+        lastUpdate:
+          live.latest?.lastGpsTime ??
+          live.latest?.deviceTime ??
+          live.latest?.serverTime ??
+          deviceDetail?.lastUpdate,
+        offlineTimeoutSeconds: deviceDetail?.offlineTimeoutSeconds,
+        sourceType: deviceDetail?.sourceType,
+        immobilised: deviceDetail?.immobilised,
+        locked: deviceDetail?.locked,
+        speedKmh: live.latest ? live.speedKmh : deviceDetail?.speed,
+        ignition: live.latest?.ignition ?? deviceDetail?.ignition,
+        gpsValid: live.latest?.gpsValid ?? deviceDetail?.gpsValid,
+        accuracyMeters: live.latest?.accuracyMeters,
+        locationDisabled,
+      }),
+    [
+      live.latest,
+      deviceDetail?.immobilised,
+      deviceDetail?.lastUpdate,
+      deviceDetail?.locked,
+      deviceDetail?.offlineTimeoutSeconds,
+      deviceDetail?.sourceType,
+      deviceDetail?.state,
+      deviceDetail?.gpsValid,
+      deviceDetail?.ignition,
+      live.speedKmh,
+      deviceDetail?.speed,
+      liveState,
+      locationDisabled,
+    ]
+  );
+  const isStopped = resolvedState.state === 'STOPPED';
+  const isOffline = resolvedState.offline;
+  const currentSpeed = isOffline || isStopped ? 0 : reportedSpeed;
   const latestIgnition =
     live.latest?.ignition ?? sample?.ignition ?? deviceDetail?.ignition ?? null;
-  const isStoppedOff = currentSpeed === 0 && latestIgnition === false;
   const status = isAlertActive
     ? 'Alert'
     : isImmobilised
       ? deviceDetail?.immobilised
         ? 'Engine cut'
         : 'Locked'
-      : (isStopped || isStoppedOff)
-        ? 'Stopped'
-        : liveEnabled && (!live.connected || isLiveStale)
-          ? 'Offline'
-          : hasInvalidLiveFix
-            ? 'GPS error'
-            : isLowAccuracy
-              ? 'Low accuracy'
-              : 'Running';
+      : resolvedState.label;
   const statusColor =
-    status === 'Running'
-      ? BRAND.greenGlow
-      : status === 'Low accuracy'
-        ? '#F5A623'
-        : status === 'Offline'
-          ? BRAND.muted
-          : BRAND.red;
+    stateColorFor(status === 'Engine cut' || status === 'Locked' ? 'IMMOBILISED' : resolvedState.state);
   // Not every streamed fix carries a reverse-geocoded address. Falling back to
   // the route param on those fixes made the sheet's two-line address snap
   // between one and two lines on alternating updates, so the last known address
@@ -704,7 +856,24 @@ export default function VehicleTrackerScreen() {
   const currentAddress = lastAddressRef.current ?? vehicleSubtitle;
   const ignitionText =
     latestIgnition == null ? 'Unknown' : latestIgnition ? 'On' : 'Off';
-  const gpsText = live.connected && !isLiveStale ? 'Connected' : isLiveStale ? 'Delayed' : 'Offline';
+  /**
+   * The GPS row reports the VEHICLE's fix, not the app's connection.
+   *
+   * It used to read `live.connected`, which is only "the SSE socket is open" —
+   * so it said "Connected" for a vehicle that had not reported in hours.
+   */
+  const gpsText =
+    resolvedState.state === 'LOCATION_DISABLED'
+      ? 'Off'
+      : resolvedState.state === 'GPS_INVALID' || hasInvalidLiveFix
+        ? 'No fix'
+        : isOffline
+          ? 'No signal'
+          : isLowAccuracy
+            ? 'Low accuracy'
+            : isLiveStale
+              ? 'Delayed'
+              : 'Connected';
   // Ping time reflects the last recorded fix, not wall-clock.
   const pingTime = useMemo(() => {
     const last = track.points[track.points.length - 1];
@@ -755,12 +924,14 @@ export default function VehicleTrackerScreen() {
     () => getMapStyleInfo(isNightMode ? 'dark' : isSatelliteMode ? 'bright' : 'street'),
     [isNightMode, isSatelliteMode]
   );
-  const useNativeMap = Platform.OS !== 'web' && nativeMapsAvailable;
+  // Geoapify/MapLibre is the map renderer on Android, iOS and web. Keeping the
+  // provider identical across platforms removes the Google-key crash path and
+  // makes route/camera behaviour consistent on the phone that supplies GPS.
+  const useNativeMap = false;
   const blockingMapIssue = mapStyleInfo.issues.find((issue) => issue.blocking);
   const mapProviderLabel = useMemo(() => {
-    if (useNativeMap) return getNativeMapProviderLabel(Platform.OS);
-    return mapStyleInfo.webProvider === 'geoapify' ? 'Geoapify web fallback' : 'OpenFreeMap web fallback';
-  }, [mapStyleInfo.webProvider, useNativeMap]);
+    return 'Geoapify';
+  }, []);
   // One gap constant for every floating layer, so the header, camera rail,
   // control rail and sheet read as an evenly spaced stack on any screen size
   // instead of drifting apart with ad-hoc paddings.
@@ -897,13 +1068,13 @@ export default function VehicleTrackerScreen() {
       traffic: {
         icon: 'road-variant',
         metrics: [
-          { label: 'Route', value: isTrafficVisible ? 'Visible' : 'Hidden' },
+          { label: 'Route', value: isRouteVisible ? 'Visible' : 'Hidden' },
           { label: 'Remaining', value: `${remainingKmText} km` },
           { label: 'Trip', value: `${totalKmText} km` },
         ],
         // The tracking route is a single green line with no congestion/speed
         // colours; this control only shows or hides that one line.
-        summary: isTrafficVisible
+        summary: isRouteVisible
           ? 'The green tracking route is visible.'
           : 'The green tracking route is hidden.',
         title: 'Route Line',
@@ -965,7 +1136,7 @@ export default function VehicleTrackerScreen() {
     isFollowing,
     isNightMode,
     isSatelliteMode,
-    isTrafficVisible,
+    isRouteVisible,
     mapProviderLabel,
     pingTime,
     remainingKmText,
@@ -1105,6 +1276,10 @@ export default function VehicleTrackerScreen() {
   }, [fleet.length, haptic]);
 
   const closeVehiclePicker = useCallback(() => setVehiclePickerOpen(false), []);
+  // Stable identity. Passing an inline arrow here defeated the sheet's memo, so
+  // every live fix re-rendered the whole History list underneath an in-flight
+  // scroll gesture.
+  const openVehiclePickerFromSheet = useCallback(() => setVehiclePickerOpen(true), []);
 
   /**
    * Switches the tracked vehicle.
@@ -1269,33 +1444,6 @@ export default function VehicleTrackerScreen() {
   }, [mapPadding, renderRoute, useNativeMap, vehicleCoordinate]);
   fitWholeRouteRef.current = fitWholeRoute;
 
-  const selectCameraMode = useCallback(
-    (mode: CameraMode) => {
-      manualInteractionRef.current = false;
-      setCameraMode(mode);
-      setAutoFollowSuspended(false);
-      haptic();
-      if (__DEV__) console.debug(`[Camera] mode ${mode}`);
-      if (mode === 'overview') {
-        setIsFollowing(false);
-        fitWholeRouteRef.current();
-      } else {
-        setIsFollowing(true);
-        const { coordinate, heading: liveHeading } = liveRef.current;
-        moveCameraRef.current(
-          mode,
-          coordinate.longitude,
-          coordinate.latitude,
-          liveHeading,
-          620,
-          true
-        );
-      }
-      showToast(`${CAMERA_MODES[mode].label} camera`);
-    },
-    [haptic, showToast]
-  );
-
   const handleManualMapInteraction = useCallback(() => {
     manualInteractionRef.current = true;
     if (isFollowing || cameraMode === 'overview') {
@@ -1336,65 +1484,6 @@ export default function VehicleTrackerScreen() {
   // Map controls. Every handler has a stable identity so the control rail (and
   // the memoised bottom sheet) are not re-rendered by the live position ticks.
   // ---------------------------------------------------------------------------
-
-  const zoomBy = useCallback(
-    async (delta: number) => {
-      haptic();
-      manualInteractionRef.current = true;
-      if (!useNativeMap) {
-        if (delta > 0) {
-          webMapRef.current?.zoomIn();
-        } else {
-          webMapRef.current?.zoomOut();
-        }
-        return;
-      }
-      const instance = mapRef.current;
-      if (!instance) return;
-      try {
-        const camera = await instance.getCamera();
-        if (camera.zoom != null) {
-          instance.animateCamera(
-            { zoom: Math.min(MAP_ZOOM_MAX, Math.max(MAP_ZOOM_MIN, camera.zoom + delta)) },
-            { duration: 260 }
-          );
-          return;
-        }
-        // iOS cameras report altitude rather than zoom; halving/doubling the
-        // altitude is the equivalent of one zoom level.
-        const altitude = camera.altitude ?? 1400;
-        instance.animateCamera(
-          { altitude: Math.min(2_000_000, Math.max(120, delta > 0 ? altitude / 2 : altitude * 2)) },
-          { duration: 260 }
-        );
-      } catch {
-        // Camera reads can reject while the provider is laying out.
-      }
-    },
-    [haptic, useNativeMap]
-  );
-
-  const resetBearing = useCallback(async () => {
-    haptic();
-    if (!useNativeMap) {
-      webMapRef.current?.resetBearing();
-      setMapCameraHeading(0);
-      lastCameraHeadingRef.current = 0;
-      showToast('Facing north');
-      return;
-    }
-    const instance = mapRef.current;
-    if (!instance) return;
-    try {
-      const camera = await instance.getCamera();
-      instance.animateCamera({ ...camera, heading: 0 }, { duration: 320 });
-      setMapCameraHeading(0);
-      lastCameraHeadingRef.current = 0;
-      showToast('Facing north');
-    } catch {
-      // Ignore: the camera is mid-animation.
-    }
-  }, [haptic, showToast, useNativeMap]);
 
   const toggleUserLocation = useCallback(async () => {
     haptic();
@@ -1440,46 +1529,6 @@ export default function VehicleTrackerScreen() {
       );
     }
   }, [haptic, showToast, showsUserLocation, useNativeMap]);
-
-  const cycleMapType = useCallback(() => {
-    haptic();
-    setMapPreferences((current) => {
-      const nextType: MapTypeOption =
-        current.mapType === 'standard'
-          ? 'satellite'
-          : current.mapType === 'satellite'
-            ? 'terrain'
-            : 'standard';
-      const updated = { ...current, mapType: nextType };
-      void saveMapPreferences(updated);
-      const labels = { standard: 'Default map', satellite: 'Satellite map', terrain: 'Terrain map' };
-      showToast(labels[nextType]);
-      return updated;
-    });
-  }, [haptic, showToast]);
-
-  const toggleTrafficLayer = useCallback(() => {
-    haptic();
-    setMapPreferences((current) => {
-      const nextTraffic = !current.details.traffic;
-      const updated = {
-        ...current,
-        details: { ...current.details, traffic: nextTraffic },
-      };
-      void saveMapPreferences(updated);
-      setIsTrafficVisible(nextTraffic);
-      showToast(nextTraffic ? 'Traffic layer on' : 'Traffic layer off');
-      return updated;
-    });
-  }, [haptic, showToast]);
-
-  const toggleFullScreen = useCallback(() => {
-    haptic();
-    setIsFullScreen((current) => {
-      showToast(current ? 'Exited full screen' : 'Full screen map');
-      return !current;
-    });
-  }, [haptic, showToast]);
 
   const refreshMap = useCallback(async () => {
     haptic();
@@ -1734,8 +1783,8 @@ export default function VehicleTrackerScreen() {
           showToast('Vehicle centered');
           break;
         case 'traffic':
-          setIsTrafficVisible(!isTrafficVisible);
-          showToast(isTrafficVisible ? 'Route hidden' : 'Route visible');
+          setIsRouteVisible(!isRouteVisible);
+          showToast(isRouteVisible ? 'Route hidden' : 'Route visible');
           break;
         case 'mapType':
           setIsSatelliteMode(!isSatelliteMode);
@@ -1778,11 +1827,14 @@ export default function VehicleTrackerScreen() {
       isFollowing,
       isNightMode,
       isSatelliteMode,
-      isTrafficVisible,
+      isRouteVisible,
       resumeCinematicTracking,
       router,
       showToast,
       validDeviceId,
+      deviceDetail?.course,
+      deviceDetail?.speed,
+      vehicleCategory,
       vehicleName,
     ]
   );
@@ -1790,12 +1842,12 @@ export default function VehicleTrackerScreen() {
   // NOTE: There is intentionally no playback clock, rate multiplier, pause/resume,
   // or scrubbing on this LIVE screen. The vehicle only ever moves toward the newest
   // streamed fix via the single live catch-up animation below. Recorded-timeline
-  // playback lives on the separate Route Playback / History screen.
+  // playback lives on the separate Route Playback screen.
 
   useEffect(() => {
     // Smoothly catch up to each new live fix. Cancelling the previous RAF before
     // starting the next prevents duplicate animations when updates arrive fast.
-    if (!appActive || activeTab !== 'live' || !isLiveFollowing) return;
+    if (!appActive || !isLiveFollowing) return;
     if (liveTransitionFrameRef.current != null) {
       cancelAnimationFrame(liveTransitionFrameRef.current);
     }
@@ -1805,7 +1857,7 @@ export default function VehicleTrackerScreen() {
       setElapsedMs(to);
       return;
     }
-    if (isStopped || isStoppedOff) {
+    if (isStopped || isOffline) {
       setElapsedMs(to);
       return;
     }
@@ -1842,11 +1894,11 @@ export default function VehicleTrackerScreen() {
         liveTransitionFrameRef.current = null;
       }
     };
-  }, [appActive, activeTab, isLiveFollowing, isStopped, isStoppedOff, track.totalDurationMs]);
+  }, [appActive, isLiveFollowing, isStopped, isOffline, track.totalDurationMs]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
-      const nextActive = state === 'active';
+      const nextActive = isForeground(state);
       if (nextActive && liveFollowingRef.current) {
         if (liveTransitionFrameRef.current != null) {
           cancelAnimationFrame(liveTransitionFrameRef.current);
@@ -1893,6 +1945,27 @@ export default function VehicleTrackerScreen() {
     if (live.rejectedReason) showToast(live.rejectedReason);
   }, [live.rejectedReason, showToast]);
 
+  /**
+   * Say so when the live route could not be matched to a road.
+   *
+   * Live tracking used to fall back to raw coordinates with nothing said about
+   * it, so a router that was down showed up as a marker quietly sitting off the
+   * carriageway with no explanation anywhere, which is exactly the silent
+   * fallback this must not do.
+   *
+   * Only the two ACTIONABLE states are announced. `UNMATCHED` is a property of
+   * the trace and happens routinely on unmapped ground; toasting it every time
+   * the vehicle leaves a mapped road would train operators to ignore the
+   * message that actually means their routing service is broken.
+   */
+  const liveMatchNotice =
+    live.matchStatus === 'DISABLED' || live.matchStatus === 'UNAVAILABLE'
+      ? describeMatchStatus(live.matchStatus)
+      : null;
+  useEffect(() => {
+    if (liveMatchNotice) showToast(liveMatchNotice);
+  }, [liveMatchNotice, showToast]);
+
   const fallbackMarkers = useMemo<WebMapMarker[]>(
     () => [
       {
@@ -1903,14 +1976,25 @@ export default function VehicleTrackerScreen() {
         color: statusColor,
         heading,
         label: vehicleName,
-        moving: liveState === 'RUNNING' && currentSpeed > 0,
+        moving: resolvedState.state === 'RUNNING' && currentSpeed > 0,
       },
     ],
-    [currentSpeed, heading, liveState, markerCategory, statusColor, vehicleCoordinate, vehicleName]
+    [
+      currentSpeed,
+      heading,
+      markerCategory,
+      resolvedState.state,
+      statusColor,
+      vehicleCoordinate,
+      vehicleName,
+    ]
   );
-  const fallbackPolyline = useMemo<[number, number][]>(
-    () => renderRoute.map((c) => [c.longitude, c.latitude] as [number, number]),
-    [renderRoute]
+  const fallbackPolylines = useMemo<[number, number][][]>(
+    () =>
+      liveRouteSegments.map((segment) =>
+        segment.map((coordinate) => [coordinate.longitude, coordinate.latitude])
+      ),
+    [liveRouteSegments]
   );
 
   useEffect(() => {
@@ -1961,9 +2045,9 @@ export default function VehicleTrackerScreen() {
   // No external tile-load timeout is needed for the native Google/Apple map.
 
   useEffect(() => {
-    if (!appActive || !isFollowing || !isMapReady || isLiveStale) {
-      return;
-    }
+    // A stale live fix must not drag the camera around.
+    if (!appActive || !isFollowing || !isMapReady) return;
+    if (isLiveStale) return;
 
     moveCamera(cameraMode, vehicleCoordinate.longitude, vehicleCoordinate.latitude, heading, 520);
   }, [
@@ -2011,7 +2095,16 @@ export default function VehicleTrackerScreen() {
 
   const isMapLoading = useNativeMap && (mapLoadState === 'loading' || !mapContainerReady);
 
-  const leftMapControls = useMemo<MapControl[]>(
+  /**
+   * The four map controls, in one rail.
+   *
+   * Zoom, map type, traffic and full screen are gone: pinch and rotate already
+   * do the first, and the rest were three taps of chrome over a tracking screen
+   * whose job is to show one vehicle. What is left is the four things an
+   * operator actually reaches for, in a single evenly spaced column rather than
+   * two half-empty ones.
+   */
+  const mapControls = useMemo<MapControl[]>(
     () => [
       {
         active: isFollowing && !autoFollowSuspended,
@@ -2025,73 +2118,24 @@ export default function VehicleTrackerScreen() {
         label: 'My location',
         onPress: () => void toggleUserLocation(),
       },
-      { icon: 'plus', label: 'Zoom in', onPress: () => void zoomBy(1) },
-      { icon: 'minus', label: 'Zoom out', onPress: () => void zoomBy(-1) },
-      {
-        active: Math.abs(mapCameraHeading) > 0.5,
-        icon: 'navigation',
-        label: 'Face north',
-        onPress: () => void resetBearing(),
-        // The needle points at true north relative to the current camera.
-        rotation: -mapCameraHeading,
-      },
+      { icon: 'panorama-variant-outline', label: 'Map preview', onPress: openStreetView },
+      { icon: 'refresh', label: 'Refresh map', onPress: refreshMap },
     ],
     [
       autoFollowSuspended,
       isFollowing,
-      mapCameraHeading,
-      resetBearing,
+      openStreetView,
+      refreshMap,
       resumeCinematicTracking,
       showsUserLocation,
       toggleUserLocation,
-      zoomBy,
     ]
   );
 
-  const rightMapControls = useMemo<MapControl[]>(
-    () => [
-      {
-        active: mapPreferences.mapType !== 'standard',
-        icon: mapPreferences.mapType === 'standard' ? 'layers-outline' : 'satellite-variant',
-        label: `Map type: ${mapPreferences.mapType === 'satellite'
-          ? 'Satellite'
-          : mapPreferences.mapType === 'terrain'
-            ? 'Terrain'
-            : 'Default'
-          }`,
-        onPress: cycleMapType,
-      },
-      {
-        active: mapPreferences.details.traffic,
-        icon: 'traffic-light',
-        label: 'Traffic layer',
-        onPress: toggleTrafficLayer,
-      },
-      { icon: 'panorama-variant-outline', label: 'Street View', onPress: openStreetView },
-      {
-        active: isFullScreen,
-        icon: isFullScreen ? 'fullscreen-exit' : 'fullscreen',
-        label: isFullScreen ? 'Exit full screen' : 'Full screen',
-        onPress: toggleFullScreen,
-      },
-      { icon: 'refresh', label: 'Refresh map', onPress: refreshMap },
-    ],
-    [
-      cycleMapType,
-      isFullScreen,
-      mapPreferences,
-      openStreetView,
-      refreshMap,
-      toggleFullScreen,
-      toggleTrafficLayer,
-    ]
-  );
-  const toggleControls = useCallback(() => setControlsExpanded((current) => !current), []);
-
-  // Real device with no usable history AND no live fixes yet: show a loading
-  // state while the playback query resolves, then a proper empty state. Never
-  // fall back to the demo route for a real device (no fabricated GPS movement in
-  // production). Live streaming alone is enough to render the map.
+  // Real device with no live fixes yet: show a loading state, then a proper
+  // empty state. Never fall back to the demo route for a real device (no
+  // fabricated GPS movement in production). Live streaming alone is enough to
+  // render the map.
   if (hasRealDevice && track.points.length === 0) {
     return (
       <View style={styles.screen}>
@@ -2136,7 +2180,7 @@ export default function VehicleTrackerScreen() {
           ref={mapRef}
           customMapStyle={mapPreferences.mapType === 'satellite' ? [] : mapStyleInfo.style}
           initialCamera={{
-            center: route[Math.min(20, route.length - 1)] ?? vehicleCoordinate,
+            center: renderRoute[Math.min(20, renderRoute.length - 1)] ?? vehicleCoordinate,
             heading: 0,
             pitch: 38,
             zoom: 14.8,
@@ -2178,49 +2222,20 @@ export default function VehicleTrackerScreen() {
               is never remounted and there are no overlapping/duplicate route
               layers, so it cannot flicker on vehicle switch, zoom, pan, or live
               updates. No per-frame progress lines, gradients, or traffic colours. */}
-          {activeTab === 'history' ? (
+          {isRouteVisible ? (
             <>
-              <StableBaseRoute
-                auraColor="rgba(43,230,255,0.22)"
-                coordinates={renderRoute}
-                lineColor="rgba(151,171,190,0.72)"
-                lineWidth={6}
-              />
-              <StableRouteLine color={BRAND.green} coordinates={completedRoute} />
-              {playbackData?.events.map((event, index) => (
-                <Marker
-                  key={`hist-event-${event.t}-${event.eventType}-${index}`}
-                  anchor={{ x: 0.5, y: 0.5 }}
-                  coordinate={{ latitude: event.lat, longitude: event.lng }}
-                  tracksViewChanges={false}
-                  zIndex={20}>
-                  <View style={styles.eventMarker}>
-                    <MaterialCommunityIcons color="#071018" name="alert" size={12} />
-                  </View>
-                </Marker>
-              ))}
-              {playbackData?.stops.map((stop, index) => (
-                <Marker
-                  key={`hist-stop-${stop.from}-${stop.to}-${index}`}
-                  anchor={{ x: 0.5, y: 0.5 }}
-                  coordinate={{ latitude: stop.lat, longitude: stop.lng }}
-                  tracksViewChanges={false}
-                  zIndex={21}>
-                  <View style={styles.stopMarker}>
-                    <MaterialCommunityIcons color="#071018" name="parking" size={12} />
-                  </View>
-                </Marker>
+              {liveRouteSegments.map((segment, index) => (
+                <StableRouteLine
+                  key={`live-track-route-${index}`}
+                  auraColor={ROUTE_BLUE_AURA}
+                  color={ROUTE_BLUE}
+                  coordinates={segment}
+                  width={6}
+                />
               ))}
             </>
-          ) : isTrafficVisible ? (
-            <StableRouteLine
-              key="live-track-route"
-              color={ROUTE_GREEN}
-              coordinates={renderRoute}
-              width={6}
-            />
           ) : null}
-          {sample ? (
+          {hasVehicleCoordinate ? (
             <LiveVehicleMapMarker
               cameraHeading={mapCameraHeading}
               category={markerCategory}
@@ -2230,7 +2245,7 @@ export default function VehicleTrackerScreen() {
                 liveEnabled &&
                 (!live.connected || isLiveStale || isLowAccuracy || hasInvalidLiveFix)
               }
-              state={liveState ?? status}
+              state={resolvedState.state || status}
               statusColor={statusColor}
             />
           ) : null}
@@ -2244,7 +2259,7 @@ export default function VehicleTrackerScreen() {
           markers={fallbackMarkers}
           onInteraction={handleManualMapInteraction}
           onProjectionChange={handleWebProjection}
-          polyline={fallbackPolyline}
+          polylines={fallbackPolylines}
           selectedId="vehicle"
           style={styles.mapCanvas}
         />
@@ -2364,17 +2379,7 @@ export default function VehicleTrackerScreen() {
 
       <MapControlRail
         bottom={controlRailBottom}
-        controls={leftMapControls}
-        expanded={controlsExpanded}
-        onToggleExpanded={toggleControls}
-        side="left"
-        top={controlRailTop}
-      />
-      <MapControlRail
-        bottom={controlRailBottom}
-        controls={rightMapControls}
-        expanded={controlsExpanded}
-        onToggleExpanded={toggleControls}
+        controls={mapControls}
         side="right"
         top={controlRailTop}
       />
@@ -2398,7 +2403,7 @@ export default function VehicleTrackerScreen() {
           onToggleTools={toggleTools}
           panHandlers={sheetPanResponder.panHandlers}
           pingTime={pingTime}
-          routeVisible={isTrafficVisible}
+          routeVisible={isRouteVisible}
           satelliteMode={isSatelliteMode}
           selectedOptionData={selectedOptionData}
           selectedOptionId={selectedOptionId}
@@ -2408,24 +2413,7 @@ export default function VehicleTrackerScreen() {
           totalText={`${totalKmText} km`}
           translateY={sheetTranslateY}
           vehicleName={vehicleName}
-          activeTab={activeTab}
-          setActiveTab={setActiveTab}
-          activeFromDate={activeFromDate}
-          setActiveFromDate={setActiveFromDate}
-          activeToDate={activeToDate}
-          setActiveToDate={setActiveToDate}
-          historyPlaying={historyPlaying}
-          setHistoryPlaying={setHistoryPlaying}
-          historySpeed={historySpeed}
-          setHistorySpeed={setHistorySpeed}
-          playbackData={playbackData}
-          isPlaybackFetching={isPlaybackFetching}
-          elapsedMs={elapsedMs}
-          totalDurationMs={track.totalDurationMs}
-          seekHistory={seekHistory}
-          onSelectVehicle={() => setVehiclePickerOpen(true)}
-          cameraMode={cameraMode}
-          onSelectCameraMode={selectCameraMode}
+          onSelectVehicle={openVehiclePickerFromSheet}
         />
       )}
 
@@ -2598,8 +2586,6 @@ type MapControl = {
 type MapControlRailProps = {
   bottom: number;
   controls: MapControl[];
-  expanded: boolean;
-  onToggleExpanded: () => void;
   side?: 'left' | 'right';
   top: number;
 };
@@ -2614,8 +2600,6 @@ type MapControlRailProps = {
 const MapControlRail = memo(function MapControlRail({
   bottom,
   controls,
-  expanded,
-  onToggleExpanded,
   side = 'right',
   top,
 }: MapControlRailProps) {
@@ -2624,11 +2608,6 @@ const MapControlRail = memo(function MapControlRail({
   const sideStyle = isLeft
     ? { left: OVERLAY_GAP + 4 + insets.left, alignItems: 'flex-start' as const }
     : { right: OVERLAY_GAP + 4 + insets.right, alignItems: 'flex-end' as const };
-  const toggleIcon = expanded
-    ? isLeft
-      ? 'chevron-left'
-      : 'chevron-right'
-    : 'tune-vertical';
 
   const lastPressRef = useRef<number>(0);
   const handlePress = useCallback((onPress: () => void) => {
@@ -2640,24 +2619,9 @@ const MapControlRail = memo(function MapControlRail({
 
   return (
     <View pointerEvents="box-none" style={[styles.controlRail, sideStyle, { bottom, top }]}>
-      <Pressable
-        accessibilityLabel={expanded ? 'Hide map controls' : 'Show map controls'}
-        accessibilityRole="button"
-        accessibilityState={{ expanded }}
-        onPress={() => handlePress(onToggleExpanded)}
-        style={({ pressed }) => [
-          styles.controlButton,
-          styles.controlToggle,
-          pressed && styles.pressedControl,
-        ]}>
-        <MaterialCommunityIcons
-          color={BRAND.greenGlow}
-          name={toggleIcon}
-          size={20}
-        />
-      </Pressable>
-      {expanded ? (
-        <FadeIn>
+      {/* No collapse toggle: four buttons are not worth hiding, and the chevron
+          that used to hide them read as a previous/next control. */}
+      <FadeIn>
           {/* One evenly spaced column of identically sized buttons. The rail is
               bounded above by the tracking overlays and below by the sheet, and
               scrolls internally, so it stays fully reachable on short screens
@@ -2692,8 +2656,7 @@ const MapControlRail = memo(function MapControlRail({
               </Pressable>
             ))}
           </ScrollView>
-        </FadeIn>
-      ) : null}
+      </FadeIn>
     </View>
   );
 });
@@ -2726,24 +2689,7 @@ type LiveDetailsSheetProps = {
   totalText: string;
   translateY: Animated.Value;
   vehicleName: string;
-  activeTab: 'live' | 'history' | 'cinematic';
-  setActiveTab: (tab: 'live' | 'history' | 'cinematic') => void;
-  activeFromDate: string;
-  setActiveFromDate: (date: string) => void;
-  activeToDate: string;
-  setActiveToDate: (date: string) => void;
-  historyPlaying: boolean;
-  setHistoryPlaying: (playing: boolean) => void;
-  historySpeed: 0.5 | 1 | 2 | 4 | 8;
-  setHistorySpeed: (speed: 0.5 | 1 | 2 | 4 | 8) => void;
-  playbackData: PlaybackResponse | null | undefined;
-  isPlaybackFetching: boolean;
-  elapsedMs: number;
-  totalDurationMs: number;
-  seekHistory: (frac: number) => void;
   onSelectVehicle: () => void;
-  cameraMode: CameraMode;
-  onSelectCameraMode: (mode: CameraMode) => void;
 };
 
 /**
@@ -2783,276 +2729,122 @@ const LiveDetailsSheet = memo(function LiveDetailsSheet({
   totalText,
   translateY,
   vehicleName,
-  activeTab,
-  setActiveTab,
-  activeFromDate,
-  setActiveFromDate,
-  activeToDate,
-  setActiveToDate,
-  historyPlaying,
-  setHistoryPlaying,
-  historySpeed,
-  setHistorySpeed,
-  playbackData,
-  isPlaybackFetching,
-  elapsedMs,
-  totalDurationMs,
-  seekHistory,
   onSelectVehicle,
-  cameraMode,
-  onSelectCameraMode,
 }: LiveDetailsSheetProps) {
-  const sheetStyle = useMemo(
-    () => [styles.bottomSheetWrapper, { transform: [{ translateY }] }],
-    [translateY]
-  );
-  const progressBarWidthRef = useRef<number>(0);
+  const { height: windowHeight } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
 
-  const formatTime = (isoString?: string) => {
-    if (!isoString) return '--:--';
-    return new Date(isoString).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  };
+  /**
+   * Half the USABLE screen, never more.
+   *
+   * Usable means the window minus the safe-area insets, so the cap is measured
+   * against the space an operator can actually see rather than the raw pixel
+   * height. The map keeps the other half on every device.
+   */
+  const maxSheetHeight = Math.max(
+    220,
+    (windowHeight - insets.top - insets.bottom) * 0.5
+  );
+
+  /**
+   * Natural height of the body, measured as it lays out, so the sheet only
+   * reaches the cap when the content genuinely fills it rather than always
+   * opening to a tall panel above a block of empty space.
+   */
+  const [bodyHeight, setBodyHeight] = useState(0);
+  const recordBodyHeight = useCallback((height: number) => {
+    const next = Math.ceil(height);
+    setBodyHeight((current) => (Math.abs(current - next) < 1 ? current : next));
+  }, []);
+
+  // Handle row and the sheet's own vertical padding: the space the body does
+  // not get. Measured from the constants the stylesheet uses so the two cannot
+  // drift apart.
+  const sheetChromeHeight = SHEET_HANDLE_HEIGHT + SHEET_VERTICAL_PADDING;
+  const sheetHeight = Math.round(
+    Math.min(
+      maxSheetHeight,
+      // Before the first measurement, open at the cap rather than at zero: a
+      // sheet that grows from nothing on first paint reads as a flicker.
+      bodyHeight > 0
+        ? Math.max(160, bodyHeight + sheetChromeHeight + insets.bottom)
+        : maxSheetHeight
+    )
+  );
+
+  // Animate the resize. The wrapper's transform is native-driven, so its
+  // height cannot be an Animated value on the same node; a layout animation
+  // resizes it without that conflict.
+  const previousSheetHeight = useRef(sheetHeight);
+  useEffect(() => {
+    if (previousSheetHeight.current !== sheetHeight) {
+      previousSheetHeight.current = sheetHeight;
+      LayoutAnimation.configureNext(SHEET_RESIZE_ANIMATION);
+    }
+  }, [sheetHeight]);
+
+  const sheetStyle = useMemo(
+    () => [
+      styles.bottomSheetWrapper,
+      {
+        height: sheetHeight,
+        transform: [{ translateY }],
+      },
+    ],
+    [sheetHeight, translateY]
+  );
 
   return (
-    <Animated.View onLayout={onLayout} {...panHandlers} style={sheetStyle}>
-      <Pressable
-        accessibilityLabel={expanded ? 'Collapse details' : 'Expand details'}
-        accessibilityRole="button"
-        hitSlop={20}
-        onPress={onToggle}
-        style={styles.sheetHandleHit}>
-        <MaterialCommunityIcons 
-          name={expanded ? "chevron-down" : "chevron-up"} 
-          size={36} 
-          color="rgba(255,255,255,1)" 
-          style={{
-            textShadowColor: 'rgba(0,0,0,0.8)',
-            textShadowOffset: { width: 0, height: 2 },
-            textShadowRadius: 5,
-          }}
-        />
-      </Pressable>
+    <Animated.View onLayout={onLayout} style={sheetStyle}>
+      <View {...panHandlers} style={styles.sheetHandleContainer}>
+        <Pressable
+          accessibilityLabel={expanded ? 'Collapse details' : 'Expand details'}
+          accessibilityRole="button"
+          hitSlop={20}
+          onPress={onToggle}
+          style={styles.sheetHandleHit}>
+          <MaterialCommunityIcons
+            name={expanded ? "chevron-down" : "chevron-up"}
+            size={36}
+            color="rgba(255,255,255,1)"
+            style={{
+              textShadowColor: 'rgba(0,0,0,0.8)',
+              textShadowOffset: { width: 0, height: 2 },
+              textShadowRadius: 5,
+            }}
+          />
+        </Pressable>
+      </View>
 
+      {/* The wrapper's height is definite, so `flex: 1` here resolves to exactly
+          the sheet minus the handle row on every platform. The old explicit
+          height fought the `flex: 1` still set in the stylesheet and assumed a
+          48 px handle that actually measures SHEET_HANDLE_HEIGHT. */}
       <Animated.View
         pointerEvents={expanded ? 'auto' : 'none'}
-        style={[styles.bottomSheetContent, {
-          opacity: expanded ? 1 : 0,
-          flex: 1,
-        }]}
+        style={[styles.bottomSheetContent, { opacity: expanded ? 1 : 0 }]}
       >
-        <View style={styles.tabBar}>
-          <Pressable
-            onPress={() => setActiveTab('live')}
-            style={[styles.tabButton, activeTab === 'live' && styles.tabButtonActive]}>
-            <Text style={[styles.tabButtonText, activeTab === 'live' && styles.tabButtonTextActive]}>
-              Live Info
-            </Text>
-          </Pressable>
-          <Pressable
-            onPress={() => setActiveTab('cinematic')}
-            style={[styles.tabButton, activeTab === 'cinematic' && styles.tabButtonActive]}>
-            <Text style={[styles.tabButtonText, activeTab === 'cinematic' && styles.tabButtonTextActive]}>
-              Cinematic View
-            </Text>
-          </Pressable>
-          <Pressable
-            onPress={() => setActiveTab('history')}
-            style={[styles.tabButton, activeTab === 'history' && styles.tabButtonActive]}>
-            <Text style={[styles.tabButtonText, activeTab === 'history' && styles.tabButtonTextActive]}>
-              History
-            </Text>
-          </Pressable>
+        <Text style={styles.sheetSectionTitle}>Live Info</Text>
+
+        {/* No flex: the body reports its NATURAL height so the sheet can size
+            to it. Stretching it to fill was what produced the empty space. */}
+        <View onLayout={(event) => recordBodyHeight(event.nativeEvent.layout.height)}>
+          <View style={styles.sheetStats}>
+            <Metric
+              icon="clock-outline"
+              label="Ping Time"
+              subValue={pingTime.timeText}
+              value={pingTime.dateText}
+            />
+            <Metric icon="map-marker-distance" label="Covered" value={coveredText} />
+            <Metric icon="flag-checkered" label="Trip" value={totalText} />
+          </View>
+          <View style={[styles.sheetStats, styles.sheetStatsSecondary]}>
+            <Metric icon="engine-outline" label="Ignition" value={ignitionText} />
+            <Metric icon="access-point" label="GPS" value={gpsText} />
+            <Metric icon="car-info" label="Status" value={status} />
+          </View>
         </View>
-
-        {activeTab === 'live' ? (
-          <View style={{ flex: 1 }}>
-            <View style={styles.sheetStats}>
-              <Metric
-                icon="clock-outline"
-                label="Ping Time"
-                subValue={pingTime.timeText}
-                value={pingTime.dateText}
-              />
-              <Metric icon="map-marker-distance" label="Covered" value={coveredText} />
-              <Metric icon="flag-checkered" label="Trip" value={totalText} />
-            </View>
-            <View style={[styles.sheetStats, styles.sheetStatsSecondary]}>
-              <Metric icon="engine-outline" label="Ignition" value={ignitionText} />
-              <Metric icon="access-point" label="GPS" value={gpsText} />
-              <Metric icon="car-info" label="Status" value={status} />
-            </View>
-          </View>
-        ) : activeTab === 'cinematic' ? (
-          <View style={styles.cinematicSection}>
-            <Text style={styles.cinematicTitleText}>CAMERA MODES</Text>
-            <View style={styles.cameraGrid}>
-              {CINEMATIC_CAMERAS.map((item) => {
-                const active = cameraMode === item.id;
-                return (
-                  <Pressable
-                    key={item.id}
-                    onPress={() => onSelectCameraMode(item.id)}
-                    style={[styles.cameraCard, active && styles.cameraCardActive]}>
-                    <MaterialCommunityIcons
-                      color={active ? '#07121B' : BRAND.greenGlow}
-                      name={item.icon}
-                      size={22}
-                    />
-                    <Text style={[styles.cameraCardLabel, active && styles.cameraCardLabelActive]}>
-                      {item.label}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          </View>
-        ) : (
-          <ScrollView style={styles.historyScroll} contentContainerStyle={{ paddingBottom: 16 }}>
-            <View style={styles.historyDateSelector}>
-              <Pressable
-                onPress={() => {
-                  const prev = shiftDate(activeFromDate, -1);
-                  setActiveFromDate(prev);
-                  setActiveToDate(prev);
-                }}
-                style={styles.dateNavBtn}>
-                <MaterialCommunityIcons name="chevron-left" size={20} color="#fff" />
-              </Pressable>
-              <Text style={styles.dateNavLabel}>{labelDate(activeFromDate)}</Text>
-              <Pressable
-                onPress={() => {
-                  const todayStrVal = todayStr();
-                  if (activeFromDate >= todayStrVal) return;
-                  const next = shiftDate(activeFromDate, 1);
-                  setActiveFromDate(next);
-                  setActiveToDate(next);
-                }}
-                style={styles.dateNavBtn}>
-                <MaterialCommunityIcons name="chevron-right" size={20} color="#fff" />
-              </Pressable>
-            </View>
-
-            <View style={styles.presetsRow}>
-              <Pressable
-                onPress={() => {
-                  const t = todayStr();
-                  setActiveFromDate(t);
-                  setActiveToDate(t);
-                }}
-                style={[styles.presetChip, activeFromDate === todayStr() && styles.presetChipActive]}>
-                <Text style={[styles.presetChipText, activeFromDate === todayStr() && styles.presetChipTextActive]}>Today</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => {
-                  const y = shiftDate(todayStr(), -1);
-                  setActiveFromDate(y);
-                  setActiveToDate(y);
-                }}
-                style={[styles.presetChip, activeFromDate === shiftDate(todayStr(), -1) && styles.presetChipActive]}>
-                <Text style={[styles.presetChipText, activeFromDate === shiftDate(todayStr(), -1) && styles.presetChipTextActive]}>Yesterday</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => {
-                  setActiveFromDate(shiftDate(todayStr(), -6));
-                  setActiveToDate(todayStr());
-                }}
-                style={[styles.presetChip, activeFromDate === shiftDate(todayStr(), -6) && styles.presetChipActive]}>
-                <Text style={[styles.presetChipText, activeFromDate === shiftDate(todayStr(), -6) && styles.presetChipTextActive]}>7 Days</Text>
-              </Pressable>
-            </View>
-
-            {isPlaybackFetching ? (
-              <ActivityIndicator color={BRAND.green} size="small" style={{ marginVertical: 20 }} />
-            ) : playbackData && playbackData.points.length >= 2 ? (
-              <>
-                <View style={styles.playbackControlsRow}>
-                  <Pressable
-                    onPress={() => setHistoryPlaying(!historyPlaying)}
-                    style={[styles.playBtn, { backgroundColor: BRAND.green }]}>
-                    <MaterialCommunityIcons name={historyPlaying ? 'pause' : 'play'} size={24} color="#fff" />
-                  </Pressable>
-                  <View style={styles.speedsRow}>
-                    {([0.5, 1, 2, 4, 8] as const).map((sp) => (
-                      <Pressable
-                        key={sp}
-                        onPress={() => setHistorySpeed(sp)}
-                        style={[styles.speedChip, historySpeed === sp && styles.speedChipActive]}>
-                        <Text style={[styles.speedChipText, historySpeed === sp && styles.speedChipTextActive]}>{sp}x</Text>
-                      </Pressable>
-                    ))}
-                  </View>
-                </View>
-
-                <View style={styles.scrubberRow}>
-                  <Pressable
-                    onLayout={(e) => {
-                      progressBarWidthRef.current = e.nativeEvent.layout.width;
-                    }}
-                    onPress={(e) => {
-                      if (progressBarWidthRef.current) {
-                        seekHistory(e.nativeEvent.locationX / progressBarWidthRef.current);
-                      }
-                    }}
-                    style={styles.scrubberTrack}>
-                    <View style={[styles.scrubberProgress, { width: `${(elapsedMs / (totalDurationMs || 1)) * 100}%`, backgroundColor: BRAND.green }]} />
-                  </Pressable>
-                  <Text style={styles.scrubberTimeText}>
-                    {Math.round((elapsedMs / (totalDurationMs || 1)) * 100)}%
-                  </Text>
-                </View>
-
-                <View style={styles.historyStatsGrid}>
-                  <View style={styles.historyStatCell}>
-                    <Text style={styles.histStatVal}>{playbackData.distanceKm.toFixed(1)} km</Text>
-                    <Text style={styles.histStatLbl}>Distance</Text>
-                  </View>
-                  <View style={styles.historyStatCell}>
-                    <Text style={styles.histStatVal}>{formatTime(playbackData.points[0]?.t)}</Text>
-                    <Text style={styles.histStatLbl}>Start Time</Text>
-                  </View>
-                  <View style={styles.historyStatCell}>
-                    <Text style={styles.histStatVal}>{formatTime(playbackData.points[playbackData.points.length - 1]?.t)}</Text>
-                    <Text style={styles.histStatLbl}>End Time</Text>
-                  </View>
-                </View>
-
-                {playbackData.stops.length > 0 && (
-                  <View style={styles.timelineSection}>
-                    <Text style={styles.sectionHeadingText}>Stops</Text>
-                    {playbackData.stops.map((stop: PlaybackStopMarker, idx: number) => (
-                      <View key={`stop-${idx}`} style={styles.timelineItem}>
-                        <MaterialCommunityIcons name="parking" size={16} color={BRAND.orange} />
-                        <View style={styles.timelineItemContent}>
-                          <Text style={styles.timelineTitleText}>Stopped for {Math.round(stop.minutes)} mins</Text>
-                          <Text style={styles.timelineSubtitleText}>{formatTime(stop.from)} - {formatTime(stop.to)}</Text>
-                        </View>
-                      </View>
-                    ))}
-                  </View>
-                )}
-
-                {playbackData.events.length > 0 && (
-                  <View style={styles.timelineSection}>
-                    <Text style={styles.sectionHeadingText}>Alert Logs</Text>
-                    {playbackData.events.map((evt: PlaybackEventMarker, idx: number) => (
-                      <View key={`event-${idx}`} style={styles.timelineItem}>
-                        <MaterialCommunityIcons name="alert" size={16} color="#EAB308" />
-                        <View style={styles.timelineItemContent}>
-                          <Text style={styles.timelineTitleText}>{evt.eventType}</Text>
-                          <Text style={styles.timelineSubtitleText}>{formatTime(evt.t)}</Text>
-                        </View>
-                      </View>
-                    ))}
-                  </View>
-                )}
-              </>
-            ) : (
-              <View style={styles.noHistoryBox}>
-                <Text style={styles.noHistoryText}>No recorded trip history for this date.</Text>
-              </View>
-            )}
-          </ScrollView>
-        )}
       </Animated.View>
 
       {!expanded ? (
@@ -3067,113 +2859,6 @@ const LiveDetailsSheet = memo(function LiveDetailsSheet({
     </Animated.View>
   );
 });
-
-function MapToolsPanel({
-  activeId,
-  alertActive,
-  following,
-  historyVisible,
-  nightMode,
-  onSelect,
-  routeVisible,
-  satelliteMode,
-}: {
-  activeId: RouteMapOptionId | null;
-  alertActive: boolean;
-  following: boolean;
-  historyVisible: boolean;
-  nightMode: boolean;
-  onSelect: (id: RouteMapOptionId) => void;
-  routeVisible: boolean;
-  satelliteMode: boolean;
-}) {
-  const activeFor = (id: RouteMapOptionId) => {
-    if (id === 'follow') return following;
-    if (id === 'alert') return alertActive;
-    if (id === 'history') return historyVisible;
-    if (id === 'night') return nightMode;
-    if (id === 'traffic') return routeVisible;
-    if (id === 'mapType') return satelliteMode;
-    return activeId === id;
-  };
-  return (
-    <View style={styles.mapToolsGrid}>
-      {ROUTE_TOOLS.map((tool) => {
-        const active = activeFor(tool.id);
-        const danger = tool.id === 'alert' && alertActive;
-        return (
-          <Pressable
-            accessibilityLabel={tool.label}
-            accessibilityRole="button"
-            accessibilityState={{ selected: active }}
-            key={tool.id}
-            onPress={() => onSelect(tool.id)}
-            style={[
-              styles.mapTool,
-              active && styles.mapToolActive,
-              danger && styles.mapToolDanger,
-            ]}>
-            <MaterialCommunityIcons
-              color={danger ? '#FF7A7D' : active ? '#2BE69E' : '#AFC1D0'}
-              name={tool.icon}
-              size={20}
-            />
-            <Text
-              numberOfLines={1}
-              style={[
-                styles.mapToolText,
-                active && styles.mapToolTextActive,
-                danger && styles.mapToolTextDanger,
-              ]}>
-              {tool.label}
-            </Text>
-          </Pressable>
-        );
-      })}
-    </View>
-  );
-}
-
-function RouteOptionDataPanel({
-  data,
-  onClose,
-}: {
-  data: RouteOptionData;
-  onClose: () => void;
-}) {
-  return (
-    <View style={[styles.optionPanel, data.tone === 'red' && styles.optionPanelRed]}>
-      <View style={styles.optionHeader}>
-        <View style={[styles.optionIconWrap, data.tone === 'red' && styles.optionIconWrapRed]}>
-          <MaterialCommunityIcons color="#fff" name={data.icon} size={20} />
-        </View>
-        <View style={styles.optionTextBlock}>
-          <Text numberOfLines={1} style={styles.optionTitle}>
-            {data.title}
-          </Text>
-          <Text numberOfLines={2} style={styles.optionSummary}>
-            {data.summary}
-          </Text>
-        </View>
-        <Pressable accessibilityRole="button" onPress={onClose} style={styles.optionCloseButton}>
-          <MaterialCommunityIcons color={BRAND.muted} name="close" size={18} />
-        </Pressable>
-      </View>
-      <View style={styles.optionMetrics}>
-        {data.metrics.map((metric) => (
-          <View key={metric.label} style={styles.optionMetric}>
-            <Text numberOfLines={1} style={styles.optionMetricValue}>
-              {metric.value}
-            </Text>
-            <Text numberOfLines={1} style={styles.optionMetricLabel}>
-              {metric.label}
-            </Text>
-          </View>
-        ))}
-      </View>
-    </View>
-  );
-}
 
 function RouteMapStateOverlay({
   message,
@@ -3206,29 +2891,6 @@ function RouteMapStateOverlay({
     </View>
   );
 }
-
-const SmoothSpeed = memo(function SmoothSpeed({ value }: { value: number }) {
-  const currentRef = useRef(value);
-  const [display, setDisplay] = useState(value);
-
-  useEffect(() => {
-    const from = currentRef.current;
-    const startedAt = Date.now();
-    let frame = 0;
-    const tick = () => {
-      const fraction = Math.min(1, (Date.now() - startedAt) / 360);
-      const eased = 1 - (1 - fraction) ** 3;
-      const next = from + (value - from) * eased;
-      currentRef.current = next;
-      setDisplay(Math.round(next));
-      if (fraction < 1) frame = requestAnimationFrame(tick);
-    };
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-  }, [value]);
-
-  return <Text style={styles.speedValue}>{display}</Text>;
-});
 
 function Metric({
   icon,
@@ -3732,19 +3394,31 @@ const styles = StyleSheet.create({
     zIndex: 10,
   },
   bottomSheetContent: {
-    backgroundColor: 'rgba(7, 15, 27, 0.97)',
-    borderColor: 'rgba(255,255,255,0.13)',
+    backgroundColor: 'rgba(255, 255, 255, 0.98)',
+    borderColor: '#DCE8E3',
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     borderWidth: 1,
     paddingHorizontal: 16,
     paddingTop: 10,
     paddingBottom: 14,
-    shadowColor: '#020712',
+    shadowColor: '#18382D',
     shadowOffset: { width: 0, height: -8 },
-    shadowOpacity: 0.42,
+    shadowOpacity: 0.18,
     shadowRadius: 24,
     flex: 1,
+  },
+  sheetSectionTitle: {
+    color: '#102A23',
+    fontSize: 17,
+    fontWeight: '900',
+    letterSpacing: 0.2,
+  },
+  sheetHandleContainer: {
+    alignItems: 'center',
+    height: SHEET_HANDLE_HEIGHT,
+    justifyContent: 'center',
+    width: '100%',
   },
   sheetHandleHit: {
     alignItems: 'center',
@@ -4021,7 +3695,7 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
   },
   sheetStats: {
-    borderColor: 'rgba(255,255,255,0.09)',
+    borderColor: '#E2ECE8',
     borderTopWidth: 1,
     flexDirection: 'row',
     gap: 8,
@@ -4056,13 +3730,13 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   metricValue: {
-    color: '#EDF5FB',
+    color: '#152B25',
     fontSize: 13,
     fontWeight: '800',
     letterSpacing: 0,
   },
   metricLabel: {
-    color: '#7F96AA',
+    color: '#71827C',
     fontSize: 11,
     fontWeight: '600',
     letterSpacing: 0,
@@ -4205,189 +3879,479 @@ const styles = StyleSheet.create({
     flex: 1,
     marginTop: 6,
   },
-  historyDateSelector: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: 'rgba(255,255,255,0.03)',
+  // Each History section is its own panel so the tab reads as a stack of
+  // answers (when, playback, totals, route) rather than one long column.
+  histCard: {
+    backgroundColor: 'rgba(255,255,255,0.025)',
     borderColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 16,
     borderWidth: 1,
-    borderRadius: 12,
-    paddingHorizontal: 8,
-    paddingVertical: 10,
-    marginTop: 6,
+    marginTop: 12,
+    padding: 14,
   },
-  dateNavBtn: {
-    padding: 6,
+  histCardHeader: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 12,
+  },
+  histCardHeaderText: {
+    color: '#C7D7E4',
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.9,
+    textTransform: 'uppercase',
+  },
+
+  // --- Date & range -------------------------------------------------------
+  histDateRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10,
+    justifyContent: 'space-between',
+  },
+  histDateNav: {
+    alignItems: 'center',
     backgroundColor: 'rgba(255,255,255,0.05)',
-    borderRadius: 8,
+    borderColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 12,
+    borderWidth: 1,
+    height: 42,
+    justifyContent: 'center',
+    width: 42,
   },
-  dateNavLabel: {
-    color: '#fff',
+  // Keeps the pill centred when the forward arrow is not shown.
+  histDateNavPlaceholder: {
+    height: 42,
+    width: 42,
+  },
+  histDatePill: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    justifyContent: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+  },
+  histDatePillText: {
+    color: '#EDF5FB',
+    flexShrink: 1,
     fontSize: 14,
     fontWeight: '800',
   },
-  presetsRow: {
+  histPresetRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    flexWrap: 'wrap',
     gap: 8,
-    marginTop: 10,
+    marginTop: 12,
   },
-  presetChip: {
-    flex: 1,
+  histPresetChip: {
     alignItems: 'center',
     backgroundColor: 'rgba(255,255,255,0.05)',
     borderColor: 'rgba(255,255,255,0.1)',
-    borderWidth: 1,
     borderRadius: 10,
-    paddingVertical: 8,
+    borderWidth: 1,
+    flexBasis: 'auto',
+    flexGrow: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 11,
   },
-  presetChipActive: {
+  histPresetChipActive: {
     backgroundColor: BRAND.green,
     borderColor: BRAND.green,
   },
-  presetChipText: {
-    color: '#8FA5B9',
+  histPresetText: {
+    color: '#9FB4C6',
     fontSize: 12,
     fontWeight: '800',
   },
-  presetChipTextActive: {
-    color: '#fff',
+  histPresetTextActive: {
+    color: '#04140A',
   },
-  playbackControlsRow: {
+
+  // --- Playback controls --------------------------------------------------
+  histPlaybackRow: {
+    alignItems: 'center',
     flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 14,
-    gap: 12,
-  },
-  playBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  speedsRow: {
-    flexDirection: 'row',
-    flex: 1,
-    justifyContent: 'space-between',
-    gap: 4,
-  },
-  speedChip: {
-    flex: 1,
-    alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.05)',
-    borderColor: 'rgba(255,255,255,0.1)',
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingVertical: 6,
-  },
-  speedChipActive: {
-    backgroundColor: BRAND.green,
-    borderColor: BRAND.green,
-  },
-  speedChipText: {
-    color: '#8FA5B9',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  speedChipTextActive: {
-    color: '#fff',
-  },
-  scrubberRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: 14,
     gap: 10,
   },
-  scrubberTrack: {
-    flex: 1,
-    height: 8,
-    backgroundColor: 'rgba(255,255,255,0.1)',
-    borderRadius: 4,
-    overflow: 'hidden',
+  histPlayBtn: {
+    alignItems: 'center',
+    backgroundColor: BRAND.green,
+    borderRadius: 26,
+    height: 52,
+    justifyContent: 'center',
+    width: 52,
   },
-  scrubberProgress: {
-    height: '100%',
-    borderRadius: 4,
-  },
-  scrubberTimeText: {
-    color: '#8FA5B9',
-    fontSize: 12,
-    fontWeight: '700',
-    minWidth: 32,
-    textAlign: 'right',
-  },
-  historyStatsGrid: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginTop: 14,
-    backgroundColor: 'rgba(255,255,255,0.02)',
-    borderColor: 'rgba(255,255,255,0.08)',
+  histRestartBtn: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 21,
     borderWidth: 1,
+    height: 42,
+    justifyContent: 'center',
+    width: 42,
+  },
+  histSpeedRow: {
+    flex: 1,
+    flexDirection: 'row',
+    gap: 8,
+    marginLeft: 4,
+  },
+  histSpeedChip: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 10,
+    borderWidth: 1,
+    flex: 1,
+    paddingVertical: 11,
+  },
+  histSpeedChipActive: {
+    backgroundColor: BRAND.green,
+    borderColor: BRAND.green,
+  },
+  histSpeedText: {
+    color: '#9FB4C6',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  histSpeedTextActive: {
+    color: '#04140A',
+  },
+  histScrubRow: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 16,
+  },
+  histScrubTrack: {
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 4,
+    flex: 1,
+    height: 6,
+  },
+  histScrubFill: {
+    backgroundColor: BRAND.green,
+    borderRadius: 4,
+    height: '100%',
+  },
+  histScrubThumb: {
+    backgroundColor: BRAND.green,
+    borderRadius: 8,
+    height: 16,
+    marginLeft: -8,
+    position: 'absolute',
+    top: -5,
+    width: 16,
+  },
+  histScrubTime: {
+    color: '#9FB4C6',
+    fontSize: 12,
+    fontVariant: ['tabular-nums'],
+    fontWeight: '700',
+    minWidth: 46,
+    textAlign: 'center',
+  },
+  histStopBanner: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(239,68,68,0.12)',
+    borderColor: 'rgba(239,68,68,0.38)',
     borderRadius: 12,
-    padding: 10,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+  },
+  histStopBannerText: {
+    color: '#FCA5A5',
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '800',
+  },
+
+  // --- Trip summary -------------------------------------------------------
+  histStatGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 8,
   },
-  historyStatCell: {
-    flex: 1,
+  // Two per row on a phone; the fixed basis keeps the value column aligned
+  // down the grid instead of shifting with each label's width.
+  histStatCell: {
     alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.03)',
+    borderColor: 'rgba(255,255,255,0.07)',
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: 'row',
+    flexGrow: 1,
+    gap: 8,
+    paddingHorizontal: 9,
+    paddingVertical: 11,
   },
-  histStatVal: {
+  histStatText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  histStatValue: {
     color: '#EDF5FB',
+    fontSize: 15,
+    fontWeight: '900',
+  },
+  histStatLabel: {
+    color: '#7F96AA',
+    fontSize: 11,
+    fontWeight: '700',
+    marginTop: 1,
+  },
+  histStatValueCompact: {
+    fontSize: 13,
+  },
+  histStatLabelCompact: {
+    fontSize: 9,
+  },
+
+  // --- Start / end --------------------------------------------------------
+  histEndpointCard: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  histEndpoint: {
+    flex: 1,
+    gap: 6,
+    minWidth: 0,
+  },
+  histEndpointHead: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 7,
+  },
+  histEndpointLabel: {
+    fontSize: 11,
+    fontWeight: '900',
+    letterSpacing: 0.6,
+    textTransform: 'uppercase',
+  },
+  histEndpointValue: {
+    color: '#E9F4FC',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  histEndpointDivider: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    width: 1,
+  },
+
+  // --- Journey timeline ---------------------------------------------------
+  histTimelineHeading: {
+    color: '#C7D7E4',
+    fontSize: 12,
+    fontWeight: '900',
+    letterSpacing: 0.9,
+    marginBottom: 6,
+    textTransform: 'uppercase',
+  },
+  histTimelineRow: {
+    alignItems: 'stretch',
+    flexDirection: 'row',
+    gap: 10,
+    minHeight: 56,
+  },
+  histRail: {
+    alignItems: 'center',
+    width: 24,
+  },
+  histRailLine: {
+    backgroundColor: 'rgba(39,211,77,0.45)',
+    flex: 1,
+    width: 2,
+  },
+  histRailLineHidden: {
+    backgroundColor: 'transparent',
+  },
+  histRailDot: {
+    alignItems: 'center',
+    borderRadius: 12,
+    height: 24,
+    justifyContent: 'center',
+    width: 24,
+  },
+  // A plain leg needs no glyph, so its marker is just a bead on the rail.
+  histRailDotSmall: {
+    borderRadius: 8,
+    height: 16,
+    width: 16,
+  },
+  histRailDotText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  histTimelineBody: {
+    flex: 1,
+    justifyContent: 'center',
+    minWidth: 0,
+    paddingVertical: 10,
+  },
+  histTimelineTitleLine: {
+    alignItems: 'baseline',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  histTimelineTitle: {
+    color: '#EDF5FB',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  histTimelineMeta: {
+    color: '#8FA5B9',
+    flexShrink: 1,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  histTimelineSub: {
+    color: '#6F869A',
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 3,
+  },
+  histTimelineRight: {
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+    minWidth: 66,
+    paddingVertical: 10,
+  },
+  histTimelinePrimary: {
     fontSize: 13,
     fontWeight: '900',
   },
-  histStatLbl: {
+  histTimelineSecondary: {
     color: '#7F96AA',
     fontSize: 10,
     fontWeight: '700',
     marginTop: 2,
-    textTransform: 'uppercase',
   },
-  timelineSection: {
-    marginTop: 16,
-    borderColor: 'rgba(255,255,255,0.08)',
-    borderTopWidth: 1,
-    paddingTop: 12,
+  histChevronPlaceholder: {
+    width: 20,
   },
-  sectionHeadingText: {
-    color: '#8FA5B9',
-    fontSize: 13,
-    fontWeight: '900',
-    marginBottom: 8,
-    textTransform: 'uppercase',
-  },
-  timelineItem: {
-    flexDirection: 'row',
+  histAlertRow: {
     alignItems: 'flex-start',
+    flexDirection: 'row',
     gap: 10,
-    marginVertical: 6,
+    paddingVertical: 8,
   },
-  timelineItemContent: {
+
+  // --- Empty state --------------------------------------------------------
+  histEmptyBox: {
+    alignItems: 'center',
+    gap: 10,
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+    paddingVertical: 40,
+  },
+  histEmptyTitle: {
+    color: '#9FB4C6',
+    fontSize: 13,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  histEmptyHint: {
+    color: '#6F869A',
+    fontSize: 11,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  rangePickerBackdrop: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(3,10,18,0.72)',
     flex: 1,
+    justifyContent: 'center',
+    padding: 24,
   },
-  timelineTitleText: {
-    color: '#E9F4FC',
+  rangePickerCard: {
+    backgroundColor: '#0E1A26',
+    borderColor: 'rgba(255,255,255,0.10)',
+    borderRadius: 18,
+    borderWidth: 1,
+    padding: 18,
+    width: '100%',
+  },
+  rangePickerTitle: {
+    color: '#EDF5FB',
+    fontSize: 16,
+    fontWeight: '900',
+  },
+  rangePickerHint: {
+    color: '#7F96AA',
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 4,
+  },
+  rangeField: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderColor: 'rgba(255,255,255,0.10)',
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+  },
+  rangeFieldLabel: {
+    color: '#7F96AA',
+    fontSize: 10,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    width: 46,
+  },
+  rangeFieldValue: {
+    color: '#EDF5FB',
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  rangeError: {
+    color: '#FCA5A5',
+    fontSize: 11,
+    fontWeight: '700',
+    marginTop: 10,
+  },
+  rangeActionsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 18,
+  },
+  rangeActionBtn: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 12,
+    borderWidth: 1,
+    flex: 1,
+    paddingVertical: 12,
+  },
+  rangeActionBtnPrimary: {
+    backgroundColor: BRAND.green,
+    borderColor: BRAND.green,
+  },
+  rangeActionText: {
+    color: '#8FA5B9',
     fontSize: 13,
     fontWeight: '800',
   },
-  timelineSubtitleText: {
-    color: '#8FA5B9',
-    fontSize: 11,
-    fontWeight: '600',
-    marginTop: 2,
-  },
-  noHistoryBox: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 30,
-  },
-  noHistoryText: {
-    color: '#8FA5B9',
-    fontSize: 13,
-    fontWeight: '700',
-    textAlign: 'center',
+  rangeActionTextPrimary: {
+    color: '#FFFFFF',
   },
   eventMarker: {
     alignItems: 'center',
@@ -4399,11 +4363,46 @@ const styles = StyleSheet.create({
   },
   stopMarker: {
     alignItems: 'center',
-    backgroundColor: '#3b82f6',
-    borderRadius: 10,
-    height: 20,
+    backgroundColor: BRAND.red,
+    borderColor: '#FFFFFF',
+    borderRadius: 11,
+    borderWidth: 1.5,
+    height: 22,
     justifyContent: 'center',
-    width: 20,
+    width: 22,
+  },
+  // The stop the playhead is currently waiting out.
+  stopMarkerActive: {
+    borderColor: '#FFE9E9',
+    borderRadius: 15,
+    borderWidth: 3,
+    height: 30,
+    width: 30,
+  },
+  stopMarkerText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  journeyStartMarker: {
+    alignItems: 'center',
+    backgroundColor: '#27D34D',
+    borderColor: '#FFFFFF',
+    borderRadius: 11,
+    borderWidth: 1.5,
+    height: 22,
+    justifyContent: 'center',
+    width: 22,
+  },
+  journeyEndMarker: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderColor: '#0B1622',
+    borderRadius: 11,
+    borderWidth: 1.5,
+    height: 22,
+    justifyContent: 'center',
+    width: 22,
   },
   cinematicSection: {
     flex: 1,

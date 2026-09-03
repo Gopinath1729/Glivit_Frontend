@@ -80,7 +80,7 @@ export default function ReportsScreen() {
   const compact = width < 720;
   const scrollRef = React.useRef<ScrollView>(null);
 
-  const devices = useGetAllDevicesQuery({ includeSuspended: false });
+  const devices = useGetAllDevicesQuery();
   const [selectedDeviceId, setSelectedDeviceId] = React.useState<number | undefined>();
   const [fromDate, setFromDate] = React.useState(() => daysAgo(6));
   const [toDate, setToDate] = React.useState(() => new Date());
@@ -350,7 +350,7 @@ export default function ReportsScreen() {
 
             <ReportSection title="Activity summary" icon="chart-donut" styles={styles} color={c.primary}>
               {data.activitySummary.map((item) => {
-                const color = activityColor(item.status);
+                const color = activityColor(item.status, c);
                 return (
                   <View key={item.status} style={styles.activityRow}>
                     <View style={styles.activityHeader}>
@@ -378,39 +378,12 @@ export default function ReportsScreen() {
               />
             </ReportSection>
 
-            <ReportSection title="Driver details" icon="card-account-details-outline" styles={styles} color={c.primary}>
-              {data.driverDetails.assigned ? (
-                <View style={styles.driverCard}>
-                  <View style={styles.driverAvatar}>
-                    <MaterialCommunityIcons color={c.onPrimary} name="account" size={28} />
-                  </View>
-                  <View style={styles.driverIdentity}>
-                    <Text style={styles.driverName}>{data.driverDetails.name || 'Assigned driver'}</Text>
-                    <Text style={styles.driverPhone}>{data.driverDetails.mobileNumber || 'Mobile not available'}</Text>
-                    <Text style={styles.driverLicence}>Licence: {data.driverDetails.licenceNumber || 'Not available'}</Text>
-                  </View>
-                  <View style={styles.driverBadge}><Text style={styles.driverBadgeText}>ASSIGNED</Text></View>
-                </View>
-              ) : (
-                <View style={styles.emptyInline}>
-                  <MaterialCommunityIcons color={c.textMuted} name="account-off-outline" size={26} />
-                  <Text style={styles.emptyInlineText}>No driver assigned to this vehicle.</Text>
-                </View>
-              )}
-              <View style={styles.driverMetrics}>
-                <MiniMetric label="Assigned Vehicle" value={data.driverDetails.assignedVehicle} styles={styles} />
-                <MiniMetric label="Distance" value={`${data.driverDetails.totalDistanceKm.toFixed(1)} km`} styles={styles} />
-                <MiniMetric label="Driving Time" value={duration(data.driverDetails.runningSeconds)} styles={styles} />
-                <MiniMetric label="Overspeed Events" value={String(data.driverDetails.overspeedEvents)} styles={styles} />
-              </View>
-            </ReportSection>
-
             {/* Hidden until a filter has been applied and its data has arrived,
                 so there is never an Export button that would download the
                 previous vehicle's report or nothing at all. */}
             {canExport ? (
               <ReportSection title="Export report" icon="download-box-outline" styles={styles} color={c.primary}>
-                <Text style={styles.exportHint}>Download the complete filtered report, including journey, driver, trend, stop, idle and activity data.</Text>
+                <Text style={styles.exportHint}>Download the complete filtered report, including journey, trend, stop, idle and activity data.</Text>
                 <View style={[styles.exportRow, !compact && styles.exportRowDesktop]}>
                   <View style={styles.exportButton}>
                     <Button icon="file-pdf-box" label="Export PDF" loading={exportFormat === 'PDF'} disabled={exportFormat !== null} onPress={() => void download('PDF')} />
@@ -537,7 +510,6 @@ function OverspeedList({ events, expanded, onToggle, color, styles }: { events: 
   );
 }
 
-function MiniMetric({ label, value, styles }: { label: string; value: string; styles: ReturnType<typeof makeStyles> }) { return <View style={styles.miniMetric}><Text style={styles.miniLabel}>{label}</Text><Text numberOfLines={2} style={styles.miniValue}>{value}</Text></View>; }
 
 function PageState({ icon, label, loading, onRetry, styles }: { icon: React.ComponentProps<typeof MaterialCommunityIcons>['name']; label: string; loading?: boolean; onRetry?: () => void; styles: ReturnType<typeof makeStyles> }) {
   const { colors: c } = useTheme();
@@ -552,8 +524,8 @@ function duration(raw: number) { const seconds = Math.max(0, Math.round(raw)); c
 function formatDateTime(value: string) { const date = new Date(value); return Number.isNaN(date.getTime()) ? 'Time unavailable' : date.toLocaleString([], { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }); }
 function formatDateRange(from: string, to: string) { return `${new Date(from).toLocaleDateString()} – ${new Date(to).toLocaleDateString()}`; }
 function prettyState(value: string) { const text = (value || 'NO_DATA').replaceAll('_', ' ').toLowerCase(); return text.replace(/\b\w/g, (letter) => letter.toUpperCase()); }
-function activityColor(status: string) { if (status === 'RUNNING') return '#16A34A'; if (status === 'STOPPED' || status === 'IDLE') return '#DC2626'; return '#64748B'; }
-function stateColor(status: string, c: ThemeColors) { const normalized = (status || '').toUpperCase(); if (normalized === 'RUNNING') return '#16A34A'; if (normalized === 'STOPPED' || normalized === 'IDLE') return '#DC2626'; return c.textMuted; }
+function activityColor(status: string, c: ThemeColors) { const normalized = (status || '').toUpperCase(); if (normalized === 'RUNNING') return c.success; if (normalized === 'STOPPED') return c.danger; if (normalized === 'IDLE') return c.warning; return c.textMuted; }
+function stateColor(status: string, c: ThemeColors) { const normalized = (status || '').toUpperCase(); if (normalized === 'RUNNING') return c.success; if (normalized === 'STOPPED') return c.danger; if (normalized === 'IDLE') return c.warning; return c.textMuted; }
 function viewOnMap(latitude: number, longitude: number) { const url = Platform.select({ ios: `maps:0,0?q=${latitude},${longitude}`, default: `https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}` })!; void Linking.openURL(url); }
 
 const makeStyles = (c: ThemeColors) => StyleSheet.create({
@@ -590,10 +562,10 @@ const makeStyles = (c: ThemeColors) => StyleSheet.create({
   contextText: { flex: 1, minWidth: 0 },
   contextTitle: { color: c.textPrimary, fontSize: typography.body, fontWeight: '800' },
   contextMeta: { color: c.textSecondary, fontSize: typography.caption, marginTop: 2 },
-  noGpsBanner: { alignItems: 'flex-start', backgroundColor: '#FFFBEB', borderColor: '#FDE68A', borderRadius: radius.md, borderWidth: 1, flexDirection: 'row', gap: spacing.sm, padding: 10 },
+  noGpsBanner: { alignItems: 'flex-start', backgroundColor: 'rgba(245, 158, 11, 0.12)', borderColor: 'rgba(245, 158, 11, 0.34)', borderRadius: radius.md, borderWidth: 1, flexDirection: 'row', gap: spacing.sm, padding: 10 },
   bannerCopy: { flex: 1 },
-  noGpsTitle: { color: '#92400E', fontSize: typography.label, fontWeight: '800' },
-  noGpsText: { color: '#A16207', fontSize: typography.caption, lineHeight: 17, marginTop: 2 },
+  noGpsTitle: { color: c.warning, fontSize: typography.label, fontWeight: '800' },
+  noGpsText: { color: c.textSecondary, fontSize: typography.caption, lineHeight: 17, marginTop: 2 },
   summaryGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
   summaryCard: { backgroundColor: c.surfaceAlt, borderColor: c.border, borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth, gap: 4, minHeight: 94, padding: 10 },
   summaryCardCompact: { flexBasis: '47%', flexGrow: 1 },
@@ -619,7 +591,7 @@ const makeStyles = (c: ThemeColors) => StyleSheet.create({
   locationPin: { alignItems: 'center', borderRadius: 18, height: 36, justifyContent: 'center', width: 36 },
   locationTitleCopy: { flex: 1 },
   locationTitle: { color: c.textPrimary, fontSize: typography.body, fontWeight: '900' },
-  lastKnown: { color: '#D97706', fontSize: 8, fontWeight: '900', letterSpacing: 0.5, marginTop: 2 },
+  lastKnown: { color: c.warning, fontSize: 8, fontWeight: '900', letterSpacing: 0.5, marginTop: 2 },
   locationAddress: { color: c.textPrimary, fontSize: typography.caption, fontWeight: '600', lineHeight: 18 },
   locationMetaRow: { alignItems: 'center', flexDirection: 'row', gap: spacing.xs },
   locationMeta: { color: c.textSecondary, flex: 1, fontSize: typography.caption, fontVariant: ['tabular-nums'] },
@@ -650,18 +622,6 @@ const makeStyles = (c: ThemeColors) => StyleSheet.create({
   activityValue: { color: c.textSecondary, fontSize: typography.caption, fontVariant: ['tabular-nums'], fontWeight: '700' },
   progressTrack: { backgroundColor: c.surfaceAlt, borderRadius: radius.pill, height: 9, overflow: 'hidden' },
   progressFill: { borderRadius: radius.pill, height: 9 },
-  driverCard: { alignItems: 'center', backgroundColor: c.surfaceAlt, borderRadius: radius.md, flexDirection: 'row', gap: 10, padding: 12 },
-  driverAvatar: { alignItems: 'center', backgroundColor: c.primary, borderRadius: 23, height: 46, justifyContent: 'center', width: 46 },
-  driverIdentity: { flex: 1, minWidth: 0 },
-  driverName: { color: c.textPrimary, fontSize: typography.body, fontWeight: '900' },
-  driverPhone: { color: c.textSecondary, fontSize: typography.caption, marginTop: 2 },
-  driverLicence: { color: c.textMuted, fontSize: 10, marginTop: 2 },
-  driverBadge: { backgroundColor: c.accentSoft, borderRadius: radius.pill, paddingHorizontal: 8, paddingVertical: 4 },
-  driverBadgeText: { color: c.primary, fontSize: 8, fontWeight: '900', letterSpacing: 0.5 },
-  driverMetrics: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
-  miniMetric: { backgroundColor: c.surfaceAlt, borderRadius: radius.sm, flexBasis: '46%', flexGrow: 1, minHeight: 58, padding: spacing.sm },
-  miniLabel: { color: c.textMuted, fontSize: 9, fontWeight: '800', textTransform: 'uppercase' },
-  miniValue: { color: c.textPrimary, fontSize: typography.caption, fontWeight: '800', marginTop: 5 },
   emptyInline: { alignItems: 'center', backgroundColor: c.surfaceAlt, borderRadius: radius.md, flexDirection: 'row', gap: spacing.sm, padding: 12 },
   emptyInlineText: { color: c.textSecondary, flex: 1, fontSize: typography.caption, lineHeight: 18 },
   exportHint: { color: c.textSecondary, fontSize: typography.caption, lineHeight: 18 },

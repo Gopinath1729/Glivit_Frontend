@@ -16,8 +16,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Button } from '@/src/components/ui/Button';
 import { apiErrorMessage } from '@/src/services/apiError';
 import {
+  useBootstrapMobileGpsQuery,
   useGetAllDevicesQuery,
-  useIssueIngestTokenMutation,
 } from '@/src/services/devicesApi';
 import {
   currentStats,
@@ -46,7 +46,7 @@ export default function TrackerModeScreen() {
   const styles = useMemo(() => makeStyles(c), [c]);
 
   const devices = useGetAllDevicesQuery();
-  const [issueToken, issueTokenState] = useIssueIngestTokenMutation();
+  const mobileSession = useBootstrapMobileGpsQuery();
 
   const [selected, setSelected] = useState<DeviceSummary | null>(null);
   const [accuracy, setAccuracy] = useState<TrackerAccuracy>('high');
@@ -61,8 +61,20 @@ export default function TrackerModeScreen() {
     setStats(currentStats());
   }, []);
 
+  const ownedDevices = useMemo(
+    () =>
+      mobileSession.data?.registered
+        ? (devices.data ?? []).filter((device) => device.id === mobileSession.data?.deviceId)
+        : [],
+    [devices.data, mobileSession.data]
+  );
+
+  useEffect(() => {
+    setSelected(ownedDevices[0] ?? null);
+  }, [ownedDevices]);
+
   const handleStart = useCallback(async () => {
-    if (!selected) return;
+    if (!selected || !mobileSession.data?.registered || !mobileSession.data.ingestToken) return;
     setStarting(true);
     try {
       const permission = await requestTrackingPermission();
@@ -70,17 +82,18 @@ export default function TrackerModeScreen() {
         Alert.alert('Cannot start tracking', permission.message);
         return;
       }
-      // Rotated per session on purpose: the token is shown once and this is the
-      // only place that needs to hold it.
-      const { ingestToken } = await issueToken(selected.id).unwrap();
-      await startTracking({ ingestToken, accuracy, onStats: setStats });
+      await startTracking({
+        ingestToken: mobileSession.data.ingestToken,
+        accuracy,
+        onStats: setStats,
+      });
       setRunning(true);
     } catch (error) {
       Alert.alert('Cannot start tracking', apiErrorMessage(error));
     } finally {
       setStarting(false);
     }
-  }, [accuracy, issueToken, selected]);
+  }, [accuracy, mobileSession.data, selected]);
 
   const handleStop = useCallback(async () => {
     await stopTracking();
@@ -132,7 +145,7 @@ export default function TrackerModeScreen() {
         <View style={[styles.liveBadge, running && { backgroundColor: hexToRgba(c.primary, 0.15) }]}>
           <View style={[styles.liveDot, { backgroundColor: running ? c.primary : c.textMuted }]} />
           <Text style={[styles.liveText, running && { color: c.primary }]}>
-            {running ? 'LIVE' : 'IDLE'}
+            {running ? 'LIVE' : 'OFF'}
           </Text>
         </View>
       </View>
@@ -151,7 +164,7 @@ export default function TrackerModeScreen() {
               />
               <Stat
                 label="Speed"
-                value={stats.lastFix ? `${stats.lastFix.speedKph} km/h` : '—'}
+                value={stats.lastFix ? `${stats.lastFix.speedKmh} km/h` : '—'}
                 styles={styles}
               />
               <Stat
@@ -199,23 +212,25 @@ export default function TrackerModeScreen() {
         <Text style={styles.sectionLabel}>
           Device{running ? ' — stop tracking to change' : ''}
         </Text>
-        {devices.isLoading ? (
+        {devices.isLoading || mobileSession.isLoading ? (
           <View style={styles.listState}>
             <ActivityIndicator color={c.primary} size="small" />
           </View>
-        ) : devices.isError ? (
-          <View style={styles.listState}>
-            <Text style={styles.listStateText}>{apiErrorMessage(devices.error)}</Text>
-          </View>
-        ) : (devices.data?.length ?? 0) === 0 ? (
+        ) : devices.isError || mobileSession.isError ? (
           <View style={styles.listState}>
             <Text style={styles.listStateText}>
-              No devices registered. Create one under Management first.
+              {apiErrorMessage(devices.error ?? mobileSession.error)}
+            </Text>
+          </View>
+        ) : ownedDevices.length === 0 ? (
+          <View style={styles.listState}>
+            <Text style={styles.listStateText}>
+              No Mobile GPS Tracker is registered for this account.
             </Text>
           </View>
         ) : (
           <FlatList
-            data={devices.data}
+            data={ownedDevices}
             keyExtractor={(item) => String(item.id)}
             renderItem={renderDevice}
             scrollEnabled={false}
@@ -225,8 +240,8 @@ export default function TrackerModeScreen() {
 
         <Text style={styles.note}>
           Positions post to the same ingestion endpoint a hardware tracker uses, so the device&apos;s
-          history, state and alerts behave exactly as they would in the field. Tracking stops when
-          the app is backgrounded.
+          history, state and alerts behave exactly as they would in the field. Android keeps a
+          foreground location service active while the app is backgrounded.
         </Text>
       </ScrollView>
 
@@ -234,7 +249,7 @@ export default function TrackerModeScreen() {
         <Button
           label={running ? 'Stop tracking' : 'Start tracking'}
           disabled={!selected && !running}
-          loading={starting || issueTokenState.isLoading}
+          loading={starting || mobileSession.isFetching}
           onPress={running ? handleStop : handleStart}
         />
       </View>

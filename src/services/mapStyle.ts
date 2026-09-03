@@ -7,10 +7,10 @@ import { env } from '@/src/config/env';
 export type MapStyleSpec = string | Record<string, unknown>;
 export type MapStyleVariant = 'street' | 'bright' | 'dark' | 'satellite';
 export type NativeMapProvider = 'google-apple';
-export type WebMapProvider = 'geoapify' | 'openfreemap';
+export type WebMapProvider = 'geoapify';
 
 export type MapStyleIssue = {
-  code: 'placeholder_geoapify_key' | 'insecure_style_url';
+  code: 'missing_geoapify_key' | 'placeholder_geoapify_key' | 'insecure_style_url';
   message: string;
   blocking: boolean;
 };
@@ -75,16 +75,9 @@ const BRIGHT_MAP_STYLE: MapStyleElement[] = [
   { featureType: 'transit', stylers: [{ visibility: 'off' }] },
 ];
 
-const OPENFREEMAP_STYLES: Record<MapStyleVariant, string> = {
-  street: 'https://tiles.openfreemap.org/styles/liberty',
-  bright: 'https://tiles.openfreemap.org/styles/bright',
-  dark: 'https://tiles.openfreemap.org/styles/dark',
-  satellite: 'https://tiles.openfreemap.org/styles/bright',
-};
-
 const GEOAPIFY_STYLES: Record<MapStyleVariant, string> = {
   street: 'osm-bright',
-  bright: 'osm-bright',
+  bright: 'osm-bright-grey',
   dark: 'dark-matter',
   satellite: 'osm-bright',
 };
@@ -109,17 +102,28 @@ function getWebStyleInfo(variant: MapStyleVariant): {
   const configuredKey = env.geoapifyApiKey.trim();
   const key = configuredKey && !isPlaceholderKey(configuredKey) ? configuredKey : '';
 
-  if (configuredKey && !key) {
+  if (!configuredKey) {
     issues.push({
-      blocking: false,
+      blocking: true,
+      code: 'missing_geoapify_key',
+      message:
+        'This build has no Geoapify API key. Set EXPO_PUBLIC_GEOAPIFY_API_KEY and rebuild the app.',
+    });
+  } else if (!key) {
+    issues.push({
+      blocking: true,
       code: 'placeholder_geoapify_key',
-      message: 'Geoapify API key is a placeholder; using HTTPS OpenFreeMap vector tiles for web.',
+      message:
+        'The Geoapify API key is still a placeholder. Set EXPO_PUBLIC_GEOAPIFY_API_KEY to a real key and rebuild the app.',
     });
   }
 
-  const styleUrl = key
-    ? `https://maps.geoapify.com/v1/styles/${GEOAPIFY_STYLES[variant]}/style.json?apiKey=${encodeURIComponent(key)}`
-    : OPENFREEMAP_STYLES[variant];
+  // Geoapify is the only map-tile provider used by the app. An invalid or
+  // missing key is intentionally not hidden behind another public tile host:
+  // release builds fail configuration validation and local builds surface the
+  // real provider error instead of appearing to work against an unsupported
+  // fallback.
+  const styleUrl = `https://maps.geoapify.com/v1/styles/${GEOAPIFY_STYLES[variant]}/style.json?apiKey=${encodeURIComponent(key)}`;
 
   if (!styleUrl.startsWith('https://')) {
     issues.push({
@@ -130,7 +134,7 @@ function getWebStyleInfo(variant: MapStyleVariant): {
   }
 
   return {
-    provider: key ? 'geoapify' : 'openfreemap',
+    provider: 'geoapify',
     style: styleUrl,
     styleUrl,
     issues,
@@ -146,7 +150,7 @@ export function getMapStyleInfo(variant: MapStyleVariant = 'street'): MapStyleIn
     webProvider: web.provider,
     webStyle: web.style,
     webStyleUrl: web.styleUrl,
-    issues: web.issues.filter((issue) => issue.blocking),
+    issues: web.issues,
   };
 }
 

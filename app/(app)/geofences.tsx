@@ -22,7 +22,6 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { z } from 'zod';
 
 import { Button } from '@/src/components/ui/Button';
-import { Card } from '@/src/components/ui/Card';
 import { EmptyView, ErrorRetryView, LoadingView } from '@/src/components/ui/StateViews';
 import { TextField } from '@/src/components/ui/TextField';
 import { apiErrorMessage } from '@/src/services/apiError';
@@ -36,11 +35,6 @@ import {
   useGetGeofencesQuery,
   useUpdateGeofenceMutation,
 } from '@/src/services/operationsApi';
-import {
-  useGetGeofenceSuggestionsQuery,
-  useApproveGeofenceSuggestionMutation,
-  useDismissGeofenceSuggestionMutation,
-} from '@/src/services/aiApi';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import type { DeviceSummary, GeofenceDto } from '@/src/types/api';
 import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
@@ -109,7 +103,7 @@ type Coordinate = {
  * A list screen first: every existing zone is shown with its location, radius,
  * assignment counts, status and row actions. The create/edit form is a sheet
  * that only opens from the "+ Add Geofence" action, so the list is not buried
- * under a form the way it used to be. AI suggestions, colours, validation rules,
+ * under a form the way it used to be. Colours, validation rules,
  * permissions and the underlying API calls are unchanged.
  */
 export default function GeofencesScreen() {
@@ -128,21 +122,9 @@ export default function GeofencesScreen() {
   const { data: devicesData } = useGetAllDevicesQuery();
   const allDevices = React.useMemo(() => (Array.isArray(devicesData) ? devicesData : []), [devicesData]);
   const devicesMap = React.useMemo(() => new Map(allDevices.map((d) => [d.id, d])), [allDevices]);
-  const {
-    data: aiSuggestions,
-    isLoading: aiLoading,
-    isFetching: aiFetching,
-    isError: isAiError,
-    error: aiError,
-    refetch: refetchAi,
-  } = useGetGeofenceSuggestionsQuery();
-  const [approveSuggestion] = useApproveGeofenceSuggestionMutation();
-  const [dismissSuggestion] = useDismissGeofenceSuggestionMutation();
   const [createGeofence, { isLoading: isCreating }] = useCreateGeofenceMutation();
   const [updateGeofence, { isLoading: isUpdating }] = useUpdateGeofenceMutation();
   const [deleteGeofence] = useDeleteGeofenceMutation();
-  const [approvingId, setApprovingId] = React.useState<number | null>(null);
-  const [dismissingId, setDismissingId] = React.useState<number | null>(null);
   const [deletingId, setDeletingId] = React.useState<number | null>(null);
   /** `null` = closed, `'new'` = create, otherwise the geofence being edited. */
   const [editorTarget, setEditorTarget] = React.useState<'new' | GeofenceDto | null>(null);
@@ -530,37 +512,6 @@ export default function GeofencesScreen() {
     }
   }, [clearErrors, setError, setPickedCoordinate]);
 
-  const onDismissSuggestion = async (id: number) => {
-    if (dismissingId != null || !Number.isSafeInteger(id) || id <= 0) return;
-    setDismissingId(id);
-    try {
-      await dismissSuggestion(id).unwrap();
-      await refetchAi();
-    } catch (err) {
-      Alert.alert(
-        'Suggestion not dismissed',
-        apiErrorMessage(err, 'Failed to dismiss this geofence suggestion.')
-      );
-    } finally {
-      setDismissingId(null);
-    }
-  };
-
-  const onApproveSuggestion = async (id: number) => {
-    if (approvingId != null || !Number.isSafeInteger(id) || id <= 0) return;
-    setApprovingId(id);
-    try {
-      const created = await approveSuggestion({ id }).unwrap();
-      await Promise.allSettled([refetch(), refetchAi()]);
-      const name = created?.name || 'Suggested geofence';
-      Alert.alert('Geofence created', `"${name}" has been approved and added to your active geofences.`);
-    } catch (err) {
-      Alert.alert('Geofence not created', apiErrorMessage(err, 'Failed to approve geofence suggestion.'));
-    } finally {
-      setApprovingId(null);
-    }
-  };
-
   const onSubmit = handleSubmit(async (values) => {
     const target = editorTarget;
     if (!target) return;
@@ -638,11 +589,8 @@ export default function GeofencesScreen() {
   if (isLoading) return <LoadingView label="Loading geofences..." />;
   if (isError || !data) return <ErrorRetryView message={apiErrorMessage(error)} onRetry={refetch} />;
 
-  const suggestions = Array.isArray(aiSuggestions)
-    ? aiSuggestions.filter((suggestion) => suggestion?.status === 'PENDING')
-    : [];
   const onRefresh = () => {
-    void Promise.allSettled([refetch(), refetchAi()]);
+    void refetch();
   };
 
   return (
@@ -655,94 +603,13 @@ export default function GeofencesScreen() {
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
-            refreshing={isFetching || aiFetching}
+            refreshing={isFetching}
             onRefresh={onRefresh}
             tintColor={c.primary}
           />
         }
         ListHeaderComponent={
           <View style={{ gap: spacing.md }}>
-            <Card style={styles.suggestionsPanel}>
-              <View style={styles.suggestionsHeader}>
-                <MaterialCommunityIcons name="brain" size={24} color={c.accent} />
-                <Text style={styles.title}>AI Suggestions</Text>
-              </View>
-              <Text style={styles.subtitle}>Based on historical stop and idling patterns.</Text>
-              {aiLoading ? (
-                <View style={styles.aiState}>
-                  <ActivityIndicator color={c.primary} size="small" />
-                  <Text style={styles.subtitle}>Loading suggestions…</Text>
-                </View>
-              ) : isAiError ? (
-                <View style={styles.aiState}>
-                  <Text style={styles.aiError}>{apiErrorMessage(aiError)}</Text>
-                  <Button label="Retry suggestions" onPress={refetchAi} variant="secondary" />
-                </View>
-              ) : suggestions.length === 0 ? (
-                <View style={styles.aiState}>
-                  <MaterialCommunityIcons name="check-circle-outline" size={22} color={c.primary} />
-                  <Text style={styles.subtitle}>No pending suggestions.</Text>
-                </View>
-              ) : (
-                suggestions.map((suggestion) => {
-                  const latitude = finiteNumber(suggestion.centerLatitude);
-                  const longitude = finiteNumber(suggestion.centerLongitude);
-                  const suggestedRadius = finiteNumber(suggestion.suggestedRadiusMeters);
-                  const confidence = finiteNumber(suggestion.confidence);
-                  const loading = approvingId === suggestion.id;
-                  return (
-                    <View key={suggestion.id} style={styles.suggestionCard}>
-                      <View style={styles.body}>
-                        <Text style={styles.name}>
-                          {safeText(suggestion.suggestedName, `Suggestion #${suggestion.id}`)}
-                        </Text>
-                        <Text style={styles.meta}>
-                          Center: {formatCoordinate(latitude)}, {formatCoordinate(longitude)}
-                        </Text>
-                        <Text style={styles.meta}>
-                          Radius: {suggestedRadius == null ? 'Unavailable' : `${Math.round(suggestedRadius)} m`} |{' '}
-                          {Math.max(0, Math.round(finiteNumber(suggestion.visitCount) ?? finiteNumber(suggestion.clusterPointCount) ?? 0))} visits |{' '}
-                          {confidence == null
-                            ? 'Confidence unavailable'
-                            : `${Math.round(Math.max(0, Math.min(1, confidence)) * 100)}% confidence`}
-                        </Text>
-                        {suggestion.averageStopMinutes > 0 ? (
-                          <Text style={styles.meta}>
-                            Average stop: {Math.round(suggestion.averageStopMinutes)} min
-                            {suggestion.lastVisitAt
-                              ? ` | last visit ${new Date(suggestion.lastVisitAt).toLocaleDateString()}`
-                              : ''}
-                          </Text>
-                        ) : null}
-                        {suggestion.reasoning ? (
-                          <Text numberOfLines={3} style={styles.meta}>
-                            {suggestion.reasoning}
-                          </Text>
-                        ) : null}
-                      </View>
-                      <View style={styles.suggestionActions}>
-                        <Button
-                          disabled={approvingId != null || dismissingId != null}
-                          label="Approve & create"
-                          loading={loading}
-                          onPress={() => void onApproveSuggestion(suggestion.id)}
-                          style={styles.approveButton}
-                        />
-                        <Button
-                          disabled={approvingId != null || dismissingId != null}
-                          label="Dismiss"
-                          loading={dismissingId === suggestion.id}
-                          onPress={() => void onDismissSuggestion(suggestion.id)}
-                          style={styles.approveButton}
-                          variant="secondary"
-                        />
-                      </View>
-                    </View>
-                  );
-                })
-              )}
-            </Card>
-
             <View style={styles.listHeaderRow}>
               <Text style={styles.title}>Geofences</Text>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
@@ -1457,9 +1324,6 @@ function formatCoordinate(value: number | null) {
   return value == null ? 'Unavailable' : value.toFixed(4);
 }
 
-function safeText(value: unknown, fallback: string) {
-  return typeof value === 'string' && value.trim() ? value.trim() : fallback;
-}
 
 type GeolocationLike = {
   getCurrentPosition: (
@@ -1479,18 +1343,6 @@ const makeStyles = (c: ThemeColors) =>
   StyleSheet.create({
     screen: { backgroundColor: c.pageBackground, flex: 1 },
     list: { gap: spacing.sm, padding: spacing.md },
-    suggestionsPanel: { gap: spacing.md },
-    suggestionsHeader: { alignItems: 'center', flexDirection: 'row', gap: spacing.sm },
-    aiState: {
-      alignItems: 'center',
-      backgroundColor: c.surfaceAlt,
-      borderRadius: radius.md,
-      gap: spacing.sm,
-      justifyContent: 'center',
-      minHeight: 84,
-      padding: spacing.md,
-    },
-    aiError: { color: c.danger, fontSize: typography.caption, textAlign: 'center' },
     title: { color: c.textPrimary, fontSize: typography.title, fontWeight: '900' },
     subtitle: { color: c.textSecondary, fontSize: typography.caption, lineHeight: 17 },
     listHeaderRow: {
@@ -1639,16 +1491,7 @@ const makeStyles = (c: ThemeColors) =>
       justifyContent: 'center',
       width: 34,
     },
-    suggestionCard: {
-      backgroundColor: c.accentSoft,
-      padding: spacing.md,
-      borderRadius: radius.md,
-      gap: spacing.md,
-      borderColor: c.accent,
-      borderWidth: StyleSheet.hairlineWidth * 2,
-    },
     approveButton: { alignSelf: 'flex-start', height: 40, width: 156 },
-    suggestionActions: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
     fab: {
       alignItems: 'center',
       backgroundColor: c.primary,

@@ -7,7 +7,6 @@ export const P = {
   DELETE_DEVICE: 'delete_device',
   RENEW_DEVICE: 'renew_device',
   MANAGE_USERS: 'manage_users',
-  MANAGE_DRIVERS: 'manage_drivers',
   MANAGE_GROUPS: 'manage_groups',
   MANAGE_PROJECTS: 'manage_projects',
   MANAGE_GEOFENCES: 'manage_geofences',
@@ -23,5 +22,4 @@ export const P = {
   MANAGE_BRANDING: 'manage_branding',
   VIEW_AUDIT_LOGS: 'view_audit_logs',
   MANAGE_SERVER_SETTINGS: 'manage_server_settings',
-  DRIVER_DUTY: 'driver_duty',
 } as const;

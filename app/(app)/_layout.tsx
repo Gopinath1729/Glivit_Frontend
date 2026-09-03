@@ -16,6 +16,7 @@ import {
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
+import { MobileGpsTrackingGate } from '@/src/components/MobileGpsTrackingGate';
 
 function HeaderBackButton() {
   const { colors: c } = useTheme();
@@ -117,6 +118,7 @@ export default function AppLayout() {
 
   return (
     <View style={{ flex: 1, backgroundColor: c.pageBackground }}>
+      <MobileGpsTrackingGate />
       <Tabs
         key={`tenant-${tenantEpoch}`}
         // @ts-expect-error - sceneContainerStyle is supported at runtime by BottomTabNavigator but missing in Expo Router's Tabs typings
@@ -225,25 +227,25 @@ export default function AppLayout() {
           name="management"
           options={{
             title: 'Management',
+            headerTitle: 'Management',
             tabBarIcon: ({ focused }) => renderTabIcon('shield-account-outline', focused),
           }}
         />
-        
-        {/* Hide other drawer routes from bottom navigation tabs */}
+
+        {/* Administration routes */}
         <Tabs.Screen
-          name="ai-chat"
+          name="users"
           options={{
             href: null,
-            title: 'AI Command Centre',
+            title: 'User Management',
             headerLeft: () => <HeaderBackButton />,
-            tabBarStyle: { display: 'none' },
           }}
         />
         <Tabs.Screen
           name="manage-tenants"
           options={{
             href: null,
-            title: 'Manage Tenants',
+            title: 'Tenant Management',
             headerLeft: () => <HeaderBackButton />,
           }}
         />
@@ -255,6 +257,8 @@ export default function AppLayout() {
             headerLeft: () => <HeaderBackButton />,
           }}
         />
+
+        {/* Hide other drawer routes from bottom navigation tabs */}
         <Tabs.Screen
           name="settings"
           options={{
@@ -264,11 +268,12 @@ export default function AppLayout() {
           }}
         />
         <Tabs.Screen
-          name="timeline"
+          name="change-password"
           options={{
             href: null,
-            title: 'Your Timeline',
+            title: 'Change Password',
             headerLeft: () => <HeaderBackButton />,
+            tabBarStyle: { display: 'none' },
           }}
         />
       </Tabs>

@@ -7,8 +7,10 @@ import {
   StyleSheet,
   Text,
   TouchableOpacity,
+  useWindowDimensions,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { KeyboardLift } from '@/src/components/ui/KeyboardAwareForm';
 import { TextField } from '@/src/components/ui/TextField';
@@ -49,6 +51,29 @@ export function SearchableDropdown({
   const styles = useMemo(() => makeStyles(c), [c]);
 
   const [modalVisible, setModalVisible] = useState(false);
+  const insets = useSafeAreaInsets();
+  const { height: windowHeight } = useWindowDimensions();
+
+  /**
+   * The sheet fits its content and stops at the usable-screen ceiling.
+   *
+   * `maxHeight: '80%'` was 80% of the RAW window, which on a device with a tall
+   * status bar and a gesture bar is more than 80% of what anyone can see, and it
+   * paid no attention to where the bottom navigation actually sits. Measuring
+   * against the window minus the insets is what makes the ceiling mean the same
+   * thing on both platforms.
+   */
+  const sheetMaxHeight = Math.max(240, (windowHeight - insets.top - insets.bottom) * 0.8);
+
+  /**
+   * The gap above the bottom navigation.
+   *
+   * This was a hardcoded `spacing.xl`, which on a device with no gesture bar is
+   * simply a block of empty surface under the last row - the white space in the
+   * report. It is now exactly the system inset plus one small gutter, so the
+   * sheet ends where the navigation begins and nowhere further up.
+   */
+  const sheetPaddingBottom = insets.bottom + spacing.sm;
   const [searchQuery, setSearchQuery] = useState('');
 
   const selectedOption = useMemo(
@@ -148,7 +173,11 @@ export function SearchableDropdown({
               where the keyboard lands -- and the search field autofocuses, so
               without this the sheet opens already hidden behind the IME. */}
           <KeyboardLift useSafeArea={false}>
-          <View style={styles.modalCard}>
+          <View
+            style={[
+              styles.modalCard,
+              { maxHeight: sheetMaxHeight, paddingBottom: sheetPaddingBottom },
+            ]}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>{label || 'Select'}</Text>
               <Pressable
@@ -171,6 +200,11 @@ export function SearchableDropdown({
             </View>
 
             <FlatList
+              // No flex and no fixed height: the list is as tall as its rows
+              // until it reaches the card's ceiling, at which point it scrolls.
+              // Two vehicles therefore give a short sheet and twenty give a
+              // scrollable one, with nothing to configure between them.
+              bounces={false}
               contentContainerStyle={styles.listContent}
               data={filteredOptions}
               keyExtractor={(item) => String(item.id)}
@@ -286,8 +320,8 @@ const makeStyles = (c: ThemeColors) =>
       backgroundColor: c.surface,
       borderTopLeftRadius: radius.xl,
       borderTopRightRadius: radius.xl,
-      maxHeight: '80%',
-      paddingBottom: spacing.xl,
+      // maxHeight and paddingBottom are applied at render from the safe-area
+      // insets and the window size; a static value here cannot know either.
       paddingHorizontal: spacing.md,
       paddingTop: spacing.md,
     },

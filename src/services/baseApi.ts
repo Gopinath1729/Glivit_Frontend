@@ -1,22 +1,19 @@
+import { COMMON_API_HEADERS, env } from '@/src/config/env';
+import { authStorage } from '@/src/services/authStorage';
 import {
-  createApi,
-  fetchBaseQuery,
+  createFetchBaseQuery,
   type BaseQueryApi,
   type BaseQueryFn,
   type FetchArgs,
   type FetchBaseQueryError,
-} from '@reduxjs/toolkit/query/react';
-
-import { env } from '@/src/config/env';
-import { authStorage } from '@/src/services/authStorage';
-import {
-  normalizeCompanyCode,
-} from '@/src/services/tenantIdentity';
-import { clearSession, setCredentials, type AuthState } from '@/src/store/authSlice';
-import type { TenantState } from '@/src/store/tenantSlice';
+} from '@/src/services/httpQuery';
+import { createApiClient } from '@/src/services/queryClient';
+import { normalizeCompanyCode } from '@/src/services/tenantIdentity';
+import { clearSession, setCredentials, type AuthState } from '@/src/store/authState';
+import { store, type AppAction, type RootState } from '@/src/store/store';
 import type { ApiResponse, TokenResponse } from '@/src/types/api';
 
-type StateShape = { auth: AuthState; tenant: TenantState };
+type Api = BaseQueryApi<RootState, AppAction>;
 
 /** Header the backend compares against the tenant signed into the access token. */
 const TENANT_HEADER = 'X-Tenant-Id';
@@ -60,11 +57,14 @@ const cancellableFetch: typeof fetch = (input, init) => {
   });
 };
 
-const rawBaseQuery = fetchBaseQuery({
+const rawBaseQuery = createFetchBaseQuery<RootState, AppAction>({
   baseUrl: env.apiBaseUrl,
   fetchFn: cancellableFetch,
   prepareHeaders: (headers, { getState }) => {
-    const state = getState() as StateShape;
+    for (const [name, value] of Object.entries(COMMON_API_HEADERS)) {
+      headers.set(name, value);
+    }
+    const state = getState();
     if (state.auth.accessToken) {
       headers.set('Authorization', `Bearer ${state.auth.accessToken}`);
     }
@@ -104,23 +104,25 @@ function sessionMatches(auth: AuthState, snapshot: SessionSnapshot): boolean {
   );
 }
 
-async function clearCurrentSession(api: BaseQueryApi, snapshot?: SessionSnapshot) {
-  const auth = (api.getState() as StateShape).auth;
+async function clearCurrentSession(api: Api, snapshot?: SessionSnapshot) {
+  const auth = api.getState().auth;
   if (snapshot && !sessionMatches(auth, snapshot)) return;
   api.dispatch(clearSession());
-  api.dispatch(baseApi.util.resetApiState());
+  baseApi.util.resetApiState();
   await authStorage.clearSession().catch(() => undefined);
 }
 
-const baseQueryWithReauth: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQueryError> = async (
-  args,
-  api,
-  extraOptions
-) => {
+const baseQueryWithReauth: BaseQueryFn<
+  string | FetchArgs,
+  unknown,
+  FetchBaseQueryError,
+  RootState,
+  AppAction
+> = async (args, api, extraOptions) => {
   let result = await rawBaseQuery(args, api, extraOptions);
 
   if (result.error?.status === 401 && !isAuthEndpoint(args)) {
-    const auth = (api.getState() as StateShape).auth;
+    const auth = api.getState().auth;
     if (!auth.accessToken || !auth.user || !auth.user.tenantId) {
       await clearCurrentSession(api);
       return result;
@@ -210,18 +212,20 @@ export function unwrap<T>(response: ApiResponse<T>): T {
   return response.data as T;
 }
 
-const hybridBaseQuery: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQueryError> = async (
-  args,
-  api,
-  extraOptions
-) => {
-  const before = (api.getState() as StateShape).tenant;
+const hybridBaseQuery: BaseQueryFn<
+  string | FetchArgs,
+  unknown,
+  FetchBaseQueryError,
+  RootState,
+  AppAction
+> = async (args, api, extraOptions) => {
+  const before = api.getState().tenant;
   const issuedEpoch = before?.epoch ?? 0;
   const issuedTenantId = before?.activeTenantId ?? null;
 
   const result = await baseQueryWithReauth(args, api, extraOptions);
 
-  const after = (api.getState() as StateShape).tenant;
+  const after = api.getState().tenant;
   const tenantChanged =
     (after?.epoch ?? 0) !== issuedEpoch || (after?.activeTenantId ?? null) !== issuedTenantId;
   if (tenantChanged && !isTenantSwitchEndpoint(args) && !isAuthEndpoint(args)) {
@@ -230,31 +234,28 @@ const hybridBaseQuery: BaseQueryFn<string | FetchArgs, unknown, FetchBaseQueryEr
         status: 'CUSTOM_ERROR',
         error: TENANT_CHANGED_ERROR,
         data: TENANT_CHANGED_ERROR,
-      } as FetchBaseQueryError,
+      },
     };
   }
 
   return result;
 };
 
-export const baseApi = createApi({
-  reducerPath: 'api',
+export const baseApi = createApiClient<RootState, AppAction>({
   baseQuery: hybridBaseQuery,
+  getApi: () => ({ getState: store.getState, dispatch: store.dispatch }),
   tagTypes: [
     'Audit',
     'Command',
     'Dashboard',
     'Device',
-    'Driver',
     'Event',
     'Geofence',
     'Group',
-    'Project',
     'Report',
     'Settings',
     'Tenant',
     'User',
     'VehicleDocument',
   ],
-  endpoints: () => ({}),
 });

@@ -18,6 +18,7 @@ type DrawerRoute =
   | '/geofences'
   | '/reports'
   | '/management'
+  | '/users'
   | '/manage-tenants'
   | '/settings';
 
@@ -35,6 +36,11 @@ const LINKS: DrawerLink[] = [
   { label: 'Geofences', icon: 'vector-polygon', route: '/geofences', permission: P.MANAGE_GEOFENCES, module: 'geofences' },
   { label: 'Reports', icon: 'file-chart-outline', route: '/reports', permission: P.VIEW_REPORTS, module: 'reports' },
   { label: 'Management', icon: 'shield-account-outline', route: '/management', permission: P.MANAGE_DEVICES },
+];
+
+const ADMIN_LINKS: DrawerLink[] = [
+  { label: 'User Management', icon: 'account-group-outline', route: '/users', permission: P.MANAGE_USERS },
+  { label: 'Tenant Management', icon: 'office-building-cog-outline', route: '/manage-tenants', permission: P.MANAGE_TENANTS },
 ];
 
 function HeaderBackground() {
@@ -79,16 +85,22 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
       s.auth.user?.homeTenantId != null && s.auth.user.homeTenantId !== s.tenant.activeTenantId
   );
 
+  const isSuperAdmin = user?.role === 'SUPER_ADMIN';
+  const isAdmin = user?.role === 'ADMIN' || isSuperAdmin;
   const canViewAll = useHasPermission(P.VIEW_ALL_VEHICLES);
   const canLive = useHasPermission(P.VIEW_LIVE_LOCATION);
   const canGeofence = useHasPermission(P.MANAGE_GEOFENCES);
   const canReports = useHasPermission(P.VIEW_REPORTS);
   const canManageDevices = useHasPermission(P.MANAGE_DEVICES);
+  const canManageUsers = useHasPermission(P.MANAGE_USERS) || isAdmin;
+  const canManageTenants = useHasPermission(P.MANAGE_TENANTS) || isSuperAdmin;
   const permissionMap: Record<string, boolean> = { [P.VIEW_ALL_VEHICLES]: canViewAll };
   permissionMap[P.VIEW_LIVE_LOCATION] = canLive;
   permissionMap[P.MANAGE_GEOFENCES] = canGeofence;
   permissionMap[P.VIEW_REPORTS] = canReports;
   permissionMap[P.MANAGE_DEVICES] = canManageDevices;
+  permissionMap[P.MANAGE_USERS] = canManageUsers;
+  permissionMap[P.MANAGE_TENANTS] = canManageTenants;
   const enabledModules = new Set((tenant?.enabledModules ?? []).map((m) => m.toLowerCase()));
 
   const activeRouteName = props.state.routeNames[props.state.index];
@@ -109,13 +121,13 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
     router.push(route as never);
   };
 
-
-
   const displayName = user?.name ?? user?.username ?? 'Fleet user';
   const tenantLabel = activeTenantName ?? tenant?.appName ?? tenant?.name ?? 'Glivt Fleet';
   const companySublabel = activeCompanyName ?? user?.companyName ?? tenant?.name ?? 'Fleet management';
   const tenantCodeLabel = activeTenantCode ?? companyCode ?? '—';
   const roleLabel = formatRole(user?.role) || 'Admin';
+
+  const adminVisible = visible(ADMIN_LINKS);
 
   return (
     <View style={styles.root}>
@@ -169,6 +181,22 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
             onPress={() => go(link.route)}
           />
         ))}
+
+        {adminVisible.length > 0 ? (
+          <>
+            <View style={styles.divider} />
+            <Text style={styles.sectionHeading}>ADMINISTRATION</Text>
+            {adminVisible.map((link) => (
+              <DrawerRow
+                active={activeRouteName === routeKey(link.route)}
+                icon={link.icon}
+                key={link.route}
+                label={link.label}
+                onPress={() => go(link.route)}
+              />
+            ))}
+          </>
+        ) : null}
       </ScrollView>
     </View>
   );
@@ -388,4 +416,3 @@ const makeStyles = (c: ThemeColors) =>
       paddingTop: spacing.xs,
     },
   });
-

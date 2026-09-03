@@ -1,4 +1,5 @@
 import * as SecureStore from 'expo-secure-store';
+import * as SystemUI from 'expo-system-ui';
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { useColorScheme } from 'react-native';
 
@@ -100,7 +101,24 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     }
   }, [backendSettings]);
 
-  const scheme: Scheme = mode === 'system' ? 'dark' : mode;
+  // React Native can briefly report a null system scheme while the app is
+  // starting. Treat that as light instead of unexpectedly forcing dark mode.
+  const scheme: Scheme = mode === 'system' ? (systemScheme === 'dark' ? 'dark' : 'light') : mode;
+
+  const colors = useMemo(
+    () =>
+      buildColors(scheme, {
+        primary: customPrimaryColor || tenant?.primaryColor || undefined,
+        secondary: tenant?.secondaryColor || undefined,
+      }),
+    [scheme, customPrimaryColor, tenant?.primaryColor, tenant?.secondaryColor]
+  );
+
+  // Keep the native root surface in step with React Navigation. This prevents
+  // white flashes around route transitions, safe areas and modal dismissal.
+  useEffect(() => {
+    SystemUI.setBackgroundColorAsync(colors.pageBackground).catch(() => undefined);
+  }, [colors.pageBackground]);
 
   const setMode = useCallback((next: ThemeMode) => {
     setModeState(next);
@@ -138,10 +156,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   }, [scheme, setMode]);
 
   const value = useMemo<ThemeContextValue>(() => {
-    const colors = buildColors(scheme, {
-      primary: customPrimaryColor || tenant?.primaryColor || undefined,
-      secondary: tenant?.secondaryColor || undefined,
-    });
     return {
       mode,
       scheme,
@@ -155,7 +169,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       autoFollowVehicle,
       setAutoFollowVehicle,
     };
-  }, [scheme, mode, customPrimaryColor, tenant?.primaryColor, tenant?.secondaryColor, setMode, toggle, setPrimaryColor, autoFollowVehicle, setAutoFollowVehicle]);
+  }, [scheme, mode, colors, setMode, toggle, setPrimaryColor, autoFollowVehicle, setAutoFollowVehicle]);
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }

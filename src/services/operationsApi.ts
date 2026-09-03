@@ -6,26 +6,31 @@ import type {
   GeofenceDto,
   GroupDto,
   ManagedUserDto,
+  MemberStatus,
   PageResponse,
-  ProjectDto,
   ReportContent,
   ReportDto,
   Role,
   SettingsDto,
 } from '@/src/types/api';
 
-export type ProjectRequest = { name: string; description?: string; status?: string };
 export type GroupRequest = { name: string; parentId?: number; managerId?: number };
+/**
+ * Creating or editing a member.
+ *
+ * No `tenantId` and no `password`. The tenant comes from the admin's own token
+ * server-side, and the member chooses their own password during activation -
+ * sending either from here would be ignored at best and a hole at worst.
+ */
 export type UserRequest = {
-  username: string;
-  password?: string;
   name: string;
-  email?: string;
-  mobile?: string;
+  /** The member's identity: what they sign in with and where their code goes. */
+  email: string;
+  mobile: string;
   address?: string;
   role: Role;
   managerId?: number;
-  status?: string;
+  status?: MemberStatus;
   accountExpiry?: string;
   permissions?: Record<string, boolean>;
 };
@@ -71,25 +76,6 @@ export type SettingsRequest = Partial<Omit<SettingsDto, 'updatedAt'>>;
 export const operationsApi = baseApi.injectEndpoints({
   overrideExisting: true,
   endpoints: (build) => ({
-    getProjects: build.query<ProjectDto[], void>({
-      query: () => ({ url: '/projects' }),
-      transformResponse: (response: ApiResponse<ProjectDto[]>) => unwrap(response),
-      providesTags: ['Project'],
-    }),
-    createProject: build.mutation<ProjectDto, ProjectRequest>({
-      query: (body) => ({ url: '/projects', method: 'POST', body }),
-      transformResponse: (response: ApiResponse<ProjectDto>) => unwrap(response),
-      invalidatesTags: ['Project'],
-    }),
-    updateProject: build.mutation<ProjectDto, { id: number; body: ProjectRequest }>({
-      query: ({ id, body }) => ({ url: `/projects/${id}`, method: 'PUT', body }),
-      transformResponse: (response: ApiResponse<ProjectDto>) => unwrap(response),
-      invalidatesTags: ['Project'],
-    }),
-    deleteProject: build.mutation<void, number>({
-      query: (id) => ({ url: `/projects/${id}`, method: 'DELETE' }),
-      invalidatesTags: ['Project'],
-    }),
     getGroups: build.query<GroupDto[], void>({
       query: () => ({ url: '/groups' }),
       transformResponse: (response: ApiResponse<GroupDto[]>) => unwrap(response),
@@ -111,18 +97,16 @@ export const operationsApi = baseApi.injectEndpoints({
     createUser: build.mutation<ManagedUserDto, UserRequest>({
       query: (body) => ({ url: '/users', method: 'POST', body }),
       transformResponse: (response: ApiResponse<ManagedUserDto>) => unwrap(response),
-      // Creating a user with the DRIVER role provisions that user's driver
-      // record server-side, so the driver-backed caches refresh too.
-      invalidatesTags: ['User', 'Driver', 'Audit'],
+      invalidatesTags: ['User', 'Audit'],
     }),
     updateUser: build.mutation<ManagedUserDto, { id: number; body: UserRequest }>({
       query: ({ id, body }) => ({ url: `/users/${id}`, method: 'PUT', body }),
       transformResponse: (response: ApiResponse<ManagedUserDto>) => unwrap(response),
-      invalidatesTags: ['User', 'Driver', 'Audit'],
+      invalidatesTags: ['User', 'Audit'],
     }),
     deleteUser: build.mutation<void, number>({
       query: (id) => ({ url: `/users/${id}`, method: 'DELETE' }),
-      invalidatesTags: ['User', 'Driver', 'Audit'],
+      invalidatesTags: ['User', 'Audit'],
     }),
     getEvents: build.query<PageResponse<EventDto>, { page?: number; size?: number; deviceId?: number }>({
       query: ({ page = 0, size = 20, deviceId }) => ({
@@ -223,9 +207,6 @@ export const {
   useAcknowledgeEventMutation,
   useCreateGeofenceMutation,
   useCreateGroupMutation,
-  useCreateProjectMutation,
-  useUpdateProjectMutation,
-  useDeleteProjectMutation,
   useCreateReportMutation,
   useCreateUserMutation,
   useDeleteGeofenceMutation,
@@ -236,7 +217,6 @@ export const {
   useGetEventsQuery,
   useGetGeofencesQuery,
   useGetGroupsQuery,
-  useGetProjectsQuery,
   useGetReportContentQuery,
   useGetReportsQuery,
   useLazyGetReportContentQuery,

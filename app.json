@@ -2,6 +2,7 @@
   "expo": {
     "name": "GLIVT",
     "slug": "glivt",
+    "description": "Secure live GPS vehicle tracking, trip history, geofences, speed alerts, reports, and device health.",
     "version": "1.0.0",
     "orientation": "default",
     "icon": "./assets/images/icon.png",
@@ -12,26 +13,21 @@
       "bundleIdentifier": "com.vehiclemoment.tracker",
       "supportsTablet": true,
       "infoPlist": {
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "Allow Glivt to securely track the selected vehicle while Mobile GPS is active.",
-        "NSLocationAlwaysUsageDescription": "Allow Glivt to securely track the selected vehicle while Mobile GPS is active.",
         "NSLocationWhenInUseUsageDescription": "Your location is shown on the tracking map so you can see where you are relative to the fleet."
       }
     },
     "android": {
       "package": "com.vehiclemoment.tracker",
+      "versionCode": 1,
       "adaptiveIcon": {
         "backgroundColor": "#0B161E",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "permissions": [
-        "INTERNET",
-        "ACCESS_NETWORK_STATE",
-        "ACCESS_FINE_LOCATION",
-        "ACCESS_COARSE_LOCATION"
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO"
       ],
-      "usesCleartextTraffic": false,
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false
     },
@@ -57,15 +53,16 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Allow Glivt to securely track the selected vehicle while Mobile GPS is active.",
-          "locationWhenInUsePermission": "Allow Glivt to use this phone as the selected vehicle's GPS source.",
-          "isAndroidBackgroundLocationEnabled": true,
-          "isAndroidForegroundServiceEnabled": true,
-          "isIosBackgroundLocationEnabled": true
+          "locationWhenInUsePermission": "Allow Glivt to show your position relative to tracked vehicles and geofences."
         }
       ],
       "expo-secure-store",
-      "expo-image-picker",
+      [
+        "expo-image-picker",
+        {
+          "microphonePermission": false
+        }
+      ],
       "@react-native-community/datetimepicker"
     ],
     "experiments": {

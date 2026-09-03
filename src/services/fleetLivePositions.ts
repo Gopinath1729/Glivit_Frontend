@@ -1,189 +1,305 @@
-import { useEffect, useRef, useState, type MutableRefObject } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 
-import { env } from '@/src/config/env';
-import { useAppSelector } from '@/src/store/hooks';
+import { normalizeHeading } from '@/src/services/geoMath';
+import { GpsRollingWindow } from '@/src/services/gpsPipeline';
+import { traceCoord, traceGps } from '@/src/services/gpsDiagnostics';
+import { useAppDispatch, useAppSelector } from '@/src/store/hooks';
+import { liveVehiclesSeeded, livePositionReceived } from '@/src/store/liveVehiclesState';
 import type { DeviceSummary } from '@/src/types/api';
-import { openSse } from './sseClient';
-import type { LivePositionEvent } from './livePositions';
+import {
+  useLivePositionStream,
+  type LivePositionEvent,
+  type LiveStreamState,
+} from './livePositionStream';
+import { validateLivePositionEvent } from './livePositions';
+
+/**
+ * Recent accepted fixes per device, used to tell a real departure from noise.
+ *
+ * Deliberately this screen's OWN windows rather than the tracking screen's: the
+ * two hold independent anchors, and sharing one window would have both screens
+ * pushing the same fix into it whenever both are mounted.
+ */
+const windows = new Map<number, GpsRollingWindow>();
+
+function windowFor(deviceId: number): GpsRollingWindow {
+  let window = windows.get(deviceId);
+  if (!window) {
+    window = new GpsRollingWindow();
+    windows.set(deviceId, window);
+  }
+  return window;
+}
 
 /**
  * Live positions for the WHOLE fleet, for the All Vehicles Live Map.
  *
- * Maintains a target position per device in a ref (read by the map's animation
- * loop — no re-render per update, so the map never flickers or remounts):
- *   - Real mode: subscribes to the tenant SSE position stream and updates the
- *     matching device as fixes arrive.
- *   - Dev demo mode: advances RUNNING/IDLE vehicles along their heading on a
- *     timer; STOPPED/OFFLINE stay put. Forced off in production via env.demoMode.
+ * <p>A target position per device is kept in a ref, read by the map's animation
+ * loop, so the map does not re-render per fix and never flickers or remounts.
+ * The same updates also go into the {@code liveVehicles} store state, which is
+ * what any React-driven consumer (lists, counts, status pills) reads.
  *
- * Seeded from the device list so every authorised vehicle shows immediately.
+ * <h3>Vehicles are added, updated, and never removed</h3>
+ * A target is created once per device and mutated in place afterwards. Nothing
+ * in this file deletes an entry: not a rejected fix, not a dropped stream, not a
+ * device-list refetch that came back without a position. A vehicle leaves the
+ * map only when the tenant changes, which clears the whole map at once. That is
+ * the difference between a marker going stale and a marker disappearing.
+ *
+ * <h3>What is drawn</h3>
+ * The backend's road-matched coordinate, when it matched the fix. There is no
+ * client-side snapping: matching a coordinate on its own puts adjacent fixes on
+ * different parallel roads, which is what made stationary markers twitch between
+ * carriageways.
  */
-
-import { resolveTravelHeading } from '@/src/services/geoMath';
-import { snapCoordinateToRoadSync } from './roadSnapping';
-import { getSimulatedVehicle } from './vehicleSimulator';
 
 export type FleetTarget = {
   deviceId: number;
+  /** The coordinate to draw: road-matched where available. */
   latitude: number;
   longitude: number;
-  speed: number;
+  /** The reported coordinate, kept for auditing. Never drawn. */
+  rawLatitude: number;
+  rawLongitude: number;
+  /** True when latitude/longitude came from the road matcher. */
+  matched: boolean;
+  speedKmh: number;
+  accuracyMeters: number | null;
+  ignition: boolean | null;
+  gpsValid: boolean;
   heading: number;
   state: string;
   /** True for states that should animate smoothly between fixes. */
   moving: boolean;
   updatedAt: number;
+  /**
+   * GPS timestamp of the fix this target came from, in epoch ms.
+   *
+   * Compared before every update so a delayed packet - from a replayed device
+   * buffer, or from two briefly-overlapping streams during a reconnect - can
+   * never drag a marker back to where the vehicle used to be.
+   */
+  sourceTime: number;
 };
 
 export type FleetLive = {
   targetsRef: MutableRefObject<Map<number, FleetTarget>>;
   connected: boolean;
-  /** Bumped whenever the set of known vehicles changes (for initial fit). */
+  stream: LiveStreamState;
+  /** Bumped whenever a target changes, so projections can invalidate. */
   vehicleCount: number;
 };
 
 const MOVING_STATES = new Set(['RUNNING', 'MOVING']);
-const DEMO_STEP_MS = 1200;
+/** Below this the vehicle is parked and its coordinate is held, not followed. */
 
-function makeTarget(v: DeviceSummary, previous?: FleetTarget): FleetTarget | null {
-  if (v.latitude == null || v.longitude == null) return null;
-  const snap = snapCoordinateToRoadSync(v.latitude, v.longitude, v.course);
-  const latitude = snap.snapped ? snap.latitude : v.latitude;
-  const longitude = snap.snapped ? snap.longitude : v.longitude;
+function usable(latitude: number | null | undefined, longitude: number | null | undefined): boolean {
+  return (
+    latitude != null &&
+    longitude != null &&
+    Number.isFinite(latitude) &&
+    Number.isFinite(longitude) &&
+    !(latitude === 0 && longitude === 0)
+  );
+}
+
+/** Epoch ms of a timestamp, or 0 when it carries none. */
+function epochMs(timestamp?: string | null): number {
+  if (!timestamp) return 0;
+  const parsed = Date.parse(timestamp);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+/**
+ * Seed a target from the device list.
+ *
+ * Only used for a vehicle the stream has not reported yet. An existing target is
+ * refreshed for its metadata but never for its position: the list is a
+ * periodically-refetched snapshot and is older than the stream, so letting it
+ * write a coordinate would drag a moving marker backwards on every refetch.
+ */
+function seedTarget(device: DeviceSummary): FleetTarget | null {
+  if (!usable(device.latitude, device.longitude)) return null;
+  const latitude = device.latitude as number;
+  const longitude = device.longitude as number;
   return {
-    deviceId: v.id,
+    deviceId: device.id,
     latitude,
     longitude,
-    speed: v.speed,
-    // Direction of travel, derived from movement since this vehicle's own previous
-    // coordinate. Never from the snapped road bearing, which is direction-agnostic.
-    heading: resolveTravelHeading({
-      previous,
-      latitude,
-      longitude,
-      reportedCourse: v.course,
-      lastHeading: previous?.heading,
-    }),
-    state: v.state,
-    moving: MOVING_STATES.has(v.state),
+    rawLatitude: latitude,
+    rawLongitude: longitude,
+    matched: false,
+    speedKmh: device.speed ?? 0,
+    accuracyMeters: null,
+    ignition: device.ignition ?? null,
+    gpsValid: device.gpsValid,
+    heading: normalizeHeading(device.course, 0),
+    state: device.state,
+    moving: MOVING_STATES.has(device.state),
     updatedAt: Date.now(),
+    sourceTime: epochMs(device.lastUpdate),
   };
 }
 
 export function useFleetLivePositions(seed: DeviceSummary[], enabled = true): FleetLive {
-  const token = useAppSelector((s) => s.auth.accessToken);
+  const dispatch = useAppDispatch();
   const tenantEpoch = useAppSelector((s) => s.tenant.epoch);
   const targetsRef = useRef<Map<number, FleetTarget>>(new Map());
-  const [connected, setConnected] = useState(false);
   const [vehicleCount, setVehicleCount] = useState(0);
 
   // A tenant switch clears the marker map itself, not just the subscription. The
-  // animation loop reads this ref directly, so leaving the previous tenant's targets
-  // in place would keep their vehicles on the map until the new list arrived.
+  // animation loop reads this ref directly, so leaving the previous tenant's
+  // targets in place would keep their vehicles on the map until the new list
+  // arrived. This is the ONLY thing in this hook that removes a target.
   useEffect(() => {
     targetsRef.current.clear();
     setVehicleCount(0);
-    setConnected(false);
   }, [tenantEpoch]);
 
   // Seed / merge the known vehicles from the device list.
   useEffect(() => {
     const map = targetsRef.current;
     let changed = false;
-    for (const v of seed) {
-      const target = makeTarget(v, map.get(v.id));
-      if (!target) continue;
-      if (!map.has(v.id)) {
-        map.set(v.id, target);
-        changed = true;
-      } else {
-        // Keep the live-animated position, but refresh state/speed metadata.
-        const cur = map.get(v.id)!;
-        cur.state = v.state;
-        cur.moving = MOVING_STATES.has(v.state);
+    for (const device of seed) {
+      const existing = map.get(device.id);
+      if (existing) {
+        // The polled roster is older than SSE. It may refresh names and other
+        // metadata in the React record, but it must never overwrite a fresher
+        // live state here (STOPPED -> stale RUNNING was visible every poll).
+        continue;
       }
+      const target = seedTarget(device);
+      if (!target) continue;
+      map.set(device.id, target);
+      changed = true;
     }
-    if (changed) setVehicleCount(map.size);
-  }, [seed]);
+    if (changed) setVehicleCount((count) => count + 1);
 
-  useEffect(() => {
-    if (!enabled) return;
+    dispatch(
+      liveVehiclesSeeded(
+        seed.map((device) => ({
+          deviceId: device.id,
+          vehicleId: device.vehicleId ?? null,
+          latitude: device.latitude ?? null,
+          longitude: device.longitude ?? null,
+          speedKmh: device.speed ?? null,
+          course: device.course ?? null,
+          state: device.state ?? null,
+          address: device.address ?? null,
+          lastUpdate: device.lastUpdate ?? null,
+        }))
+      )
+    );
+  }, [dispatch, seed]);
 
-    // Dev demo: move running/idle vehicles along their heading with gentle turns.
-    if (env.demoMode) {
-      setConnected(true);
-      const timer = setInterval(() => {
-        const map = targetsRef.current;
-        map.forEach((v, id) => {
-          const sim = getSimulatedVehicle(
-            id,
-            v.latitude,
-            v.longitude,
-            v.heading,
-            v.state,
-            v.moving
-          );
-          map.set(id, {
-            ...v,
-            latitude: sim.latitude,
-            longitude: sim.longitude,
-            speed: sim.speed,
-            heading: sim.heading,
-            updatedAt: Date.now(),
-          });
-        });
-      }, DEMO_STEP_MS);
-      return () => clearInterval(timer);
-    }
+  const onPosition = useCallback(
+    (event: LivePositionEvent) => {
+      const map = targetsRef.current;
+      const previous = map.get(event.deviceId);
 
-    if (!env.backendBaseUrl) return;
-
-    const connection = openSse(`${env.apiBaseUrl}/positions/stream`, token ?? null, {
-      onOpen: () => setConnected(true),
-      onError: () => setConnected(false),
-      onEvent: (name, data) => {
-        if (name !== 'POSITION') return;
-        let event: LivePositionEvent;
-        try {
-          event = JSON.parse(data) as LivePositionEvent;
-        } catch {
-          return;
+      // A state-only refresh moves the status pill and nothing else. It carries
+      // the coordinate and GPS time this target already holds, so putting it
+      // through the GPS validator only ever produced a duplicate-timestamp
+      // rejection - and the status change was discarded with it.
+      if (!event.positionUpdate) {
+        if (previous && event.state) {
+          previous.state = event.state;
+          previous.moving = MOVING_STATES.has(event.state);
+          setVehicleCount((count) => count + 1);
         }
-        const map = targetsRef.current;
-        const previous = map.get(event.deviceId);
-        const existed = previous != null;
-        const state = event.state ?? previous?.state ?? 'NO_DATA';
-        const snap = snapCoordinateToRoadSync(event.latitude, event.longitude, event.course);
-        const latitude = snap.snapped ? snap.latitude : event.latitude;
-        const longitude = snap.snapped ? snap.longitude : event.longitude;
-        map.set(event.deviceId, {
-          deviceId: event.deviceId,
-          latitude,
-          longitude,
-          speed: event.speed,
-          // Bearing from this vehicle's previous fix to the new one. A fix that has
-          // barely moved, or one with poor reported accuracy, holds the current
-          // heading instead of turning the marker on GPS noise.
-          heading: resolveTravelHeading({
-            previous,
-            latitude,
-            longitude,
-            reportedCourse: event.course,
-            accuracyMeters: event.accuracyMeters ?? null,
-            lastHeading: previous?.heading,
-          }),
-          state,
-          moving: MOVING_STATES.has(state),
-          updatedAt: Date.now(),
+        dispatch(livePositionReceived(event));
+        return;
+      }
+
+      const validation = validateLivePositionEvent(
+        event,
+        previous
+          ? {
+              timestampMs: previous.sourceTime,
+              recordedAt: previous.sourceTime,
+              raw: {
+                latitude: previous.rawLatitude,
+                longitude: previous.rawLongitude,
+              },
+              display: { latitude: previous.latitude, longitude: previous.longitude },
+              bearing: previous.heading,
+              course: previous.heading,
+              speedKmh: previous.speedKmh,
+              ignition: null,
+            }
+          : null,
+        Date.now(),
+        windowFor(event.deviceId)
+      );
+
+      if (!validation.accepted) {
+        traceGps('rejected', event.deviceId, {
+          reason: validation.reason,
+          raw: traceCoord(event.latitude, event.longitude),
+          accuracy: event.accuracyMeters,
+          gpsTime: event.lastGpsTime ?? event.deviceTime,
         });
-        if (!existed) setVehicleCount(map.size);
-      },
-    });
+        return;
+      }
+      dispatch(livePositionReceived(event));
 
-    // Unsubscribes from the previous tenant's fleet stream on a switch, then
-    // reconnects under the new tenant's token.
-    return () => connection.close();
-  }, [enabled, token, tenantEpoch]);
+      const matched = validation.isMatched;
+      const latitude = validation.matched.latitude;
+      const longitude = validation.matched.longitude;
+      const state = event.state ?? previous?.state ?? 'NO_DATA';
+      const rawLatitude = validation.held && previous ? previous.rawLatitude : event.latitude;
+      const rawLongitude = validation.held && previous ? previous.rawLongitude : event.longitude;
 
-  return { targetsRef, connected, vehicleCount };
+      windowFor(event.deviceId).push(
+        { latitude: rawLatitude, longitude: rawLongitude },
+        validation.recordedAt,
+        validation.speedKmh
+      );
+
+      map.set(event.deviceId, {
+        deviceId: event.deviceId,
+        latitude,
+        longitude,
+        rawLatitude,
+        rawLongitude,
+        matched,
+        speedKmh: Number.isFinite(event.speedKmh) ? event.speedKmh : previous?.speedKmh ?? 0,
+        accuracyMeters: event.accuracyMeters,
+        ignition: event.ignition,
+        gpsValid: event.gpsValid,
+        // The bearing the pipeline already resolved for this fix.
+        //
+        // It used to be re-derived here with a second call to the shared
+        // resolver over separately-assembled inputs, which is a second
+        // implementation in everything but name: the two could - and did -
+        // disagree, so the same vehicle faced different ways on the fleet map
+        // and the tracking screen at the same instant. One fix, one bearing,
+        // taken from the stage that measured it.
+        heading: validation.course,
+        state,
+        moving: MOVING_STATES.has(state),
+        updatedAt: Date.now(),
+        sourceTime: validation.recordedAt,
+      });
+
+      traceGps('store', event.deviceId, {
+        raw: traceCoord(event.latitude, event.longitude),
+        matched: traceCoord(event.matchedLatitude, event.matchedLongitude),
+        drawn: traceCoord(latitude, longitude),
+        speedKmh: event.speedKmh,
+        state,
+        connectionState: event.connectionState,
+      });
+
+      setVehicleCount((count) => count + 1);
+    },
+    [dispatch]
+  );
+
+  const stream = useLivePositionStream(onPosition, enabled);
+
+  return useMemo(
+    () => ({ targetsRef, connected: stream.connected, stream, vehicleCount }),
+    [stream, vehicleCount]
+  );
 }

@@ -1,1402 +1,339 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
-  Modal,
   Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
-  TouchableOpacity,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { DeviceCreateForm } from '@/src/components/DeviceCreateForm';
-import { Button } from '@/src/components/ui/Button';
-import { Card } from '@/src/components/ui/Card';
-import { Chip, EmptyLine } from '@/src/components/ui/ModulePrimitives';
-import { KeyboardAwareForm, KeyboardBottomSheet } from '@/src/components/ui/KeyboardAwareForm';
-import { TextField } from '@/src/components/ui/TextField';
+import { MembersPanel } from '@/src/components/MembersPanel';
+import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
+import {
+  ManagementActionButton,
+  ManagementBottomSheet,
+  ManagementCard,
+  ManagementSectionHeader,
+} from '@/src/components/ui/ManagementPrimitives';
+import { EmptyView, ErrorRetryView, LoadingView } from '@/src/components/ui/StateViews';
 import { P } from '@/src/constants/permissions';
 import { apiErrorMessage } from '@/src/services/apiError';
+import { resolveDeviceRecordState } from '@/src/services/deviceState';
+import { useMobileGpsReadiness } from '@/src/services/mobileGpsStatus';
 import {
   useDeleteDeviceMutation,
   useGetAllDevicesQuery,
-  useUpdateDeviceMutation,
+  useGetDeviceQuery,
 } from '@/src/services/devicesApi';
-import {
-  useCreateProjectMutation,
-  useUpdateProjectMutation,
-  useDeleteProjectMutation,
-  useCreateUserMutation,
-  useDeleteUserMutation,
-  useGetProjectsQuery,
-  useGetUsersQuery,
-  useUpdateUserMutation,
-} from '@/src/services/operationsApi';
-import { useAppSelector, useHasPermission, useCanManageTenants } from '@/src/store/hooks';
+import { useHasPermission } from '@/src/store/hooks';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
-import type { ManagedUserDto, ProjectDto } from '@/src/types/api';
-import ManageTenantsScreen from './manage-tenants';
+import type { DeviceSummary } from '@/src/types/api';
 
-type PrimaryTab = 'management' | 'tenants';
-type SubTab = 'devices' | 'users' | 'projects';
-type UserRole = 'ADMIN' | 'COMPANY_USER' | 'DRIVER';
-// Creating an admin or a driver never asks for a password: the account is
-// provisioned without one and the person signs in with their Microsoft account,
-// so there is no credential to type, confirm, or get wrong here.
-type NewUserDraft = {
-  name: string;
-  username: string;
-  mobile: string;
-  role: UserRole;
-};
+type ManagementTab = 'devices' | 'members';
 
-const EMPTY_USER: NewUserDraft = {
-  name: '',
-  username: '',
-  mobile: '',
-  role: 'ADMIN',
-};
-
-const STRONG_PASSWORD = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[^A-Za-z0-9]).{12,72}$/;
-
-function memberRoleLabel(role: ManagedUserDto['role'] | UserRole) {
-  if (role === 'DRIVER') return 'Driver';
-  if (role === 'COMPANY_USER') return 'User';
-  return 'Admin';
-}
-
+/** Tenant administration for registered devices and member accounts. */
 export default function ManagementScreen() {
-  const { colors: c } = useTheme();
-  const insets = useSafeAreaInsets();
+  const { colors: c, stateColors } = useTheme();
   const styles = useMemo(() => makeStyles(c), [c]);
-  const currentUser = useAppSelector((s) => s.auth.user);
-  const canDevices = useHasPermission(P.CREATE_DEVICE);
-  const canUsers = useHasPermission(P.MANAGE_USERS);
-  const canProjects = useHasPermission(P.MANAGE_PROJECTS);
-  const canManageTenants = useCanManageTenants();
-  const canManagement = canDevices || canUsers || canProjects;
-  const availablePrimaryTabs = useMemo(
-    () =>
-      [
-        canManagement && 'management',
-        canManageTenants && 'tenants',
-      ].filter(Boolean) as PrimaryTab[],
-    [canManagement, canManageTenants]
+  const insets = useSafeAreaInsets();
+  const canCreate = useHasPermission(P.CREATE_DEVICE);
+  const canManage = useHasPermission(P.MANAGE_DEVICES);
+  const canDelete = useHasPermission(P.DELETE_DEVICE);
+  const canManageMembers = useHasPermission(P.MANAGE_USERS);
+  const [tab, setTab] = useState<ManagementTab>('devices');
+  const readiness = useMobileGpsReadiness();
+  const devices = useGetAllDevicesQuery(
+    undefined,
+    { pollingInterval: 30_000, skipPollingIfUnfocused: true }
   );
-  const [primaryTab, setPrimaryTab] = useState<PrimaryTab>(availablePrimaryTabs[0] ?? 'management');
-
-  // Tab order is Devices -> Projects -> Users; the sub-tab strip renders this
-  // array in order, so this is the single place that decides it.
-  const availableSubTabs = useMemo(
-    () =>
-      [
-        canDevices && 'devices',
-        canProjects && 'projects',
-        canUsers && 'users',
-      ].filter(Boolean) as SubTab[],
-    [canDevices, canUsers, canProjects]
-  );
-  const [subTab, setSubTab] = useState<SubTab>(availableSubTabs[0] ?? 'devices');
-
-  // Device creation / edit modal state
-  const [deviceModalVisible, setDeviceModalVisible] = useState(false);
-  const [selectedDeviceForEdit, setSelectedDeviceForEdit] = useState<any | null>(null);
-
-  // Members tab role filter & creation modal state
-  const [userRoleTab, setUserRoleTab] = useState<UserRole>('ADMIN');
-  const [userModalVisible, setUserModalVisible] = useState(false);
-
-  // Users edit modal state
-  const [selectedUserForEdit, setSelectedUserForEdit] = useState<ManagedUserDto | null>(null);
-  const [editUserModalVisible, setEditUserModalVisible] = useState(false);
-  const [editUserDraft, setEditUserDraft] = useState({
-    name: '',
-    username: '',
-    mobile: '',
-    password: '',
-    confirmPassword: '',
-    status: 'ACTIVE' as 'ACTIVE' | 'DISABLED',
+  const [deleteDevice] = useDeleteDeviceMutation();
+  const [editing, setEditing] = useState<DeviceSummary | null>(null);
+  const [formVisible, setFormVisible] = useState(false);
+  const deviceDetails = useGetDeviceQuery(editing?.id ?? 0, {
+    skip: editing == null || !formVisible,
   });
 
-  // Project Modal state
-  const [projectModalVisible, setProjectModalVisible] = useState(false);
-  const [selectedProjectForEdit, setSelectedProjectForEdit] = useState<ProjectDto | null>(null);
-  const [editProjectName, setEditProjectName] = useState('');
-  const [editProjectStatus, setEditProjectStatus] = useState('ACTIVE');
-
-  const allDevices = useGetAllDevicesQuery({ includeSuspended: true }, { skip: !canDevices });
-  const [deleteDevice] = useDeleteDeviceMutation();
-  const [updateDevice] = useUpdateDeviceMutation();
-
-  const projects = useGetProjectsQuery(undefined, { skip: !canProjects });
-  const users = useGetUsersQuery({ role: userRoleTab, size: 50 }, { skip: !canUsers });
-
-  const [createProject, projectState] = useCreateProjectMutation();
-  const [updateProject, updateProjectState] = useUpdateProjectMutation();
-  const [deleteProject] = useDeleteProjectMutation();
-  const [createUser, userState] = useCreateUserMutation();
-  const [updateUser, updateUserState] = useUpdateUserMutation();
-  const [deleteUser] = useDeleteUserMutation();
-
-  const [newUser, setNewUser] = useState<NewUserDraft>(EMPTY_USER);
-
-  const filteredUsers = useMemo(() => {
-    const content = users.data?.content ?? [];
-    return content.filter((u) => u.role === userRoleTab);
-  }, [users.data?.content, userRoleTab]);
-
-  const openCreateUserModal = useCallback((role: UserRole) => {
-    setNewUser({ name: '', username: '', mobile: '', role });
-    setUserModalVisible(true);
-  }, []);
-
-  const openEditUserModal = useCallback((user: ManagedUserDto) => {
-    setSelectedUserForEdit(user);
-    setEditUserDraft({
-      name: user.name,
-      username: user.username,
-      mobile: user.mobile || '',
-      password: '',
-      confirmPassword: '',
-      status: user.status === 'DISABLED' ? 'DISABLED' : 'ACTIVE',
-    });
-    setEditUserModalVisible(true);
-  }, []);
-
-  const submitEditUser = async () => {
-    if (!selectedUserForEdit) return;
-    if (editUserDraft.password) {
-      if (!STRONG_PASSWORD.test(editUserDraft.password)) {
-        Alert.alert(
-          'Validation Error',
-          'Password must be 12-72 characters and include uppercase, lowercase, number and symbol.'
-        );
-        return;
-      }
-      if (editUserDraft.password !== editUserDraft.confirmPassword) {
-        Alert.alert('Validation Error', 'Password and confirm password do not match.');
-        return;
-      }
-    }
-    try {
-      await updateUser({
-        id: selectedUserForEdit.id,
-        body: {
-          username: editUserDraft.username.trim(),
-          name: editUserDraft.name.trim(),
-          mobile: editUserDraft.mobile.trim(),
-          role: selectedUserForEdit.role,
-          status: editUserDraft.status,
-          ...(editUserDraft.password ? { password: editUserDraft.password } : {}),
-        },
-      }).unwrap();
-      setEditUserModalVisible(false);
-      setSelectedUserForEdit(null);
-      void users.refetch();
-      Alert.alert(
-        `${memberRoleLabel(selectedUserForEdit.role)} updated`,
-        `${editUserDraft.name.trim()} has been updated successfully.`
-      );
-    } catch (err) {
-      Alert.alert(`${memberRoleLabel(selectedUserForEdit.role)} not updated`, apiErrorMessage(err));
-    }
+  const openCreate = () => {
+    setEditing(null);
+    setFormVisible(true);
   };
-
-  const handleDeleteUser = (userToDelete: ManagedUserDto) => {
-    if (
-      currentUser?.id === userToDelete.id ||
-      (currentUser?.username && currentUser.username.toLowerCase() === userToDelete.username.toLowerCase())
-    ) {
-      Alert.alert('Action Not Allowed', 'You cannot delete your own account.');
-      return;
-    }
+  const openEdit = (device: DeviceSummary) => {
+    setEditing(device);
+    setFormVisible(true);
+  };
+  const closeForm = () => {
+    setFormVisible(false);
+    setEditing(null);
+  };
+  const remove = (device: DeviceSummary) => {
     Alert.alert(
-      userToDelete.role === 'DRIVER' ? 'Delete Driver' : 'Delete User',
-      `Are you sure you want to delete/disable ${userToDelete.name}?`,
+      'Delete device permanently?',
+      `This erases ${device.name} and ALL data related to it — its complete location history, trips, alerts, commands and documents. The vehicle is removed too if this was its only tracker.
+
+This cannot be undone.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Delete',
+          text: 'Delete everything',
           style: 'destructive',
-          onPress: async () => {
-            try {
-              await deleteUser(userToDelete.id).unwrap();
-              void users.refetch();
-              Alert.alert('Success', `${userToDelete.name} has been deleted.`);
-            } catch (err) {
-              Alert.alert('Error', apiErrorMessage(err, 'Failed to delete user'));
-            }
+          onPress: () => {
+            void deleteDevice(device.id)
+              .unwrap()
+              .catch((error) => Alert.alert('Device not deleted', apiErrorMessage(error)));
           },
         },
       ]
     );
   };
 
-  const refreshing =
-    (canDevices && allDevices.isFetching) ||
-    (canProjects && projects.isFetching) ||
-    (canUsers && users.isFetching);
+  const tabStrip = canManageMembers ? (
+    <View accessibilityRole="tablist" style={styles.tabStrip}>
+      {(['devices', 'members'] as const).map((value) => {
+        const active = tab === value;
+        return (
+          <Pressable
+            accessibilityRole="tab"
+            accessibilityState={{ selected: active }}
+            key={value}
+            onPress={() => setTab(value)}
+            style={({ pressed }) => [
+              styles.tabItem,
+              active && styles.tabItemActive,
+              pressed && styles.tabItemPressed,
+            ]}>
+            <Text style={[styles.tabText, active && styles.tabTextActive]}>
+              {value === 'devices' ? 'Devices' : 'Members'}
+            </Text>
+          </Pressable>
+        );
+      })}
+    </View>
+  ) : null;
 
-  const refreshAll = useCallback(() => {
-    if (canDevices) void allDevices.refetch();
-    if (canProjects) void projects.refetch();
-    if (canUsers) void users.refetch();
-  }, [allDevices, canDevices, canProjects, canUsers, projects, users]);
-
-  const submitProjectModal = async () => {
-    if (!editProjectName.trim()) {
-      Alert.alert('Validation Error', 'Project name cannot be empty.');
-      return;
-    }
-    try {
-      if (selectedProjectForEdit) {
-        await updateProject({
-          id: selectedProjectForEdit.id,
-          body: { name: editProjectName.trim(), status: editProjectStatus },
-        }).unwrap();
-        Alert.alert('Success', 'Project updated successfully.');
-      } else {
-        await createProject({ name: editProjectName.trim(), status: 'ACTIVE' }).unwrap();
-        Alert.alert('Success', 'Project created successfully.');
-      }
-      setProjectModalVisible(false);
-      setSelectedProjectForEdit(null);
-      void projects.refetch();
-    } catch (err) {
-      Alert.alert('Error', apiErrorMessage(err));
-    }
-  };
-
-
-  const submitUser = async () => {
-    try {
-      await createUser({
-        username: newUser.username.trim(),
-        name: newUser.name.trim(),
-        mobile: newUser.mobile.trim(),
-        role: newUser.role,
-        status: 'ACTIVE',
-        permissions: {},
-      }).unwrap();
-      setUserModalVisible(false);
-      setNewUser(EMPTY_USER);
-      void users.refetch();
-      Alert.alert(
-        `${memberRoleLabel(newUser.role)} created`,
-        `${newUser.name.trim()} can sign in with their registered Microsoft account ID/email.`
-      );
-    } catch (err) {
-      Alert.alert(`${memberRoleLabel(newUser.role)} not saved`, apiErrorMessage(err));
-    }
-  };
-
-  if (availablePrimaryTabs.length === 0) {
-    return <EmptyLine text="No management modules are available for this account." />;
+  if (canManageMembers && tab === 'members') {
+    return (
+      <View style={styles.screen}>
+        {tabStrip}
+        <MembersPanel />
+      </View>
+    );
   }
 
+  const rows = devices.data ?? [];
   return (
-    <View style={[styles.screen, { paddingTop: insets.top }]}>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={[styles.tabRow, { paddingHorizontal: spacing.sm, paddingVertical: spacing.xs }]}
-        style={styles.tabRowScrollView}>
-        {availablePrimaryTabs.map((value) => (
-          <Chip
-            key={value}
-            active={primaryTab === value}
-            label={value === 'management' ? 'Management' : 'Manage Tenants'}
-            onPress={() => setPrimaryTab(value)}
-          />
-        ))}
-      </ScrollView>
+    <View style={styles.screen}>
+      {tabStrip}
+      <ManagementSectionHeader
+        createLabel="Create device"
+        onCreate={canCreate ? openCreate : undefined}
+        subtitle={`${rows.length} registered tracker${rows.length === 1 ? '' : 's'}`}
+        title="Devices"
+      />
 
-      {primaryTab === 'management' && availableSubTabs.length > 0 ? (
+      {devices.isLoading && !devices.data ? (
+        <LoadingView label="Loading devices…" />
+      ) : devices.isError && !devices.data ? (
+        <ErrorRetryView message={apiErrorMessage(devices.error)} onRetry={devices.refetch} />
+      ) : (
         <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={[styles.subTabRow, { paddingHorizontal: spacing.sm }]}
-          style={styles.subTabRowScrollView}>
-          {availableSubTabs.map((value) => {
-            const isActive = subTab === value;
-            return (
-              <Pressable
-                key={value}
-                onPress={() => setSubTab(value)}
-                style={[styles.subTabItem, isActive && styles.subTabItemActive]}>
-                <Text style={[styles.subTabItemText, isActive && styles.subTabItemTextActive]}>
-                  {value === 'devices' ? 'Devices' : value === 'users' ? 'Members' : 'Projects'}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </ScrollView>
-      ) : null}
-
-      {primaryTab === 'management' && ['devices', 'users', 'projects'].includes(subTab) ? (
-        <ScrollView
-          contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + spacing.xl }]}
+          contentContainerStyle={[
+            styles.content,
+            { paddingBottom: Math.max(insets.bottom, spacing.md) + 88 },
+          ]}
           refreshControl={
-            <RefreshControl onRefresh={refreshAll} refreshing={Boolean(refreshing)} tintColor={c.primary} />
+            <RefreshControl
+              onRefresh={devices.refetch}
+              refreshing={devices.isFetching}
+              tintColor={c.primary}
+            />
           }
-          style={styles.screen}>
-
-        {/* Devices Tab */}
-        {subTab === 'devices' && canDevices ? (
-          <Card style={[styles.form, { flex: 1 }]}>
-            <View style={styles.titleRow}>
-              <Text style={styles.title}>Devices</Text>
-              <TouchableOpacity
-                accessibilityLabel="Create Device"
-                accessibilityRole="button"
-                activeOpacity={0.75}
-                onPress={() => {
-                  setSelectedDeviceForEdit(null);
-                  setDeviceModalVisible(true);
-                }}
-                style={styles.headerPlusButton}>
-                <MaterialCommunityIcons color={c.primary} name="plus" size={24} />
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.sectionHint}>
-              Manage registered GPS devices. Active devices must be deactivated before deletion.
-            </Text>
-
-            <ListState
-              emptyText="No devices created yet. Tap + to register a device."
-              error={allDevices.error}
-              isError={allDevices.isError}
-              isLoading={allDevices.isLoading}
-              isEmpty={(allDevices.data?.length ?? 0) === 0}
-              onRetry={allDevices.refetch}
-              styles={styles}
-              tint={c.primary}
+          showsVerticalScrollIndicator={false}>
+          {rows.length === 0 ? (
+            <EmptyView
+              icon="access-point-off"
+              message="Tap + to register a physical tracker or a mobile GPS tracker."
+              title="No devices"
             />
-
-            {(allDevices.data ?? []).map((device) => {
-              const isActive = device.status === 'ACTIVE' || (!device.status && !(device as any).suspended);
+          ) : (
+            rows.map((device) => {
+              const status = managementStatus(device, readiness);
+              const tone = status === 'Active' ? c.success : stateColors.OFFLINE;
+              const isMobile = device.sourceType === 'MOBILE_GPS';
               return (
-                <View key={device.id} style={styles.deviceCard}>
-                  <View style={styles.deviceHeader}>
-                    <View style={styles.deviceTitleGroup}>
-                      <MaterialCommunityIcons color={c.primary} name="cellphone-link" size={20} />
-                      <Text style={styles.deviceName}>{device.name}</Text>
-                    </View>
-                    <View style={[styles.statusBadge, isActive ? styles.statusBadgeActive : styles.statusBadgeInactive]}>
-                      <Text style={[styles.statusText, isActive ? styles.statusTextActive : styles.statusTextInactive]}>
-                        {isActive ? 'ACTIVE' : 'INACTIVE'}
-                      </Text>
-                    </View>
-                  </View>
-
-                  <View style={styles.deviceDetailsGrid}>
-                    <View style={styles.deviceDetailItem}>
-                      <Text style={styles.detailLabel}>IMEI</Text>
-                      <Text style={styles.detailValue}>{device.imei}</Text>
-                    </View>
-                    <View style={styles.deviceDetailItem}>
-                      <Text style={styles.detailLabel}>Type</Text>
-                      <Text style={styles.detailValue}>{device.category || 'GPS'}</Text>
-                    </View>
-                    <View style={styles.deviceDetailItem}>
-                      {/* A phone tracker has no SIM of its own, so labelling the
-                          row "SIM / No SIM" read as a fault rather than a fact. */}
-                      <Text style={styles.detailLabel}>
-                        {device.sourceType === 'MOBILE_GPS' ? 'Source' : 'SIM'}
-                      </Text>
-                      <Text style={styles.detailValue}>
-                        {device.sourceType === 'MOBILE_GPS'
-                          ? 'Mobile GPS'
-                          : device.simNumber || device.simProvider || 'No SIM'}
-                      </Text>
-                    </View>
-                    <View style={styles.deviceDetailItem}>
-                      <Text style={styles.detailLabel}>Driver</Text>
-                      <Text style={styles.detailValue}>{device.driverName || 'Unassigned'}</Text>
-                    </View>
-                  </View>
-
-                  <View style={styles.deviceActionsRow}>
-                    <TouchableOpacity
-                      onPress={() => {
-                        setSelectedDeviceForEdit(device);
-                        setDeviceModalVisible(true);
-                      }}
-                      style={styles.actionBtnSecondary}>
-                      <MaterialCommunityIcons color={c.primary} name="pencil-outline" size={16} />
-                      <Text style={styles.actionBtnTextSecondary}>Edit</Text>
-                    </TouchableOpacity>
-
-                    {isActive ? (
-                      <TouchableOpacity
-                        onPress={() => {
-                          Alert.alert(
-                            'Deactivate Device',
-                            `Are you sure you want to deactivate "${device.name}"? It will be marked inactive.`,
-                            [
-                              { text: 'Cancel', style: 'cancel' },
-                              {
-                                text: 'Deactivate',
-                                style: 'destructive',
-                                onPress: async () => {
-                                  try {
-                                    await deleteDevice(device.id).unwrap();
-                                    void allDevices.refetch();
-                                  } catch (err) {
-                                    Alert.alert('Action failed', apiErrorMessage(err));
-                                  }
-                                },
-                              },
-                            ]
-                          );
-                        }}
-                        style={styles.actionBtnWarning}>
-                        <MaterialCommunityIcons color="#F59E0B" name="pause-circle-outline" size={16} />
-                        <Text style={styles.actionBtnTextWarning}>Deactivate</Text>
-                      </TouchableOpacity>
-                    ) : (
-                      <>
-                        <TouchableOpacity
-                          onPress={() => {
-                            Alert.alert(
-                              'Activate Device',
-                              `Are you sure you want to activate "${device.name}"?`,
-                              [
-                                { text: 'Cancel', style: 'cancel' },
-                                {
-                                  text: 'Activate',
-                                  onPress: async () => {
-                                    try {
-                                      await updateDevice({
-                                        id: device.id,
-                                        body: {
-                                          category: device.category || 'CAR',
-                                          imei: device.imei,
-                                          name: device.name,
-                                          status: 'ACTIVE',
-                                        },
-                                      }).unwrap();
-                                      void allDevices.refetch();
-                                    } catch (err) {
-                                      Alert.alert('Action failed', apiErrorMessage(err));
-                                    }
-                                  },
-                                },
-                              ]
-                            );
-                          }}
-                          style={styles.actionBtnSuccess}>
-                          <MaterialCommunityIcons color="#22C55E" name="play-circle-outline" size={16} />
-                          <Text style={styles.actionBtnTextSuccess}>Activate</Text>
-                        </TouchableOpacity>
-
-                        <TouchableOpacity
-                          onPress={() => {
-                            Alert.alert(
-                              'Delete Device',
-                              `Are you sure you want to permanently delete "${device.name}"? This action cannot be undone.`,
-                              [
-                                { text: 'Cancel', style: 'cancel' },
-                                {
-                                  text: 'Delete',
-                                  style: 'destructive',
-                                  onPress: async () => {
-                                    try {
-                                      await deleteDevice(device.id).unwrap();
-                                      void allDevices.refetch();
-                                    } catch (err) {
-                                      Alert.alert('Action failed', apiErrorMessage(err));
-                                    }
-                                  },
-                                },
-                              ]
-                            );
-                          }}
-                          style={styles.actionBtnDanger}>
-                          <MaterialCommunityIcons color="#EF4444" name="trash-can-outline" size={16} />
-                          <Text style={styles.actionBtnTextDanger}>Delete</Text>
-                        </TouchableOpacity>
-                      </>
-                    )}
-                  </View>
-                </View>
-              );
-            })}
-          </Card>
-        ) : null}
-
-        {/* Members Tab */}
-        {subTab === 'users' && canUsers ? (
-          <Card style={[styles.form, { flex: 1 }]}>
-            <View style={styles.titleRow}>
-              <Text style={styles.title}>Members</Text>
-              <TouchableOpacity
-                accessibilityLabel={`Create ${memberRoleLabel(userRoleTab)}`}
-                accessibilityRole="button"
-                activeOpacity={0.75}
-                onPress={() => openCreateUserModal(userRoleTab)}
-                style={styles.headerPlusButton}>
-                <MaterialCommunityIcons color={c.primary} name="plus" size={24} />
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.sectionHint}>
-              Select Admin, User, or Driver to view matching members. Tap + to create a member with the selected role.
-            </Text>
-
-            <View style={styles.roleFilterRow}>
-              {(['ADMIN', 'COMPANY_USER', 'DRIVER'] as const).map((role) => (
-                <Chip
-                  key={role}
-                  active={userRoleTab === role}
-                  label={memberRoleLabel(role)}
-                  onPress={() => setUserRoleTab(role)}
-                />
-              ))}
-            </View>
-
-            <ListState
-              emptyText={`No ${memberRoleLabel(userRoleTab).toLowerCase()} members found.`}
-              error={users.error}
-              isError={users.isError}
-              isLoading={users.isLoading}
-              isEmpty={filteredUsers.length === 0}
-              onRetry={users.refetch}
-              styles={styles}
-              tint={c.primary}
-            />
-
-            {filteredUsers.map((user) => {
-              const isSelf =
-                currentUser?.id === user.id ||
-                (currentUser?.username &&
-                  currentUser.username.toLowerCase() === user.username.toLowerCase());
-              return (
-                <View key={user.id} style={styles.deviceCard}>
-                  <View style={styles.deviceHeader}>
-                    <View style={styles.deviceTitleGroup}>
-                      <MaterialCommunityIcons
-                        color={c.primary}
-                        name={user.role === 'DRIVER' ? 'card-account-details-outline' : 'account-outline'}
-                        size={22}
-                      />
-                      <View>
-                        <Text style={styles.deviceName}>{user.name}</Text>
-                        <Text style={styles.detailLabel}>{user.username}</Text>
+                <ManagementCard key={device.id}>
+                  <View style={styles.cardHeader}>
+                    <View style={styles.identity}>
+                      <View style={[styles.deviceIcon, { backgroundColor: `${tone}18` }]}>
+                        <MaterialCommunityIcons
+                          color={tone}
+                          name={isMobile ? 'cellphone-marker' : 'access-point'}
+                          size={23}
+                        />
+                      </View>
+                      <View style={styles.identityText}>
+                        <Text numberOfLines={1} style={styles.name}>
+                          {device.name}
+                        </Text>
+                        <Text numberOfLines={1} style={styles.meta}>
+                          {isMobile ? 'Mobile GPS Tracker' : 'Physical GPS Device'}
+                        </Text>
                       </View>
                     </View>
-                    <View
-                      style={[
-                        styles.statusBadge,
-                        user.status === 'ACTIVE' ? styles.statusBadgeActive : styles.statusBadgeInactive,
-                      ]}>
-                      <Text
-                        style={[
-                          styles.statusText,
-                          user.status === 'ACTIVE' ? styles.statusTextActive : styles.statusTextInactive,
-                        ]}>
-                        {user.status === 'ACTIVE' ? 'Active' : 'Disabled'}
-                      </Text>
+                    <View style={[styles.badge, { backgroundColor: `${tone}18` }]}>
+                      <View style={[styles.statusDot, { backgroundColor: tone }]} />
+                      <Text style={[styles.badgeText, { color: tone }]}>{status}</Text>
                     </View>
                   </View>
 
-                  <View style={styles.deviceDetailsGrid}>
-                    <View style={styles.deviceDetailItem}>
-                      <Text style={styles.detailLabel}>Role</Text>
-                      <Text style={styles.detailValue}>
-                        {memberRoleLabel(user.role)}
-                      </Text>
+                  <View style={styles.updatedRow}>
+                    <MaterialCommunityIcons color={c.textMuted} name="clock-outline" size={14} />
+                    <Text style={styles.updatedText}>Last updated {relativeAge(device.lastUpdate)}</Text>
+                  </View>
+
+                  {canManage || canDelete ? (
+                    <View style={styles.actions}>
+                      {canManage ? (
+                        <ManagementActionButton
+                          accessibilityLabel={`Edit ${device.name}`}
+                          icon="pencil-outline"
+                          label="Edit"
+                          onPress={() => openEdit(device)}
+                        />
+                      ) : null}
+                      {canDelete ? (
+                        <ManagementActionButton
+                          accessibilityLabel={`Delete ${device.name}`}
+                          destructive
+                          icon="trash-can-outline"
+                          label="Delete"
+                          onPress={() => remove(device)}
+                        />
+                      ) : null}
                     </View>
-                    {user.mobile ? (
-                      <View style={styles.deviceDetailItem}>
-                        <Text style={styles.detailLabel}>Mobile</Text>
-                        <Text style={styles.detailValue}>{user.mobile}</Text>
-                      </View>
-                    ) : null}
-                  </View>
-
-                  <View style={styles.deviceActionsRow}>
-                    <TouchableOpacity
-                      accessibilityLabel={`Edit ${user.name}`}
-                      accessibilityRole="button"
-                      activeOpacity={0.7}
-                      onPress={() => openEditUserModal(user)}
-                      style={styles.actionBtnSecondary}>
-                      <MaterialCommunityIcons color={c.textPrimary} name="pencil-outline" size={14} />
-                      <Text style={styles.actionBtnTextSecondary}>Edit</Text>
-                    </TouchableOpacity>
-
-                    {!isSelf ? (
-                      <TouchableOpacity
-                        accessibilityLabel={`Delete ${user.name}`}
-                        accessibilityRole="button"
-                        activeOpacity={0.7}
-                        onPress={() => handleDeleteUser(user)}
-                        style={styles.actionBtnDanger}>
-                        <MaterialCommunityIcons color="#EF4444" name="trash-can-outline" size={14} />
-                        <Text style={styles.actionBtnTextDanger}>Delete</Text>
-                      </TouchableOpacity>
-                    ) : null}
-                  </View>
-                </View>
+                  ) : null}
+                </ManagementCard>
               );
-            })}
-          </Card>
-        ) : null}
+            })
+          )}
+        </ScrollView>
+      )}
 
-        {subTab === 'projects' && canProjects ? (
-          <Card style={[styles.form, { flex: 1 }]}>
-            <View style={styles.titleRow}>
-              <Text style={styles.title}>Projects</Text>
-              <TouchableOpacity
-                accessibilityLabel="Create Project"
-                accessibilityRole="button"
-                activeOpacity={0.75}
-                onPress={() => {
-                  setSelectedProjectForEdit(null);
-                  setEditProjectName('');
-                  setEditProjectStatus('ACTIVE');
-                  setProjectModalVisible(true);
-                }}
-                style={styles.headerPlusButton}>
-                <MaterialCommunityIcons color={c.primary} name="plus" size={24} />
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.sectionHint}>
-              Manage tenant projects. Edit name or status. Delete inactive projects.
-            </Text>
-
-            <ListState
-              emptyText="No projects yet. Tap + to create a project."
-              error={projects.error}
-              isError={projects.isError}
-              isLoading={projects.isLoading}
-              isEmpty={(projects.data?.length ?? 0) === 0}
-              onRetry={projects.refetch}
-              styles={styles}
-              tint={c.primary}
+      <ManagementBottomSheet
+        maxHeightRatio={0.94}
+        onClose={closeForm}
+        title={editing ? 'Edit device' : 'Create device'}
+        visible={formVisible}>
+        {editing && deviceDetails.isFetching && !deviceDetails.currentData ? (
+          <View style={styles.formLoading}>
+            <ActivityIndicator color={c.primary} size="small" />
+            <Text style={styles.formLoadingText}>Loading device details…</Text>
+          </View>
+        ) : (
+          <KeyboardAwareForm
+            applyBottomInset={false}
+            contentContainerStyle={styles.form}
+            contentSized>
+            <DeviceCreateForm
+              initialDevice={editing ? (deviceDetails.currentData ?? editing) : null}
+              onSuccess={closeForm}
             />
-
-            {(projects.data ?? []).map((project) => {
-              const isActive = project.status === 'ACTIVE';
-              return (
-                <View key={project.id} style={styles.deviceCard}>
-                  <View style={styles.deviceHeader}>
-                    <View style={styles.deviceTitleGroup}>
-                      <MaterialCommunityIcons color={c.primary} name="folder-outline" size={22} />
-                      <Text style={styles.deviceName}>{project.name}</Text>
-                    </View>
-                    <View style={[styles.statusBadge, isActive ? styles.statusBadgeActive : styles.statusBadgeInactive]}>
-                      <Text style={[styles.statusText, isActive ? styles.statusTextActive : styles.statusTextInactive]}>
-                        {isActive ? 'ACTIVE' : 'INACTIVE'}
-                      </Text>
-                    </View>
-                  </View>
-
-                  <View style={styles.deviceActionsRow}>
-                    <TouchableOpacity
-                      onPress={() => {
-                        setSelectedProjectForEdit(project);
-                        setEditProjectName(project.name);
-                        setEditProjectStatus(project.status);
-                        setProjectModalVisible(true);
-                      }}
-                      style={styles.actionBtnSecondary}>
-                      <MaterialCommunityIcons color={c.textPrimary} name="pencil-outline" size={14} />
-                      <Text style={styles.actionBtnTextSecondary}>Edit</Text>
-                    </TouchableOpacity>
-
-                    {!isActive ? (
-                      <TouchableOpacity
-                        onPress={() => {
-                          Alert.alert(
-                            'Delete Project',
-                            `Are you sure you want to permanently delete "${project.name}"? This action cannot be undone.`,
-                            [
-                              { text: 'Cancel', style: 'cancel' },
-                              {
-                                text: 'Delete',
-                                style: 'destructive',
-                                onPress: async () => {
-                                  try {
-                                    await deleteProject(project.id).unwrap();
-                                    void projects.refetch();
-                                    Alert.alert('Success', 'Project deleted successfully.');
-                                  } catch (err) {
-                                    Alert.alert('Action failed', apiErrorMessage(err));
-                                  }
-                                },
-                              },
-                            ]
-                          );
-                        }}
-                        style={styles.actionBtnDanger}>
-                        <MaterialCommunityIcons color="#EF4444" name="trash-can-outline" size={14} />
-                        <Text style={styles.actionBtnTextDanger}>Delete</Text>
-                      </TouchableOpacity>
-                    ) : null}
-                  </View>
-                </View>
-              );
-            })}
-          </Card>
-        ) : null}
-
-      </ScrollView>
-      ) : null}
-
-      {/* Manage Tenants Tab */}
-      {primaryTab === 'tenants' && canManageTenants ? (
-        <ManageTenantsScreen />
-      ) : null}
-
-      {/* Device Modal for Create & Edit */}
-      {primaryTab === 'management' && subTab === 'devices' && canDevices ? (
-        <Modal
-          animationType="slide"
-          hardwareAccelerated
-          onRequestClose={() => {
-            setDeviceModalVisible(false);
-            setSelectedDeviceForEdit(null);
-          }}
-          transparent
-          visible={deviceModalVisible}>
-          <View style={styles.modalOverlay}>
-            <Pressable
-              style={StyleSheet.absoluteFill}
-              onPress={() => {
-                setDeviceModalVisible(false);
-                setSelectedDeviceForEdit(null);
-              }}
-            />
-            <KeyboardBottomSheet
-              style={[
-                styles.modalSheetContainer,
-                { paddingBottom: Math.max(insets.bottom + spacing.md, spacing.lg) },
-              ]}>
-              <View style={styles.modalHandle} />
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>
-                  {selectedDeviceForEdit ? 'Edit Device' : 'Create Device'}
-                </Text>
-                <Pressable
-                  onPress={() => {
-                    setDeviceModalVisible(false);
-                    setSelectedDeviceForEdit(null);
-                  }}
-                  style={styles.closeButton}>
-                  <MaterialCommunityIcons color={c.textSecondary} name="close" size={20} />
-                </Pressable>
-              </View>
-
-              {/* The sheet already applies the bottom inset. */}
-              <KeyboardAwareForm
-                applyBottomInset={false}
-                contentContainerStyle={styles.modalScrollBody}
-                dismissOnTapOutside={false}
-                style={styles.modalScrollView}>
-                <DeviceCreateForm
-                  initialDevice={selectedDeviceForEdit}
-                  onCancel={() => {
-                    setDeviceModalVisible(false);
-                    setSelectedDeviceForEdit(null);
-                  }}
-                  onSuccess={() => {
-                    setDeviceModalVisible(false);
-                    setSelectedDeviceForEdit(null);
-                    void allDevices.refetch();
-                  }}
-                />
-              </KeyboardAwareForm>
-            </KeyboardBottomSheet>
-          </View>
-        </Modal>
-      ) : null}
-
-      {/* Member Creation Modal */}
-      {primaryTab === 'management' && subTab === 'users' && canUsers ? (
-        <Modal
-          animationType="slide"
-          hardwareAccelerated
-          onRequestClose={() => setUserModalVisible(false)}
-          transparent
-          visible={userModalVisible}>
-          <View style={styles.modalOverlay}>
-            <Pressable style={StyleSheet.absoluteFill} onPress={() => setUserModalVisible(false)} />
-            <KeyboardBottomSheet
-              style={[
-                styles.modalSheetContainer,
-                { paddingBottom: Math.max(insets.bottom + spacing.md, spacing.lg) },
-              ]}>
-              <View style={styles.modalHandle} />
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>
-                  Create {memberRoleLabel(newUser.role)}
-                </Text>
-                <Pressable onPress={() => setUserModalVisible(false)} style={styles.closeButton}>
-                  <MaterialCommunityIcons color={c.textSecondary} name="close" size={20} />
-                </Pressable>
-              </View>
-
-              {/* The sheet already applies the bottom inset. */}
-              <KeyboardAwareForm
-                applyBottomInset={false}
-                contentContainerStyle={styles.modalScrollBody}
-                dismissOnTapOutside={false}
-                style={styles.modalScrollView}>
-                <Text style={styles.sectionHint}>
-                  Members authenticate using their Microsoft account ID/email. Drivers also get a driver record for vehicle assignment.
-                </Text>
-
-                <TextField
-                  label="Full name"
-                  onChangeText={(name) => setNewUser((v) => ({ ...v, name }))}
-                  value={newUser.name}
-                />
-                <TextField
-                  autoCapitalize="none"
-                  keyboardType="email-address"
-                  label="Username (Microsoft account ID/email)"
-                  onChangeText={(username) => setNewUser((v) => ({ ...v, username }))}
-                  placeholder="user@company.com"
-                  value={newUser.username}
-                />
-                <TextField
-                  keyboardType="phone-pad"
-                  label="Mobile number"
-                  onChangeText={(mobile) => setNewUser((v) => ({ ...v, mobile }))}
-                  placeholder="+91 98765 43210"
-                  value={newUser.mobile}
-                />
-
-                <Button
-                  disabled={
-                    !newUser.name.trim() ||
-                    !newUser.username.trim() ||
-                    !newUser.mobile.trim()
-                  }
-                  label={`Create ${memberRoleLabel(newUser.role).toLowerCase()}`}
-                  loading={userState.isLoading}
-                  onPress={submitUser}
-                />
-              </KeyboardAwareForm>
-            </KeyboardBottomSheet>
-          </View>
-        </Modal>
-      ) : null}
-
-      {/* Edit Member Modal */}
-      {selectedUserForEdit && canUsers ? (
-        <Modal
-          animationType="slide"
-          hardwareAccelerated
-          onRequestClose={() => setEditUserModalVisible(false)}
-          transparent
-          visible={editUserModalVisible}>
-          <View style={styles.modalOverlay}>
-            <Pressable style={StyleSheet.absoluteFill} onPress={() => setEditUserModalVisible(false)} />
-            <KeyboardBottomSheet
-              style={[
-                styles.modalSheetContainer,
-                { paddingBottom: Math.max(insets.bottom + spacing.md, spacing.lg) },
-              ]}>
-              <View style={styles.modalHandle} />
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>
-                  Edit {memberRoleLabel(selectedUserForEdit.role)}
-                </Text>
-                <Pressable onPress={() => setEditUserModalVisible(false)} style={styles.closeButton}>
-                  <MaterialCommunityIcons color={c.textSecondary} name="close" size={20} />
-                </Pressable>
-              </View>
-
-              {/* The sheet already applies the bottom inset. */}
-              <KeyboardAwareForm
-                applyBottomInset={false}
-                contentContainerStyle={styles.modalScrollBody}
-                dismissOnTapOutside={false}
-                style={styles.modalScrollView}>
-                <TextField
-                  label="Full name"
-                  onChangeText={(name) => setEditUserDraft((v) => ({ ...v, name }))}
-                  value={editUserDraft.name}
-                />
-                <TextField
-                  autoCapitalize="none"
-                  keyboardType="email-address"
-                  label="Username (Microsoft account ID/email)"
-                  onChangeText={(username) => setEditUserDraft((v) => ({ ...v, username }))}
-                  value={editUserDraft.username}
-                />
-                <TextField
-                  keyboardType="phone-pad"
-                  label="Mobile number"
-                  onChangeText={(mobile) => setEditUserDraft((v) => ({ ...v, mobile }))}
-                  placeholder="+91 98765 43210"
-                  value={editUserDraft.mobile}
-                />
-                <TextField
-                  label="New password (optional)"
-                  onChangeText={(password) => setEditUserDraft((v) => ({ ...v, password }))}
-                  placeholder="Leave blank to keep current password"
-                  secure
-                  value={editUserDraft.password ?? ''}
-                />
-                {editUserDraft.password ? (
-                  <TextField
-                    error={
-                      editUserDraft.confirmPassword &&
-                      editUserDraft.confirmPassword !== editUserDraft.password
-                        ? 'Passwords do not match'
-                        : undefined
-                    }
-                    label="Confirm new password"
-                    onChangeText={(confirmPassword) => setEditUserDraft((v) => ({ ...v, confirmPassword }))}
-                    placeholder="Re-enter new password"
-                    secure
-                    value={editUserDraft.confirmPassword ?? ''}
-                  />
-                ) : null}
-
-                <View style={{ gap: spacing.xs }}>
-                  <Text style={styles.detailLabel}>Account Status</Text>
-                  <View style={styles.roleFilterRow}>
-                    <Chip
-                      active={editUserDraft.status === 'ACTIVE'}
-                      label="Active"
-                      onPress={() => setEditUserDraft((v) => ({ ...v, status: 'ACTIVE' }))}
-                    />
-                    <Chip
-                      active={editUserDraft.status === 'DISABLED'}
-                      label="Disabled"
-                      onPress={() => setEditUserDraft((v) => ({ ...v, status: 'DISABLED' }))}
-                    />
-                  </View>
-                </View>
-
-                <Button
-                  disabled={
-                    !editUserDraft.name.trim() ||
-                    !editUserDraft.username.trim() ||
-                    !editUserDraft.mobile.trim() ||
-                    (Boolean(editUserDraft.password) &&
-                      (editUserDraft.password!.length < 6 ||
-                        editUserDraft.password !== editUserDraft.confirmPassword))
-                  }
-                  label="Save changes"
-                  loading={updateUserState.isLoading}
-                  onPress={submitEditUser}
-                />
-              </KeyboardAwareForm>
-            </KeyboardBottomSheet>
-          </View>
-        </Modal>
-      ) : null}
-
-      {/* Project Creation & Edit Modal */}
-      {primaryTab === 'management' && subTab === 'projects' && canProjects ? (
-        <Modal
-          animationType="slide"
-          hardwareAccelerated
-          onRequestClose={() => {
-            setProjectModalVisible(false);
-            setSelectedProjectForEdit(null);
-          }}
-          transparent
-          visible={projectModalVisible}>
-          <View style={styles.modalOverlay}>
-            <Pressable
-              style={StyleSheet.absoluteFill}
-              onPress={() => {
-                setProjectModalVisible(false);
-                setSelectedProjectForEdit(null);
-              }}
-            />
-            <KeyboardBottomSheet
-              style={[
-                styles.modalSheetContainer,
-                { paddingBottom: Math.max(insets.bottom + spacing.md, spacing.lg) },
-              ]}>
-              <View style={styles.modalHandle} />
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>
-                  {selectedProjectForEdit ? 'Edit Project' : 'Create Project'}
-                </Text>
-                <Pressable
-                  onPress={() => {
-                    setProjectModalVisible(false);
-                    setSelectedProjectForEdit(null);
-                  }}
-                  style={styles.closeButton}>
-                  <MaterialCommunityIcons color={c.textSecondary} name="close" size={20} />
-                </Pressable>
-              </View>
-
-              {/* The sheet already applies the bottom inset. */}
-              <KeyboardAwareForm
-                applyBottomInset={false}
-                contentContainerStyle={styles.modalScrollBody}
-                dismissOnTapOutside={false}
-                style={styles.modalScrollView}>
-                <TextField
-                  label="Project name"
-                  onChangeText={setEditProjectName}
-                  value={editProjectName}
-                />
-
-                {selectedProjectForEdit ? (
-                  <View style={{ gap: spacing.xs, marginBottom: spacing.md }}>
-                    <Text style={styles.detailLabel}>Project Status</Text>
-                    <View style={styles.roleFilterRow}>
-                      <Chip
-                        active={editProjectStatus === 'ACTIVE'}
-                        label="Active"
-                        onPress={() => setEditProjectStatus('ACTIVE')}
-                      />
-                      <Chip
-                        active={editProjectStatus === 'INACTIVE'}
-                        label="Inactive"
-                        onPress={() => setEditProjectStatus('INACTIVE')}
-                      />
-                    </View>
-                  </View>
-                ) : null}
-
-                <Button
-                  disabled={!editProjectName.trim()}
-                  label={selectedProjectForEdit ? 'Save changes' : 'Create project'}
-                  loading={selectedProjectForEdit ? updateProjectState.isLoading : projectState.isLoading}
-                  onPress={submitProjectModal}
-                />
-              </KeyboardAwareForm>
-            </KeyboardBottomSheet>
-          </View>
-        </Modal>
-      ) : null}
+          </KeyboardAwareForm>
+        )}
+      </ManagementBottomSheet>
     </View>
   );
 }
 
-function ListState({
-  emptyText,
-  error,
-  isEmpty,
-  isError,
-  isLoading,
-  onRetry,
-  styles,
-  tint,
-}: {
-  emptyText: string;
-  error: unknown;
-  isEmpty: boolean;
-  isError: boolean;
-  isLoading: boolean;
-  onRetry: () => void;
-  styles: ReturnType<typeof makeStyles>;
-  tint: string;
-}) {
-  if (isLoading) {
-    return (
-      <View style={styles.listState}>
-        <ActivityIndicator color={tint} size="small" />
-        <Text style={styles.listStateText}>Loading…</Text>
-      </View>
-    );
-  }
-  if (isError) {
-    return (
-      <View style={styles.listState}>
-        <MaterialCommunityIcons color={tint} name="alert-circle-outline" size={20} />
-        <Text style={styles.listStateText}>{apiErrorMessage(error)}</Text>
-        <Button label="Retry" icon="refresh" onPress={onRetry} variant="secondary" />
-      </View>
-    );
-  }
-  if (isEmpty) {
-    return (
-      <View style={styles.listState}>
-        <Text style={styles.listStateText}>{emptyText}</Text>
-      </View>
-    );
-  }
-  return null;
+/**
+ * Management shows lifecycle, not motion, so it collapses the shared status
+ * into three buckets — but off the SAME resolved value every other screen
+ * renders, so a device cannot read Active here and Offline in the fleet list.
+ */
+/**
+ * Management shows lifecycle, not motion, so it collapses the shared status
+ * into two buckets — but off the SAME resolved value every other screen
+ * renders, so a device cannot read Active here and Offline in the fleet list.
+ */
+function managementStatus(
+  device: DeviceSummary,
+  readiness: { deviceId: number | null; locationDisabled: boolean }
+): 'Active' | 'Offline' {
+  return resolveDeviceRecordState(device, readiness).offline ? 'Offline' : 'Active';
+}
+
+function relativeAge(value?: string | null): string {
+  if (!value) return 'never';
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return 'unknown';
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return `${Math.max(1, seconds)}s ago`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+  return `${Math.floor(seconds / 86400)}d ago`;
 }
 
 const makeStyles = (c: ThemeColors) =>
   StyleSheet.create({
     screen: { backgroundColor: c.pageBackground, flex: 1 },
-    content: {
-      backgroundColor: c.pageBackground,
-      flexGrow: 1,
-      gap: spacing.sm,
-      padding: spacing.sm,
-    },
-    tabRow: { flexDirection: 'row', gap: spacing.sm, alignItems: 'center' },
-    tabRowScrollView: {
-      flexGrow: 0,
-      maxHeight: 44,
-    },
-    subTabRow: {
+    tabStrip: {
+      backgroundColor: c.surface,
       flexDirection: 'row',
       gap: spacing.md,
+      paddingHorizontal: spacing.md,
+      paddingTop: spacing.sm + 2,
     },
-    subTabRowScrollView: {
-      flexGrow: 0,
-      borderBottomWidth: 1,
-      borderBottomColor: c.divider,
-    },
-    subTabItem: {
-      paddingVertical: 6,
-      paddingHorizontal: spacing.xs,
-      borderBottomWidth: 2,
+    tabItem: {
       borderBottomColor: 'transparent',
-    },
-    subTabItemActive: {
-      borderBottomColor: c.primaryGreen,
-    },
-    subTabItemText: {
-      color: c.textMuted,
-      fontSize: 12.5,
-      fontWeight: '700',
-    },
-    subTabItemTextActive: {
-      color: c.primaryGreen,
-      fontWeight: '700',
-    },
-    roleFilterRow: {
-      alignItems: 'center',
-      alignSelf: 'flex-start',
-      flexDirection: 'row',
-      flexWrap: 'wrap',
-      gap: spacing.sm,
-      justifyContent: 'flex-start',
-      marginVertical: spacing.xs,
-    },
-    form: { gap: spacing.sm },
-    titleRow: {
-      alignItems: 'center',
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-    },
-    title: { color: c.textPrimary, fontSize: typography.body, fontWeight: '900' },
-    headerPlusButton: {
-      alignItems: 'center',
-      backgroundColor: c.surfaceAlt || 'rgba(255, 255, 255, 0.05)',
-      borderRadius: 15,
-      height: 30,
+      borderBottomWidth: 3,
       justifyContent: 'center',
-      width: 30,
+      minHeight: 46,
+      paddingHorizontal: spacing.sm,
     },
-    sectionHint: { color: c.textMuted, fontSize: 11, lineHeight: 15 },
-    listState: {
+    tabItemActive: { borderBottomColor: c.primary },
+    tabItemPressed: { opacity: 0.7 },
+    tabText: { color: c.textSecondary, fontSize: typography.body, fontWeight: '700' },
+    tabTextActive: { color: c.primary, fontWeight: '800' },
+    content: { gap: spacing.sm + 2, padding: spacing.md, paddingTop: spacing.sm + 2 },
+    cardHeader: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
+    identity: { alignItems: 'center', flex: 1, flexDirection: 'row', gap: spacing.sm, minWidth: 0 },
+    identityText: { flex: 1, minWidth: 0 },
+    deviceIcon: {
       alignItems: 'center',
-      backgroundColor: c.surfaceAlt,
       borderRadius: radius.md,
-      gap: spacing.sm,
+      height: 44,
       justifyContent: 'center',
-      minHeight: 56,
-      padding: spacing.sm,
+      width: 44,
     },
-    listStateText: {
-      color: c.textSecondary,
-      fontSize: typography.caption,
-      textAlign: 'center',
-    },
-    deviceCard: {
-      backgroundColor: c.surfaceAlt,
-      borderColor: c.border,
-      borderRadius: radius.sm,
-      borderWidth: StyleSheet.hairlineWidth,
-      gap: 6,
-      paddingHorizontal: spacing.sm,
-      paddingVertical: spacing.sm,
-    },
-    deviceHeader: {
+    name: { color: c.textPrimary, fontSize: typography.body, fontWeight: '800' },
+    meta: { color: c.textMuted, fontSize: typography.caption, marginTop: 2 },
+    badge: {
       alignItems: 'center',
-      flexDirection: 'row',
-      justifyContent: 'space-between',
-    },
-    deviceTitleGroup: {
-      alignItems: 'center',
-      flexDirection: 'row',
-      gap: spacing.xs,
-    },
-    deviceName: {
-      color: c.textPrimary,
-      flexShrink: 1,
-      fontSize: 13,
-      fontWeight: '800',
-    },
-    statusBadge: {
       borderRadius: radius.pill,
-      paddingHorizontal: 6,
-      paddingVertical: 2,
-    },
-    statusBadgeActive: {
-      backgroundColor: 'rgba(34, 197, 94, 0.15)',
-    },
-    statusBadgeInactive: {
-      backgroundColor: 'rgba(148, 163, 184, 0.15)',
-    },
-    statusText: {
-      fontSize: 9,
-      fontWeight: '800',
-      letterSpacing: 0.4,
-    },
-    statusTextActive: {
-      color: '#22C55E',
-    },
-    statusTextInactive: {
-      color: c.textSecondary,
-    },
-    deviceDetailsGrid: {
-      columnGap: spacing.sm,
       flexDirection: 'row',
-      flexWrap: 'wrap',
-      rowGap: 5,
-    },
-    deviceDetailItem: {
-      minWidth: '30%',
-    },
-    detailLabel: {
-      color: c.textMuted,
-      fontSize: 9,
-      fontWeight: '700',
-      letterSpacing: 0.5,
-      textTransform: 'uppercase',
-    },
-    detailValue: {
-      color: c.textPrimary,
-      fontSize: 11.5,
-      fontVariant: ['tabular-nums'],
-      fontWeight: '600',
-    },
-    deviceActionsRow: {
-      borderTopColor: c.divider,
-      borderTopWidth: StyleSheet.hairlineWidth,
-      flexDirection: 'row',
-      gap: spacing.xs,
-      justifyContent: 'flex-end',
-      paddingTop: 6,
-    },
-    actionBtnSecondary: {
-      alignItems: 'center',
-      backgroundColor: c.surface,
-      borderRadius: radius.sm,
-      flexDirection: 'row',
-      gap: 4,
+      gap: 5,
+      marginLeft: spacing.sm,
       paddingHorizontal: spacing.sm,
-      paddingVertical: 4,
-    },
-    actionBtnTextSecondary: {
-      color: c.primary,
-      fontSize: 11,
-      fontWeight: '700',
-    },
-    actionBtnWarning: {
-      alignItems: 'center',
-      backgroundColor: 'rgba(245, 158, 11, 0.12)',
-      borderRadius: radius.sm,
-      flexDirection: 'row',
-      gap: 4,
-      paddingHorizontal: spacing.sm,
-      paddingVertical: 4,
-    },
-    actionBtnTextWarning: {
-      color: '#F59E0B',
-      fontSize: 11,
-      fontWeight: '700',
-    },
-    actionBtnSuccess: {
-      alignItems: 'center',
-      backgroundColor: 'rgba(34, 197, 94, 0.12)',
-      borderRadius: radius.sm,
-      flexDirection: 'row',
-      gap: 4,
-      paddingHorizontal: spacing.sm,
-      paddingVertical: 4,
-    },
-    actionBtnTextSuccess: {
-      color: '#22C55E',
-      fontSize: 11,
-      fontWeight: '700',
-    },
-    actionBtnDanger: {
-      alignItems: 'center',
-      backgroundColor: 'rgba(239, 68, 68, 0.12)',
-      borderRadius: radius.sm,
-      flexDirection: 'row',
-      gap: 4,
-      paddingHorizontal: spacing.sm,
-      paddingVertical: 4,
-    },
-    actionBtnTextDanger: {
-      color: '#EF4444',
-      fontSize: 11,
-      fontWeight: '700',
-    },
-    modalOverlay: {
-      ...StyleSheet.absoluteFillObject,
-      backgroundColor: 'rgba(0, 0, 0, 0.55)',
-      justifyContent: 'flex-end',
-    },
-    modalSheetContainer: {
-      backgroundColor: c.surface,
-      borderTopLeftRadius: 24,
-      borderTopRightRadius: 24,
-      maxHeight: '85%',
-      paddingHorizontal: spacing.lg,
-      paddingTop: spacing.xs,
-      width: '100%',
-    },
-    modalScrollView: {
-      flexGrow: 1,
-    },
-    modalScrollBody: {
-      gap: spacing.md,
-      paddingBottom: spacing.xl,
-      paddingTop: spacing.xs,
-    },
-    modalContent: {
-      backgroundColor: c.surface,
-      borderTopLeftRadius: 24,
-      borderTopRightRadius: 24,
-      gap: spacing.md,
-      paddingHorizontal: spacing.lg,
-      paddingTop: spacing.xs,
-    },
-    modalHandle: {
-      alignSelf: 'center',
-      backgroundColor: c.borderStrong || '#334155',
-      borderRadius: 3,
-      height: 4,
-      marginBottom: spacing.xs,
-      marginTop: spacing.xs,
-      width: 36,
-    },
-    modalHeader: {
-      alignItems: 'center',
-      flexDirection: 'row',
-      justifyContent: 'space-between',
       paddingVertical: spacing.xs,
     },
-    modalTitle: {
-      color: c.textPrimary,
-      fontSize: 18,
-      fontWeight: '800',
-    },
-    closeButton: {
+    statusDot: { borderRadius: radius.pill, height: 6, width: 6 },
+    badgeText: { fontSize: 10, fontWeight: '800' },
+    updatedRow: { alignItems: 'center', flexDirection: 'row', gap: 5 },
+    updatedText: { color: c.textMuted, fontSize: typography.caption },
+    actions: { flexDirection: 'row', gap: spacing.sm },
+    form: { paddingBottom: spacing.sm },
+    formLoading: {
       alignItems: 'center',
-      backgroundColor: c.surfaceAlt || 'rgba(255, 255, 255, 0.05)',
-      borderRadius: radius.pill,
-      height: 32,
-      justifyContent: 'center',
-      width: 32,
+      flexDirection: 'row',
+      gap: spacing.sm,
+      paddingHorizontal: spacing.lg,
+      paddingVertical: spacing.xl,
     },
+    formLoadingText: { color: c.textSecondary, fontSize: typography.body },
   });

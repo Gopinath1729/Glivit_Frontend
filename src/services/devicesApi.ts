@@ -21,14 +21,31 @@ export type DevicePositionsArgs = DevicePlaybackArgs & {
 
 export type DeviceListArgs = {
   search?: string;
-  projectId?: number;
   groupId?: number;
-  includeSuspended?: boolean;
   page?: number;
   size?: number;
 };
 
-export type AllDevicesArgs = Pick<DeviceListArgs, 'search' | 'projectId' | 'groupId' | 'includeSuspended'>;
+export type AllDevicesArgs = Pick<DeviceListArgs, 'search' | 'groupId'>;
+
+/** Page size used when walking the whole fleet for the live map. */
+const ALL_DEVICES_PAGE_SIZE = 100;
+/**
+ * Hard ceiling on that walk.
+ *
+ * The map needs every vehicle, but "every vehicle" is a number the client does
+ * not control: an unbounded loop turns one large tenant into hundreds of
+ * sequential requests and an unbounded array on a phone. Stopping is the safe
+ * failure — the map draws what it has instead of hanging the screen.
+ */
+const MAX_DEVICE_PAGES = 50;
+
+export type MobileGpsSession = {
+  registered: boolean;
+  deviceId: number | null;
+  deviceName: string | null;
+  ingestToken: string | null;
+};
 
 export type DeviceUpsertRequest = {
   name: string;
@@ -38,13 +55,13 @@ export type DeviceUpsertRequest = {
   model?: string;
   port?: number;
   category: string;
-  projectId?: number;
+  /** Driver contact details. Free text on the device, not a linked account. */
+  driverName?: string;
+  driverPhone?: string;
+  driverAddress?: string;
   groupId?: number;
   vehicleId?: number;
   managerId?: number;
-  driverId?: number;
-  driverName?: string;
-  driverPhone?: string;
   remarks?: string;
   address?: string;
   simProvider?: string;
@@ -67,16 +84,14 @@ export const devicesApi = baseApi.injectEndpoints({
         let page = 0;
         let totalPages = 1;
 
-        while (page < totalPages) {
+        while (page < totalPages && page < MAX_DEVICE_PAGES) {
           const result = await baseQuery({
             url: '/devices',
             params: {
               ...(filters.search ? { search: filters.search } : {}),
-              ...(filters.projectId != null ? { projectId: filters.projectId } : {}),
               ...(filters.groupId != null ? { groupId: filters.groupId } : {}),
-              includeSuspended: filters.includeSuspended ?? true,
               page,
-              size: 100,
+              size: ALL_DEVICES_PAGE_SIZE,
             },
           });
           if (result.error) return { error: result.error };
@@ -127,11 +142,10 @@ export const devicesApi = baseApi.injectEndpoints({
       providesTags: ['Device'],
     }),
     getDevices: build.query<PageResponse<DeviceSummary>, DeviceListArgs>({
-      query: ({ search, projectId, groupId, page = 0, size = 20 }) => ({
+      query: ({ search, groupId, page = 0, size = 20 }) => ({
         url: '/devices',
         params: {
           ...(search ? { search } : {}),
-          ...(projectId != null ? { projectId } : {}),
           ...(groupId != null ? { groupId } : {}),
           page,
           size,
@@ -200,10 +214,21 @@ export const devicesApi = baseApi.injectEndpoints({
       transformResponse: (response: ApiResponse<{ deviceId: number; ingestToken: string }>) =>
         unwrap(response),
     }),
+    /**
+     * Resolves only the authenticated login's Mobile GPS registration. The app
+     * calls this before any Expo Location API so users without a phone tracker
+     * never receive a GPS or permission prompt.
+     */
+    bootstrapMobileGps: build.query<MobileGpsSession, void>({
+      query: () => ({ url: '/devices/mobile-gps/session', method: 'POST' }),
+      transformResponse: (response: ApiResponse<MobileGpsSession>) => unwrap(response),
+      providesTags: ['Device'],
+    }),
   }),
 });
 
 export const {
+  useBootstrapMobileGpsQuery,
   useCreateDeviceMutation,
   useIssueIngestTokenMutation,
   useDeleteDeviceMutation,

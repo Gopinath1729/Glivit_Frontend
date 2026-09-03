@@ -13,18 +13,17 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { P } from '@/src/constants/permissions';
-import { useGetFleetMaintenanceQuery } from '@/src/services/aiApi';
 import { useGetAllDevicesQuery } from '@/src/services/devicesApi';
 import { useAcknowledgeEventMutation, useGetEventsQuery } from '@/src/services/operationsApi';
 import { useAppDispatch, useAppSelector, useHasPermission } from '@/src/store/hooks';
-import { markNotificationsRead } from '@/src/store/notificationsSlice';
+import { markNotificationsRead } from '@/src/store/notificationsState';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { radius, spacing, typography, type ThemeColors, hexToRgba } from '@/src/theme/tokens';
 import type { EventDto } from '@/src/types/api';
 
 type Notification = {
   key: string;
-  kind: 'event' | 'maintenance';
+  kind: 'event';
   icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
   tone: string;
   title: string;
@@ -68,18 +67,6 @@ function severityTone(severity: string, c: ThemeColors): string {
       return c.warning;
     default:
       return c.primary;
-  }
-}
-
-function riskTone(risk: string, c: ThemeColors): string {
-  switch (risk?.toUpperCase()) {
-    case 'CRITICAL':
-    case 'HIGH':
-      return c.danger;
-    case 'MEDIUM':
-      return c.warningOrange;
-    default:
-      return c.warning;
   }
 }
 
@@ -150,19 +137,6 @@ const DEMO_NOTIFICATIONS: Omit<Notification, 'read'>[] = [
     vehicleParamName: 'TN01AB1234',
   },
   {
-    key: 'demo:maint-1',
-    kind: 'maintenance',
-    icon: 'wrench-clock',
-    tone: '#F59E0B',
-    title: 'Maintenance Due',
-    vehicleName: 'KA02CD5678',
-    detail: 'Scheduled engine oil service is due in 500 km.',
-    timeLabel: 'Today 08:15 AM',
-    sortTime: Date.now() - 3 * 60 * 60 * 1000,
-    deviceId: 2,
-    vehicleParamName: 'KA02CD5678',
-  },
-  {
     key: 'demo:battery-1',
     kind: 'event',
     icon: 'battery-alert',
@@ -192,7 +166,7 @@ const DEMO_NOTIFICATIONS: Omit<Notification, 'read'>[] = [
 
 /**
  * Notification bell + slide-in panel. Surfaces vehicle events and predictive
- * maintenance alerts (previously separate pages) in one place, with an unread
+ * device alerts in one place, with an unread
  * badge, timestamps, vehicle details, read/unread status, and direct navigation
  * to the relevant vehicle. All existing APIs and permissions are preserved.
  */
@@ -208,19 +182,15 @@ export function NotificationCenter({ tint = '#EAF3FB' }: { tint?: string }) {
 
   const { data: eventsPage, isFetching: eventsFetching, refetch: refetchEvents } =
     useGetEventsQuery({ page: 0, size: 30 }, { skip: !canView });
-  const { data: maintenance, isFetching: maintFetching, refetch: refetchMaint } =
-    useGetFleetMaintenanceQuery(undefined, { skip: !canView });
   const { data: devices } = useGetAllDevicesQuery(undefined, { skip: !canView });
   const [acknowledgeEvent] = useAcknowledgeEventMutation();
 
   const deviceNameById = useMemo(() => {
     const byId = new Map<number, string>();
-    const byVehicle = new Map<number, { id: number; name: string }>();
     for (const d of devices ?? []) {
       byId.set(d.id, d.name);
-      if (d.vehicleId != null) byVehicle.set(d.vehicleId, { id: d.id, name: d.name });
     }
-    return { byId, byVehicle };
+    return { byId };
   }, [devices]);
 
   const notifications = useMemo<Notification[]>(() => {
@@ -244,28 +214,6 @@ export function NotificationCenter({ tint = '#EAF3FB' }: { tint?: string }) {
         vehicleParamName: deviceNameById.byId.get(ev.deviceId) ?? '',
       });
     }
-    for (const m of maintenance ?? []) {
-      const key = `maint:${m.id}`;
-      const match = m.vehicleId != null ? deviceNameById.byVehicle.get(m.vehicleId) : undefined;
-      const { label, ms } = relativeTime(m.predictedFailureDate);
-      items.push({
-        key,
-        kind: 'maintenance',
-        icon: 'wrench-clock',
-        tone: riskTone(m.riskLevel, c),
-        title: `${m.riskLevel} maintenance risk`,
-        vehicleName: m.vehicleName ?? match?.name ?? `Vehicle ${m.vehicleId}`,
-        detail:
-          m.predictedDaysRemaining != null
-            ? `~${m.predictedDaysRemaining} days to service`
-            : (m.recommendedActions?.[0] ?? m.reasoning ?? null),
-        timeLabel: m.predictedFailureDate ? label : 'Predicted',
-        sortTime: ms,
-        read: Boolean(readKeys[key]),
-        deviceId: match?.id,
-        vehicleParamName: match?.name ?? m.vehicleName ?? '',
-      });
-    }
     if (items.length === 0) {
       for (const demo of DEMO_NOTIFICATIONS) {
         items.push({
@@ -278,10 +226,10 @@ export function NotificationCenter({ tint = '#EAF3FB' }: { tint?: string }) {
       if (a.read !== b.read) return a.read ? 1 : -1;
       return b.sortTime - a.sortTime;
     });
-  }, [c, deviceNameById, eventsPage?.content, maintenance, readKeys]);
+  }, [c, deviceNameById, eventsPage?.content, readKeys]);
 
   const unreadCount = notifications.reduce((n, item) => (item.read ? n : n + 1), 0);
-  const loading = eventsFetching || maintFetching;
+  const loading = eventsFetching;
 
   const onOpen = (item: Notification) => {
     if (!item.read) {
@@ -379,7 +327,6 @@ export function NotificationCenter({ tint = '#EAF3FB' }: { tint?: string }) {
               refreshing={loading}
               onRefresh={() => {
                 void refetchEvents();
-                void refetchMaint();
               }}
               ListEmptyComponent={
                 loading ? (
@@ -414,7 +361,7 @@ export function NotificationCenter({ tint = '#EAF3FB' }: { tint?: string }) {
                       <Text style={styles.rowTime}>{item.timeLabel}</Text>
                       {item.deviceId != null ? (
                         <Text style={styles.rowLink}>
-                          {item.kind === 'maintenance' ? 'View vehicle ›' : 'Track vehicle ›'}
+                          Track vehicle ›
                         </Text>
                       ) : null}
                     </View>

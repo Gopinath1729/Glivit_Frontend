@@ -17,16 +17,28 @@ import { TextField } from '@/src/components/ui/TextField';
 import { apiErrorMessage } from '@/src/services/apiError';
 import { authStorage } from '@/src/services/authStorage';
 import { baseApi } from '@/src/services/baseApi';
+import {
+  normalizeCompanyCodeInput,
+} from '@/src/services/tenantIdentity';
 import { useResolveTenantMutation } from '@/src/services/tenantApi';
-import { clearTenant, setTenant } from '@/src/store/authSlice';
+import { clearTenant, setTenant } from '@/src/store/authState';
 import { useAppDispatch } from '@/src/store/hooks';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
 
 const schema = z.object({
-  companyCode: z.string().trim().min(2, 'Enter your company code'),
+  companyCode: z
+    .string()
+    .transform(normalizeCompanyCodeInput)
+    .pipe(
+      z
+        .string()
+        .min(2, 'Enter your company code')
+        .max(64, 'Company code must be 64 characters or fewer')
+    ),
 });
-type FormValues = z.infer<typeof schema>;
+type FormInput = z.input<typeof schema>;
+type FormValues = z.output<typeof schema>;
 
 export default function CompanyCodeScreen() {
   const insets = useSafeAreaInsets();
@@ -34,31 +46,64 @@ export default function CompanyCodeScreen() {
   const dispatch = useAppDispatch();
   const { colors: c } = useTheme();
   const styles = React.useMemo(() => makeStyles(c), [c]);
-  const [resolveTenant, { isLoading }] = useResolveTenantMutation();
+  const [resolveTenant, { isLoading, reset: resetResolveTenant }] = useResolveTenantMutation();
+  // React state does not update synchronously, so this closes the tiny window in
+  // which two return-key events could start overlapping requests.
+  const submitInFlight = React.useRef(false);
 
   const {
     control,
     handleSubmit,
+    clearErrors,
     setError,
     formState: { errors },
-  } = useForm<FormValues>({
+  } = useForm<FormInput, unknown, FormValues>({
     resolver: zodResolver(schema),
     defaultValues: { companyCode: '' },
   });
 
   const onSubmit = handleSubmit(async (values) => {
+    if (submitInFlight.current) return;
+    submitInFlight.current = true;
+    const companyCode = normalizeCompanyCodeInput(values.companyCode);
+    clearErrors('companyCode');
+    // Mutation results are scoped to this hook instance. Resetting here drops a
+    // previous failed result before a valid retry starts; the trigger below then
+    // always sends a fresh request for the current normalized value.
+    resetResolveTenant();
     try {
-      const config = await resolveTenant(values.companyCode).unwrap();
+      if (__DEV__) {
+        console.info('[company-code] resolving', {
+          receivedCode: JSON.stringify(values.companyCode),
+          normalizedCode: companyCode,
+        });
+      }
+      const config = await resolveTenant(companyCode).unwrap();
+      if (__DEV__) {
+        console.info('[company-code] API response', {
+          companyCode: config.companyCode,
+          status: 200,
+        });
+      }
       // Invalidate the in-memory tenant immediately so an in-flight refresh or
       // cached query cannot repopulate data from the previous company.
       dispatch(clearTenant());
-      dispatch(baseApi.util.resetApiState());
+      baseApi.util.resetApiState();
       await authStorage.clearAll();
       await authStorage.saveTenant(config.companyCode, config);
       dispatch(setTenant({ companyCode: config.companyCode, tenantConfig: config }));
       router.replace('/login');
     } catch (err) {
+      if (__DEV__) {
+        const response = err as { status?: number | string };
+        console.warn('[company-code] API response', {
+          normalizedCode: companyCode,
+          status: response?.status ?? 'UNKNOWN',
+        });
+      }
       setError('companyCode', { message: apiErrorMessage(err, 'Invalid company code') });
+    } finally {
+      submitInFlight.current = false;
     }
   });
 
@@ -88,9 +133,16 @@ export default function CompanyCodeScreen() {
               <TextField
                 autoCapitalize="characters"
                 autoCorrect={false}
+                editable={!isLoading}
                 error={errors.companyCode?.message}
                 onBlur={onBlur}
-                onChangeText={onChange}
+                onChangeText={(text) => {
+                  // Clear both React Hook Form's message and the last
+                  // mutation result as soon as the operator changes the value.
+                  clearErrors('companyCode');
+                  resetResolveTenant();
+                  onChange(normalizeCompanyCodeInput(text));
+                }}
                 placeholder="e.g. ACME01"
                 returnKeyType="go"
                 onSubmitEditing={onSubmit}

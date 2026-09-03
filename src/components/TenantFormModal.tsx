@@ -7,6 +7,7 @@ import {
   Text,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button } from '@/src/components/ui/Button';
 import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
@@ -184,6 +185,7 @@ export function TenantFormModal({
   onUpdate: (id: number, body: TenantUpdateRequest) => Promise<void>;
 }) {
   const { colors: c } = useTheme();
+  const insets = useSafeAreaInsets();
   const styles = React.useMemo(() => makeStyles(c), [c]);
 
   const [draft, setDraft] = React.useState<Draft>(EMPTY);
@@ -281,123 +283,178 @@ export function TenantFormModal({
   return (
     <Modal animationType="slide" onRequestClose={onClose} statusBarTranslucent visible={visible}>
       <View style={styles.flex}>
-        <View style={styles.header}>
+        <View style={[styles.header, { paddingTop: Math.max(insets.top + spacing.sm, spacing.lg) }]}>
           <Pressable
             accessibilityLabel="Close"
             accessibilityRole="button"
             hitSlop={12}
             onPress={onClose}
             style={styles.headerButton}>
-            <MaterialCommunityIcons color={c.onPrimary} name="close" size={24} />
+            <MaterialCommunityIcons color={c.onPrimary} name="arrow-left" size={24} />
           </Pressable>
-          <Text numberOfLines={1} style={styles.headerTitle}>
-            {mode === 'create' ? 'Create Tenant' : 'Edit Tenant'}
-          </Text>
+          <View style={styles.headerCopy}>
+            <Text style={styles.headerEyebrow}>TENANT MANAGEMENT</Text>
+            <Text numberOfLines={1} style={styles.headerTitle}>
+              {mode === 'create' ? 'Create tenant' : 'Edit tenant'}
+            </Text>
+            <Text style={styles.headerSubtitle}>
+              {mode === 'create'
+                ? 'Set up the organization and assign its first administrator.'
+                : 'Update organization, administrator and access details.'}
+            </Text>
+          </View>
         </View>
 
-        <KeyboardAwareForm contentContainerStyle={styles.content} style={styles.flex}>
-          {banner ? (
-            <View style={styles.banner}>
-              <MaterialCommunityIcons color={c.danger} name="alert-circle-outline" size={18} />
-              <Text style={styles.bannerText}>{banner}</Text>
-            </View>
-          ) : null}
-
-          <Text style={styles.sectionLabel}>Tenant</Text>
-          <TextField
-            error={liveErrors.name}
-            label="Tenant Name"
-            onChangeText={(v) => set('name', v)}
-            placeholder="Northern Fleet Operations"
-            value={draft.name}
-          />
-          {mode === 'edit' ? (
-            <View>
-              <Text style={styles.readOnlyLabel}>Tenant ID (System Identifier)</Text>
-              <View style={styles.readOnlyBox}>
-                <Text style={styles.readOnlyValue}>{draft.tenantId}</Text>
-                <MaterialCommunityIcons color={c.textMuted} name="lock-outline" size={16} />
+        <KeyboardAwareForm
+          applyBottomInset={false}
+          contentContainerStyle={[
+            styles.content,
+            { paddingBottom: Math.max(insets.bottom, spacing.md) + spacing.xl },
+          ]}
+          extraOffset={32}
+          style={styles.flex}>
+          <View style={styles.page}>
+            {banner ? (
+              <View style={styles.banner}>
+                <MaterialCommunityIcons color={c.danger} name="alert-circle-outline" size={18} />
+                <Text style={styles.bannerText}>{banner}</Text>
               </View>
-              <Text style={styles.readOnlyHint}>
-                Auto-generated internal system identifier.
-              </Text>
+            ) : null}
+
+            <View style={styles.sectionCard}>
+              <View style={styles.sectionHeader}>
+                <View style={styles.sectionIcon}>
+                  <MaterialCommunityIcons color={c.primary} name="office-building-outline" size={20} />
+                </View>
+                <View style={styles.sectionCopy}>
+                  <Text style={styles.sectionTitle}>Organization details</Text>
+                  <Text style={styles.sectionSubtitle}>The names shown throughout the fleet workspace.</Text>
+                </View>
+              </View>
+              <View style={styles.fieldStack}>
+                <TextField
+                  error={liveErrors.name}
+                  label="Tenant Name"
+                  onChangeText={(v) => set('name', v)}
+                  placeholder="Northern Fleet Operations"
+                  value={draft.name}
+                />
+                {mode === 'edit' ? (
+                  <View>
+                    <Text style={styles.readOnlyLabel}>Tenant ID (System Identifier)</Text>
+                    <View style={styles.readOnlyBox}>
+                      <Text style={styles.readOnlyValue}>{draft.tenantId}</Text>
+                      <MaterialCommunityIcons color={c.textMuted} name="lock-outline" size={16} />
+                    </View>
+                    <Text style={styles.readOnlyHint}>Auto-generated internal system identifier.</Text>
+                  </View>
+                ) : null}
+                <TextField
+                  error={liveErrors.companyName}
+                  label="Company Name"
+                  onChangeText={(v) => set('companyName', v)}
+                  placeholder="Northern Logistics Pvt Ltd"
+                  value={draft.companyName}
+                />
+              </View>
             </View>
-          ) : null}
-          <TextField
-            error={liveErrors.companyName}
-            label="Company Name"
-            onChangeText={(v) => set('companyName', v)}
-            placeholder="Northern Logistics Pvt Ltd"
-            value={draft.companyName}
-          />
 
-          <Text style={styles.sectionLabel}>Tenant administrator</Text>
-          {mode === 'create' ? (
-            <SearchableDropdown
-              emptyText="No available members found"
-              error={liveErrors.adminUserId ?? adminCandidatesError}
-              label="Admin Name"
-              loading={adminCandidatesLoading}
-              onSelect={selectAdmin}
-              options={adminOptions}
-              placeholder="Choose an admin or member"
-              selectedId={draft.adminUserId}
-            />
-          ) : (
-            <TextField
-              error={liveErrors.adminName}
-              label="Admin Name"
-              onChangeText={(v) => set('adminName', v)}
-              placeholder="Priya Sharma"
-              value={draft.adminName}
-            />
-          )}
-          <TextField
-            autoCapitalize="none"
-            editable={mode !== 'create'}
-            error={liveErrors.adminEmail}
-            keyboardType="email-address"
-            label="Admin Email"
-            onChangeText={(v) => set('adminEmail', v.trim())}
-            placeholder="admin@northfleet.com"
-            value={draft.adminEmail}
-          />
-          <TextField
-            editable={mode !== 'create'}
-            error={liveErrors.adminPhone}
-            keyboardType="phone-pad"
-            label="Phone Number"
-            onChangeText={(v) => set('adminPhone', v)}
-            placeholder="+91 98765 43210"
-            value={draft.adminPhone}
-          />
-          {mode === 'create' ? (
-            <Text style={styles.sectionHint}>
-              Email and phone are filled from the selected member&apos;s authenticated profile. Microsoft sign-in is used, so no tenant password is created.
-            </Text>
-          ) : null}
+            <View style={styles.sectionCard}>
+              <View style={styles.sectionHeader}>
+                <View style={styles.sectionIcon}>
+                  <MaterialCommunityIcons color={c.primary} name="account-tie-outline" size={20} />
+                </View>
+                <View style={styles.sectionCopy}>
+                  <Text style={styles.sectionTitle}>Tenant administrator</Text>
+                  <Text style={styles.sectionSubtitle}>Choose the member responsible for this organization.</Text>
+                </View>
+              </View>
+              <View style={styles.fieldStack}>
+                {mode === 'create' ? (
+                  <SearchableDropdown
+                    emptyText="No available members found"
+                    error={liveErrors.adminUserId ?? adminCandidatesError}
+                    label="Admin Name"
+                    loading={adminCandidatesLoading}
+                    onSelect={selectAdmin}
+                    options={adminOptions}
+                    placeholder="Choose an admin or member"
+                    selectedId={draft.adminUserId}
+                  />
+                ) : (
+                  <TextField
+                    error={liveErrors.adminName}
+                    label="Admin Name"
+                    onChangeText={(v) => set('adminName', v)}
+                    placeholder="Priya Sharma"
+                    value={draft.adminName}
+                  />
+                )}
+                <TextField
+                  autoCapitalize="none"
+                  editable={mode !== 'create'}
+                  error={liveErrors.adminEmail}
+                  keyboardType="email-address"
+                  label="Admin Email"
+                  onChangeText={(v) => set('adminEmail', v.trim())}
+                  placeholder="admin@northfleet.com"
+                  value={draft.adminEmail}
+                />
+                <TextField
+                  editable={mode !== 'create'}
+                  error={liveErrors.adminPhone}
+                  keyboardType="phone-pad"
+                  label="Phone Number"
+                  onChangeText={(v) => set('adminPhone', v)}
+                  placeholder="+91 98765 43210"
+                  value={draft.adminPhone}
+                />
+                {mode === 'create' ? (
+                  <View style={styles.infoNote}>
+                    <MaterialCommunityIcons color={c.primary} name="information-outline" size={17} />
+                    <Text style={styles.infoNoteText}>
+                      Contact details come from the selected member. They activate their own account
+                      and choose their password from the login screen.
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+            </View>
 
-          <Text style={styles.sectionLabel}>Tenant Status</Text>
-          <View style={styles.statusRow}>
-            {STATUSES.map((status) => (
-              <Chip
-                key={status}
-                active={draft.status === status}
-                label={statusLabel(status)}
-                onPress={() => set('status', status)}
+            <View style={styles.sectionCard}>
+              <View style={styles.sectionHeader}>
+                <View style={styles.sectionIcon}>
+                  <MaterialCommunityIcons color={c.primary} name="shield-check-outline" size={20} />
+                </View>
+                <View style={styles.sectionCopy}>
+                  <Text style={styles.sectionTitle}>Access status</Text>
+                  <Text style={styles.sectionSubtitle}>Control sign-in and tenant-switch availability.</Text>
+                </View>
+              </View>
+              <View style={styles.fieldStack}>
+                <View style={styles.statusRow}>
+                  {STATUSES.map((status) => (
+                    <Chip
+                      key={status}
+                      active={draft.status === status}
+                      label={statusLabel(status)}
+                      onPress={() => set('status', status)}
+                    />
+                  ))}
+                </View>
+                {liveErrors.status ? <Text style={styles.fieldError}>{liveErrors.status}</Text> : null}
+                <Text style={styles.sectionHint}>{statusHint(draft.status)}</Text>
+              </View>
+            </View>
+
+            <View style={styles.actions}>
+              <Button
+                label={mode === 'create' ? 'Create tenant' : 'Save changes'}
+                loading={submitting}
+                onPress={submit}
               />
-            ))}
-          </View>
-          {liveErrors.status ? <Text style={styles.fieldError}>{liveErrors.status}</Text> : null}
-          <Text style={styles.sectionHint}>{statusHint(draft.status)}</Text>
-
-          <View style={styles.actions}>
-            <Button
-              label={mode === 'create' ? 'Create tenant' : 'Save changes'}
-              loading={submitting}
-              onPress={submit}
-            />
-            <Button disabled={submitting} label="Cancel" onPress={onClose} variant="secondary" />
+              <Button disabled={submitting} label="Cancel" onPress={onClose} variant="secondary" />
+            </View>
           </View>
         </KeyboardAwareForm>
       </View>
@@ -418,7 +475,6 @@ function statusHint(status: TenantStatus) {
 }
 
 function roleLabel(role: ManagedUserDto['role']) {
-  if (role === 'DRIVER') return 'Driver';
   if (role === 'COMPANY_USER') return 'User';
   return 'Admin';
 }
@@ -430,18 +486,37 @@ const makeStyles = (c: ThemeColors) =>
       alignItems: 'center',
       backgroundColor: c.primary,
       flexDirection: 'row',
-      gap: spacing.sm,
-      paddingBottom: spacing.md,
-      paddingHorizontal: spacing.md,
-      paddingTop: spacing.xxl,
-    },
-    headerButton: { padding: spacing.xs },
-    headerTitle: { color: c.onPrimary, flex: 1, fontSize: typography.h2, fontWeight: '800' },
-    content: {
       gap: spacing.md,
-      padding: spacing.md,
-      paddingBottom: spacing.xxl,
+      paddingBottom: spacing.lg,
+      paddingHorizontal: spacing.md,
     },
+    headerButton: {
+      alignItems: 'center',
+      alignSelf: 'flex-start',
+      borderRadius: radius.pill,
+      height: 40,
+      justifyContent: 'center',
+      width: 40,
+    },
+    headerCopy: { flex: 1, gap: 3, minWidth: 0 },
+    headerEyebrow: {
+      color: c.onPrimary,
+      fontSize: 10,
+      fontWeight: '900',
+      letterSpacing: 1,
+      opacity: 0.78,
+    },
+    headerTitle: { color: c.onPrimary, fontSize: typography.h2, fontWeight: '900' },
+    headerSubtitle: {
+      color: c.onPrimary,
+      fontSize: typography.caption,
+      lineHeight: 17,
+      opacity: 0.9,
+    },
+    content: {
+      padding: spacing.md,
+    },
+    page: { alignSelf: 'center', gap: spacing.md, maxWidth: 680, width: '100%' },
     banner: {
       alignItems: 'center',
       backgroundColor: 'rgba(220,38,38,0.10)',
@@ -453,14 +528,37 @@ const makeStyles = (c: ThemeColors) =>
       padding: spacing.md,
     },
     bannerText: { color: c.danger, flex: 1, fontSize: typography.caption, lineHeight: 17 },
-    sectionLabel: {
-      color: c.textPrimary,
-      fontSize: typography.label,
-      fontWeight: '900',
-      marginTop: spacing.sm,
-      textTransform: 'uppercase',
+    sectionCard: {
+      backgroundColor: c.surface,
+      borderColor: c.border,
+      borderRadius: radius.lg,
+      borderWidth: StyleSheet.hairlineWidth * 2,
+      gap: spacing.md,
+      padding: spacing.md,
     },
+    sectionHeader: { alignItems: 'center', flexDirection: 'row', gap: spacing.sm },
+    sectionIcon: {
+      alignItems: 'center',
+      backgroundColor: c.accentSoft,
+      borderRadius: radius.sm,
+      height: 40,
+      justifyContent: 'center',
+      width: 40,
+    },
+    sectionCopy: { flex: 1, minWidth: 0 },
+    sectionTitle: { color: c.textPrimary, fontSize: typography.title, fontWeight: '900' },
+    sectionSubtitle: { color: c.textMuted, fontSize: typography.caption, lineHeight: 17, marginTop: 2 },
+    fieldStack: { gap: spacing.md },
     sectionHint: { color: c.textSecondary, fontSize: typography.caption, lineHeight: 17 },
+    infoNote: {
+      alignItems: 'flex-start',
+      backgroundColor: c.accentSoft,
+      borderRadius: radius.md,
+      flexDirection: 'row',
+      gap: spacing.sm,
+      padding: spacing.sm + 2,
+    },
+    infoNoteText: { color: c.textSecondary, flex: 1, fontSize: typography.caption, lineHeight: 17 },
     readOnlyLabel: {
       color: c.textSecondary,
       fontSize: typography.label,
@@ -488,5 +586,5 @@ const makeStyles = (c: ThemeColors) =>
     },
     statusRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
     fieldError: { color: c.danger, fontSize: typography.caption },
-    actions: { gap: spacing.sm, marginTop: spacing.lg },
+    actions: { gap: spacing.sm, paddingTop: spacing.xs },
   });

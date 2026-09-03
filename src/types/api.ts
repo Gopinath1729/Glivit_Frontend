@@ -24,7 +24,7 @@ export type PageResponse<T> = {
   last: boolean;
 };
 
-export type Role = 'SUPER_ADMIN' | 'ADMIN' | 'TENANT_ADMIN' | 'COMPANY_USER' | 'DRIVER';
+export type Role = 'SUPER_ADMIN' | 'ADMIN' | 'TENANT_ADMIN' | 'COMPANY_USER';
 
 export type TenantConfig = {
   companyCode: string;
@@ -103,7 +103,7 @@ export type TenantCreateRequest = {
   status: TenantStatus;
 };
 
-export type TenantMemberRole = 'ALL' | 'ADMIN' | 'USER' | 'DRIVER';
+export type TenantMemberRole = 'ALL' | 'ADMIN' | 'USER';
 
 export type TenantUpdateRequest = {
   name: string;
@@ -134,14 +134,12 @@ export type DeviceSummary = {
   category: string;
   vehicleId?: number | null;
   vehicleName?: string | null;
-  projectId?: number | null;
+  driverName?: string | null;
+  driverPhone?: string | null;
+  driverAddress?: string | null;
   groupId?: number | null;
   simNumber?: string | null;
   simProvider?: string | null;
-  driverName?: string | null;
-  driverId?: number | null;
-  driverPhone?: string | null;
-  driverLicenceNumber?: string | null;
   state: string;
   latitude?: number | null;
   longitude?: number | null;
@@ -159,19 +157,22 @@ export type DeviceSummary = {
   locked?: boolean;
   lastCommandType?: string | null;
   lastCommandAt?: string | null;
+  /**
+   * Tenant staleness threshold for `lastUpdate`, from the server, so the client
+   * applies the same freshness rule rather than guessing its own.
+   */
+  offlineTimeoutSeconds: number;
 };
 
 export type DeviceDetail = DeviceSummary & {
   model?: string | null;
-  projectId?: number | null;
+  driverName?: string | null;
+  driverPhone?: string | null;
+  driverAddress?: string | null;
   managerId?: number | null;
   simNumber?: string | null;
   simProvider?: string | null;
   simApn?: string | null;
-  driverId?: number | null;
-  driverName?: string | null;
-  driverPhone?: string | null;
-  driverLicenceNumber?: string | null;
   remarks?: string | null;
   activatedAt?: string | null;
   timezone?: string | null;
@@ -199,29 +200,6 @@ export type VehicleDocumentContent = {
   content: string;
 };
 
-export type ProjectDto = {
-  id: number;
-  name: string;
-  description?: string | null;
-  status: string;
-  createdAt?: string;
-  updatedAt?: string;
-};
-
-export type DriverDto = {
-  id: number;
-  projectId?: number | null;
-  name: string;
-  identifier?: string | null;
-  phone?: string | null;
-  licenceNumber?: string | null;
-  licenceExpiry?: string | null;
-  emergencyContact?: string | null;
-  active: boolean;
-  createdAt?: string;
-  updatedAt?: string;
-};
-
 export type GroupDto = {
   id: number;
   name: string;
@@ -231,20 +209,48 @@ export type GroupDto = {
   updatedAt?: string;
 };
 
+/**
+ * Lifecycle of a member account, mirroring the backend UserStatus.
+ *
+ * A member the Tenant Admin has just created is PENDING_ACTIVATION: the row
+ * exists but holds no password and its address is unverified, so the Members
+ * list must say so rather than implying the person can already sign in.
+ */
+export type MemberStatus = 'PENDING_ACTIVATION' | 'ACTIVE' | 'DISABLED' | 'LOCKED';
+
 export type ManagedUserDto = {
   id: number;
   username: string;
   name: string;
   email?: string | null;
+  /** True once the address has answered a verification code. */
+  emailVerified?: boolean;
   mobile?: string | null;
   address?: string | null;
   role: Role;
   managerId?: number | null;
-  status: string;
+  status: MemberStatus | string;
   accountExpiry?: string | null;
   permissions: Record<string, boolean>;
   createdAt?: string;
   updatedAt?: string;
+};
+
+/** Reply to a "send me a code" request. Carries no code and no account data. */
+export type OtpChallengeResponse = {
+  message: string;
+  expiresInSeconds: number;
+  resendAfterSeconds: number;
+};
+
+/** The server-issued proof that a code was answered. */
+export type OtpVerifiedResponse = {
+  verificationToken: string;
+  expiresInSeconds: number;
+};
+
+export type SimpleMessageResponse = {
+  message: string;
 };
 
 export type EventDto = {
@@ -323,6 +329,8 @@ export type ReportLocationPoint = {
   dateTime: string;
   latitude: number;
   longitude: number;
+  /** Horizontal GPS uncertainty in metres. */
+  accuracyMeters?: number | null;
   address: string;
   lastKnown: boolean;
 };
@@ -347,6 +355,39 @@ export type ReportOverspeedEvent = {
   address: string;
 };
 
+/** One bucket of the distance trend: a labelled day/week/month and its total. */
+export type ReportTrendPoint = { label: string; bucketStart: string; distanceKm: number };
+
+/**
+ * Fleet-wide activity for one time window, summed across every vehicle the
+ * caller may reach.
+ *
+ * `totalVehicles` counts vehicles in scope whether or not they reported;
+ * `reportingVehicles` counts only those that did. `hasData` is false when
+ * nothing reported, and the screen shows an empty state rather than a grid of
+ * zeroes -- which would read as "the fleet did nothing" instead of "there is
+ * nothing to show".
+ */
+export type FleetTimelineReport = {
+  fromTime: string;
+  toTime: string;
+  period: ReportPeriod;
+  totalVehicles: number;
+  reportingVehicles: number;
+  hasData: boolean;
+  summary: {
+    totalDistanceKm: number;
+    runningSeconds: number;
+    idleSeconds: number;
+    stoppedSeconds: number;
+    offlineSeconds: number;
+    maximumSpeedKmh: number;
+    averageSpeedKmh: number;
+    totalTrips: number;
+  };
+  distanceTrend: ReportTrendPoint[];
+};
+
 export type VehicleActivityReport = {
   deviceId: number;
   vehicleId?: number | null;
@@ -368,7 +409,7 @@ export type VehicleActivityReport = {
     averageSpeedKmh: number;
     overspeedCount: number;
   };
-  distanceTrend: { label: string; bucketStart: string; distanceKm: number }[];
+  distanceTrend: ReportTrendPoint[];
   journey: { start?: ReportLocationPoint | null; end?: ReportLocationPoint | null };
   stopIdleDetails: {
     totalStops: number;
@@ -377,18 +418,7 @@ export type VehicleActivityReport = {
     idleEvents: ReportActivityEvent[];
   };
   overspeedDetails: ReportOverspeedEvent[];
-  activitySummary: { status: 'RUNNING' | 'STOPPED' | 'OFFLINE'; durationSeconds: number; percentage: number }[];
-  driverDetails: {
-    assigned: boolean;
-    driverId?: number | null;
-    name?: string | null;
-    mobileNumber?: string | null;
-    licenceNumber?: string | null;
-    assignedVehicle: string;
-    totalDistanceKm: number;
-    runningSeconds: number;
-    overspeedEvents: number;
-  };
+  activitySummary: { status: 'RUNNING' | 'IDLE' | 'STOPPED' | 'OFFLINE'; durationSeconds: number; percentage: number }[];
 };
 
 export type SettingsDto = {
@@ -430,6 +460,9 @@ export type PositionDto = {
   serverTime: string;
   latitude: number;
   longitude: number;
+  /** Canonical km/h. The backend converted it exactly once, at ingest. */
+  speedKmh?: number;
+  /** Legacy alias of `speedKmh`. */
   speed: number;
   course: number;
   ignition?: boolean | null;
@@ -445,10 +478,50 @@ export type PlaybackTrackPoint = {
   t: string;
   lat: number;
   lng: number;
+  /**
+   * Where the backend map matcher placed this fix on the OSM road network.
+   * Absent when the matcher could not place it confidently, in which case the
+   * reported coordinate is used and the route is reported as unmatched rather
+   * than presented as if it had been matched.
+   */
+  matchedLat?: number | null;
+  matchedLng?: number | null;
+  matched?: boolean;
+  /** Horizontal GPS uncertainty in metres. */
+  accuracyMeters?: number | null;
+  /** Canonical km/h from the backend. Converted exactly once, at ingest. */
+  speedKmh?: number;
+  /** Legacy alias of `speedKmh`. */
   speed: number;
+  /**
+   * Confirmed travel from the start of the range up to this fix, in km, as
+   * measured by the backend.
+   *
+   * The app never derives distance itself. The drawn route follows road
+   * geometry and is longer than the path between fixes, so measuring what is
+   * drawn over-reports; and a stationary phone's jitter, summed on the client,
+   * is exactly what produced 3 km for a vehicle that never moved.
+   */
+  distanceKm?: number;
   course: number;
   ignition?: boolean | null;
   gpsValid: boolean;
+  /**
+   * The tracker went silent between the previous point and this one while the
+   * vehicle kept moving, so the roads in between were never observed. The route
+   * is broken here instead of being drawn as a straight line across them.
+   */
+  gapBefore?: boolean;
+  /** Client-only marker used to reconcile overlapping road-match chunks. */
+  mapMatched?: boolean;
+  /**
+   * The GPS coordinate exactly as the tracker reported it, kept for auditing
+   * whenever `lat`/`lng` have been moved by drift-holding or road snapping.
+   * Absent when the rendered coordinate is still the reported one. Nothing on
+   * the map may read these: rendering uses `lat`/`lng` only.
+   */
+  rawLat?: number;
+  rawLng?: number;
 };
 
 export type PlaybackEventMarker = {
@@ -464,6 +537,88 @@ export type PlaybackStopMarker = {
   lat: number;
   lng: number;
   minutes: number;
+  seconds: number;
+  /** 1-based position of this stop in the journey. */
+  index: number;
+  /** Distance travelled since the previous stop, or since the journey start. */
+  distanceFromPreviousKm: number;
+  address?: string | null;
+};
+
+export type PlaybackSegmentType = 'MOVING' | 'STOPPED' | 'NO_DATA';
+
+/** One contiguous span of the journey, in chronological order. */
+export type PlaybackTimelineSegment = {
+  type: PlaybackSegmentType;
+  from: string;
+  to: string;
+  seconds: number;
+  distanceKm: number;
+  startLat: number;
+  startLng: number;
+  endLat: number;
+  endLng: number;
+  startAddress?: string | null;
+  endAddress?: string | null;
+  /** Set on STOPPED spans; matches PlaybackStopMarker.index. */
+  stopIndex?: number | null;
+  averageSpeedKmh: number;
+  maxSpeedKmh: number;
+};
+
+export type PlaybackLocation = {
+  time: string;
+  lat: number;
+  lng: number;
+  address?: string | null;
+};
+
+export type PlaybackSummary = {
+  startTime: string | null;
+  endTime: string | null;
+  totalSeconds: number;
+  movingSeconds: number;
+  stoppedSeconds: number;
+  noDataSeconds: number;
+  distanceKm: number;
+  stopCount: number;
+  startLocation: PlaybackLocation | null;
+  endLocation: PlaybackLocation | null;
+};
+
+/** Status of the backend road-matching pass over a history range. */
+/**
+ * Why a route is, or is not, drawn on road geometry.
+ *
+ * `UNAVAILABLE` is deliberately distinct from `UNMATCHED`: both fall back to
+ * validated GPS, but the first is a routing service that is configured and not
+ * answering - a deployment problem an operator can fix - and the second is a
+ * trace the service genuinely could not place. Reporting them identically meant
+ * a router that had been down for days looked like a run of awkward trips.
+ */
+export type MapMatchStatus =
+  | 'MATCHED'
+  | 'PARTIAL'
+  | 'UNMATCHED'
+  | 'UNAVAILABLE'
+  | 'DISABLED';
+
+/**
+ * One contiguous polyline of matched road, as `[latitude, longitude]` pairs.
+ *
+ * Runs are separated by genuine coverage gaps, and each is drawn as its own
+ * polyline. That separation is the whole reason a break in the data is never
+ * rendered as a diagonal across the buildings between its two ends.
+ */
+export type PlaybackRouteRun = {
+  path: [number, number][];
+  /** False when this run fell back to the validated GPS trace. */
+  matched: boolean;
+  confidence: number;
+  /** Index into `points` of the first fix this run covers. */
+  fromIndex: number;
+  /** Index into `points` of the last fix this run covers. */
+  toIndex: number;
 };
 
 export type PlaybackResponse = {
@@ -476,4 +631,16 @@ export type PlaybackResponse = {
   points: PlaybackTrackPoint[];
   events: PlaybackEventMarker[];
   stops: PlaybackStopMarker[];
+  timeline: PlaybackTimelineSegment[];
+  summary: PlaybackSummary;
+  /**
+   * THE geometry to draw. Rendering joins these coordinates; it never joins
+   * `points`, which are the GPS observations behind them.
+   */
+  route?: PlaybackRouteRun[];
+  matchStatus?: MapMatchStatus;
+  matchConfidence?: number;
+  matchEngine?: string;
+  /** How many raw fixes the backend validator refused, by reason. */
+  rejectedPoints?: Record<string, number>;
 };

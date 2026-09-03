@@ -31,10 +31,12 @@ import {
   type MapPreferences,
 } from '@/src/services/mapPreferencesStorage';
 import { useGetAllDevicesQuery, useGetDevicesQuery } from '@/src/services/devicesApi';
+import { formatDeviceState, resolveDeviceRecordState } from '@/src/services/deviceState';
+import { useMobileGpsReadiness } from '@/src/services/mobileGpsStatus';
 import { useGetGeofencesQuery } from '@/src/services/operationsApi';
 import { dedupeByVehicle } from '@/src/services/vehicleIdentity';
 import { useFleetLivePositions } from '@/src/services/fleetLivePositions';
-import { getMapStyleInfo, nativeMapsAvailable, type MapStyleVariant } from '@/src/services/mapStyle';
+import { getMapStyleInfo, type MapStyleVariant } from '@/src/services/mapStyle';
 import { normalizeHeading } from '@/src/services/vehicleMarkerAssets';
 import type { DeviceSummary } from '@/src/types/api';
 import { useTheme } from '@/src/theme/ThemeProvider';
@@ -118,11 +120,21 @@ export default function AllVehiclesMapScreen() {
         return {
           ...d,
           state,
-          speed: target ? target.speed : (d.speed ?? 0),
+          // Canonical km/h straight from the backend. Never rescaled here.
+          speed: target ? target.speedKmh : (d.speed ?? 0),
+          accuracyMeters: target?.accuracyMeters ?? null,
+          ignition: target?.ignition ?? d.ignition,
+          gpsValid: target?.gpsValid ?? d.gpsValid,
           latitude: target ? target.latitude : d.latitude,
           longitude: target ? target.longitude : d.longitude,
           course: target?.heading ?? d.course ?? 0,
-          lastUpdate: target ? new Date(target.updatedAt).toISOString() : d.lastUpdate,
+          // The GPS clock, not the arrival clock. Reporting when the packet
+          // reached the app would make a vehicle replaying an old buffer look
+          // permanently fresh, and would hide a tracker that has gone quiet.
+          lastUpdate:
+            target && target.sourceTime > 0
+              ? new Date(target.sourceTime).toISOString()
+              : d.lastUpdate,
         };
       });
     },
@@ -149,17 +161,18 @@ export default function AllVehiclesMapScreen() {
     [geofenceQuery.data?.content]
   );
 
+  const readiness = useMobileGpsReadiness();
   const statusCounts = useMemo(() => {
-    const acc = { RUNNING: 0, STOPPED: 0, NO_DATA: 0 };
+    const acc = { RUNNING: 0, STOPPED: 0, OFFLINE: 0 };
     for (const d of liveDevices) {
-      const st = (d.state ?? '').toUpperCase();
+      // The same resolved status the markers and the vehicle list show.
+      const st = resolveDeviceRecordState(d, readiness).state;
       if (st === 'RUNNING' || st === 'MOVING') acc.RUNNING += 1;
-      // IDLE is retired; rows still carrying it count as stopped.
-      else if (st === 'STOPPED' || st === 'IDLE') acc.STOPPED += 1;
-      else acc.NO_DATA += 1;
+      else if (st === 'STOPPED' || st === 'IDLE' || st === 'IMMOBILISED') acc.STOPPED += 1;
+      else acc.OFFLINE += 1;
     }
     return acc;
-  }, [liveDevices]);
+  }, [liveDevices, readiness]);
 
   useEffect(() => {
     if (selectedId != null && !located.some((device) => device.id === selectedId)) {
@@ -192,17 +205,20 @@ export default function AllVehiclesMapScreen() {
 
   const webMarkers = useMemo<WebMapMarker[]>(
     () =>
-      liveDevices.map((d) => ({
-        id: d.id,
-        lat: d.latitude,
-        lng: d.longitude,
-        color: stateColors[d.state] ?? stateColors.NO_DATA ?? '#475569',
-        heading: d.course,
-        category: d.category,
-        label: d.name,
-        moving: d.state === 'RUNNING' && (d.speed ?? 0) > 0,
-      })),
-    [liveDevices, stateColors]
+      liveDevices.map((d) => {
+        const resolved = resolveDeviceRecordState(d, readiness);
+        return {
+          id: d.id,
+          lat: d.latitude,
+          lng: d.longitude,
+          color: stateColors[resolved.state] ?? stateColors.NO_DATA ?? '#475569',
+          heading: d.course,
+          category: d.category,
+          label: d.name,
+          moving: resolved.state === 'RUNNING' && (d.speed ?? 0) > 0,
+        };
+      }),
+    [liveDevices, readiness, stateColors]
   );
 
   const [showLayersSheet, setShowLayersSheet] = useState(false);
@@ -224,7 +240,9 @@ export default function AllVehiclesMapScreen() {
         ? 'dark'
         : 'street';
   const mapStyleInfo = getMapStyleInfo(activeStyleKey);
-  const useNativeMap = Platform.OS !== 'web' && nativeMapsAvailable;
+  // Geoapify is the fleet map provider on every platform. This keeps Android,
+  // iOS and web on the same tiles and removes the Google-provider dependency.
+  const useNativeMap = false;
 
   const [manualRefreshing, setManualRefreshing] = useState(false);
   const handleRefresh = useCallback(async () => {
@@ -407,21 +425,6 @@ export default function AllVehiclesMapScreen() {
         </View>
       ) : null}
 
-      {/* Icon and label were two separately animated elements chasing each
-          other; one pill says the same thing and never desynchronises. */}
-      <Pressable
-        accessibilityLabel="Ask Glivt Sentinel"
-        accessibilityRole="button"
-        onPress={() => router.push('/ai-chat')}
-        style={({ pressed }) => [
-          styles.aiPill,
-          { bottom: 68 + (insets.bottom > 0 ? insets.bottom : 8) + 16 },
-          pressed && styles.aiPillPressed,
-        ]}>
-        <MaterialCommunityIcons color={c.onPrimary} name="robot-outline" size={19} />
-        <Text style={styles.aiPillText}>Sentinel</Text>
-      </Pressable>
-
       <MapLayersBottomSheet
         visible={showLayersSheet}
         onClose={() => setShowLayersSheet(false)}
@@ -460,6 +463,9 @@ function NativeFleetMap({
   targetsRef: React.MutableRefObject<Map<number, import('@/src/services/fleetLivePositions').FleetTarget>>;
 }) {
   const { stateColors } = useTheme();
+  // Same shared status calculation the list and the counters use; subscribing
+  // here keeps marker colours in step when the phone's location switch flips.
+  const readiness = useMobileGpsReadiness();
   const screen = useWindowDimensions();
   // The 3D overlay's orthographic camera has to use the MAP's box, not the
   // window's: the map sits inside a bottom-safe-area inset, so window height is
@@ -695,7 +701,7 @@ function NativeFleetMap({
               projectionHeading={projection.heading}
               isSelected={selectedId === device.id}
               onSelect={onSelectDevice}
-              color={stateColors[device.state] ?? stateColors.NO_DATA}
+              color={stateColors[resolveDeviceRecordState(device, readiness).state] ?? stateColors.NO_DATA}
             />
           );
         })}
@@ -715,10 +721,10 @@ function NativeFleetMap({
           x={point.x}
           y={point.y}
           name={device.name}
-          state={device.state}
+          state={resolveDeviceRecordState(device, readiness).state}
           speed={device.speed}
           lastUpdate={device.lastUpdate}
-          statusColor={stateColors[device.state] ?? stateColors.NO_DATA}
+          statusColor={stateColors[resolveDeviceRecordState(device, readiness).state] ?? stateColors.NO_DATA}
           selected={selected}
         />
       ))}
@@ -739,23 +745,6 @@ const POPUP_BG = 'rgba(9, 17, 29, 0.92)';
 const POPUP_ENTER_DELTA = 0.055;
 const POPUP_EXIT_DELTA = 0.09;
 
-function formatVehicleState(state: string): string {
-  switch ((state ?? '').toUpperCase()) {
-    case 'RUNNING':
-      return 'Running';
-    case 'STOPPED':
-    case 'IDLE':
-      return 'Stopped';
-    case 'EXPIRED':
-      return 'Expired';
-    case 'INACTIVE':
-      return 'Inactive';
-    case 'NO_DATA':
-      return 'Offline';
-    default:
-      return state ? state.charAt(0) + state.slice(1).toLowerCase() : 'Offline';
-  }
-}
 
 function formatRelativeUpdate(iso?: string | null): string {
   if (!iso) return 'No update';
@@ -806,7 +795,7 @@ const VehiclePopup = memo(function VehiclePopup({
       <View style={popupStyles.row}>
         <View style={[popupStyles.dot, { backgroundColor: statusColor }]} />
         <Text numberOfLines={1} style={popupStyles.meta}>
-          {formatVehicleState(state)} · {Math.max(0, Math.round(speed))} km/h
+          {formatDeviceState(state)} · {Math.max(0, Math.round(speed))} km/h
         </Text>
       </View>
       <Text numberOfLines={1} style={popupStyles.time}>
@@ -893,10 +882,11 @@ function RailButton({
   );
 }
 
-const STATUS_SEGMENTS: { key: 'RUNNING' | 'STOPPED' | 'NO_DATA'; label: string }[] = [
+const STATUS_SEGMENTS: { key: 'RUNNING' | 'STOPPED' | 'OFFLINE'; label: string }[] = [
   { key: 'RUNNING', label: 'Running' },
   { key: 'STOPPED', label: 'Stopped' },
-  { key: 'NO_DATA', label: 'Offline' },
+  // Every non-reporting state, matching the Vehicles screen's bucket.
+  { key: 'OFFLINE', label: 'Not Reporting' },
 ];
 
 const makeStyles = (c: ThemeColors) =>
@@ -950,27 +940,6 @@ const makeStyles = (c: ThemeColors) =>
       fontWeight: '800',
     },
     stripLabel: { color: c.textSecondary, fontSize: 10, fontWeight: '700' },
-    aiPill: {
-      alignItems: 'center',
-      backgroundColor: c.primary,
-      borderColor: 'rgba(255,255,255,0.35)',
-      borderRadius: radius.pill,
-      borderWidth: StyleSheet.hairlineWidth,
-      elevation: 6,
-      flexDirection: 'row',
-      gap: 6,
-      paddingHorizontal: 16,
-      paddingVertical: 11,
-      position: 'absolute',
-      right: 12,
-      shadowColor: c.shadowColor,
-      shadowOffset: { width: 0, height: 4 },
-      shadowOpacity: 0.3,
-      shadowRadius: 8,
-      zIndex: 25,
-    },
-    aiPillPressed: { opacity: 0.85 },
-    aiPillText: { color: c.onPrimary, fontSize: 13, fontWeight: '900' },
     mapVignette: {
       ...StyleSheet.absoluteFillObject,
       backgroundColor: 'rgba(6, 13, 24, 0.022)',
