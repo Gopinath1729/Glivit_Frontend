@@ -174,12 +174,13 @@ for (const [label, payload] of Object.entries(MALFORMED)) {
 // The missing History route line.
 // ---------------------------------------------------------------------------
 
-test('a range the router could not confidently match still has a route to draw', () => {
-  // The backend marks a run `matched` only when EVERY chunk of it solved, and
-  // it returns the validated fixes as that run's geometry when one did not.
-  // `resolveMatchedRoute` used to discard those runs outright, so a single
-  // throttled chunk anywhere in the day left the History tab with a journey and
-  // no line on it - which on the default shared demo router is most days.
+test('a range the router could not match is kept, but never as the road route', () => {
+  // The backend returns the validated fixes as an explicitly UNMATCHED run when
+  // a chunk did not solve. That geometry is still useful - a journey with no
+  // line at all is a broken screen - but it is not a road, and it used to be
+  // returned in `runs` and drawn in exactly the same blue as matched geometry.
+  // At a glance the two were indistinguishable, and the unmatched one is a
+  // chord across whatever lies between the fixes. It now travels separately.
   const route = resolveMatchedRoute({
     points: straightDrive.points,
     matchStatus: 'UNMATCHED',
@@ -194,19 +195,21 @@ test('a range the router could not confidently match still has a route to draw',
     ],
   });
 
-  assert.equal(route.runs.length, 1, 'the GPS-derived run is drawn');
+  assert.equal(route.runs.length, 0, 'nothing is offered as road geometry');
+  assert.equal(route.diagnosticRuns.length, 1, 'the GPS-derived run is still available');
   assert.equal(route.hasMatchedGeometry, false, 'and is honestly labelled as not road-matched');
   assert.equal(route.status, 'UNMATCHED', 'so the screen can still say why');
 });
 
-test('validated playback points still produce route runs when the route array is absent', () => {
+test('validated points are reconstructed as a GPS-only overlay when no route is returned', () => {
   const route = resolveMatchedRoute({
     points: straightDrive.points,
     matchStatus: 'UNAVAILABLE',
   });
 
-  assert.equal(route.runs.length, 1, 'validated points are the visible fallback');
-  assert.equal(route.runs[0].coordinates.length, straightDrive.points.length);
+  assert.equal(route.runs.length, 0, 'a router that is down produces no road');
+  assert.equal(route.diagnosticRuns.length, 1, 'the journey is still visible, as GPS only');
+  assert.equal(route.diagnosticRuns[0].coordinates.length, straightDrive.points.length);
   assert.equal(route.hasMatchedGeometry, false);
 });
 

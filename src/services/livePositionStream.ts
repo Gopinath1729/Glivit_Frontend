@@ -27,6 +27,14 @@ import { openSse, type SseConnection } from './sseClient';
  * The token is read at connect time through a provider instead, so a rotation
  * costs nothing and the next reconnect picks up the current one.
  *
+ * <h3>Two frame types</h3>
+ * `POSITION` is a new validated GPS fix and goes through the client's GPS
+ * validation. `ROAD_MATCH` is the road answer for one `positionId` that has
+ * already been delivered, and deliberately does NOT: it repeats that fix's
+ * timestamp, so the duplicate-GPS rule correctly refuses it, and refusing it is
+ * how the backend's road geometry used to be thrown away on arrival. The two
+ * are dispatched to separate listeners here so neither rule has to be relaxed.
+ *
  * <h3>Reconnect contract</h3>
  * Reconnection is exponential with jitter (in {@link openSse}), and the server
  * replays every vehicle's current position on connect. So after any
@@ -37,6 +45,18 @@ import { openSse, type SseConnection } from './sseClient';
 export type LivePositionEvent = {
   deviceId: number;
   vehicleId: number | null;
+  /**
+   * Identity of the stored fix this frame carries.
+   *
+   * Every later statement about this fix names it: the ROAD_MATCH enrichment
+   * that says where the road put it, the route vertex appended for it, the
+   * marker drawn at it, and the hydration boundary that says where history
+   * stops and the stream starts. Correlating any of those by timestamp or by
+   * arrival order is what let one fix's answer be applied to another's.
+   *
+   * Null for a backend that predates the field.
+   */
+  positionId: number | null;
   /** Validated GPS coordinate exactly as reported. */
   latitude: number;
   longitude: number;
@@ -50,11 +70,9 @@ export type LivePositionEvent = {
   /**
    * How the backend produced `matchedLatitude`/`matchedLongitude`.
    *
-   * `SOLVED` is a fresh answer from the routing engine. `CARRIED` is the
-   * previous solve's snap correction applied to this fix because the solve was
-   * debounced or the router was briefly unavailable — still road-continuous,
-   * but not a new measurement, which is why it carries no confidence. `NONE` is
-   * the validated coordinate, unmodified.
+   * `SOLVED` is a fresh answer from Geoapify. `HELD` keeps the exact previous
+   * road coordinate because no new usable match was available. `CARRIED` is a
+   * legacy-server value. `NONE` is the validated coordinate, unmodified.
    *
    * Without this distinction a client can only trust a coordinate that carries
    * a confidence, so a rate-limited router made the marker alternate between
@@ -63,7 +81,7 @@ export type LivePositionEvent = {
    *
    * Null for a backend that predates the field.
    */
-  matchedSource: 'SOLVED' | 'CARRIED' | 'NONE' | null;
+  matchedSource: 'SOLVED' | 'HELD' | 'CARRIED' | 'NONE' | null;
   /** Road vertices covered since the previous update, as [lat, lng] pairs. */
   matchedGeometry: [number, number][];
   /** Canonical km/h. The backend converted it exactly once, at ingest. */
@@ -118,6 +136,41 @@ export type LivePositionEvent = {
   matchStatus: MapMatchStatus | null;
 };
 
+/**
+ * The road answer for ONE already-delivered position.
+ *
+ * <h3>Why this is not a POSITION frame</h3>
+ * It carries no new GPS reading. It repeats the timestamp of the fix it
+ * describes, so feeding it to the GPS validator gets it correctly rejected as a
+ * duplicate — and that rejection is what used to discard the road geometry the
+ * backend had just computed, leaving the client with nothing to draw but the
+ * chord between two fixes. Enrichment is routed around GPS validation entirely
+ * and applied by `positionId`.
+ *
+ * <h3>What a client may do with it</h3>
+ * - `SOLVED` with geometry: draw that road, move the marker along it.
+ * - `CARRIED`/`HELD`: the previous road coordinate still stands. The marker may
+ *   use it; no geometry was returned, so no route is appended.
+ * - `NONE`: no road answer. The vehicle stays visible, the reason is reported,
+ *   and nothing at all is appended to the road route.
+ */
+export type LiveRoadMatchEvent = {
+  deviceId: number;
+  vehicleId: number | null;
+  /** The fix this answers for. Frames without one are unusable and dropped. */
+  positionId: number;
+  matchedLatitude: number | null;
+  matchedLongitude: number | null;
+  roadBearing: number | null;
+  matchConfidence: number | null;
+  matchedSource: 'SOLVED' | 'HELD' | 'CARRIED' | 'NONE';
+  /** Road vertices travelled since the previous matched position, `[lat, lng]`. */
+  matchedGeometry: [number, number][];
+  matchStatus: MapMatchStatus | null;
+  gpsTime: string | null;
+  serverTime: string | null;
+};
+
 export type LiveStreamStatus = 'idle' | 'connecting' | 'open' | 'reconnecting';
 
 export type LiveStreamState = {
@@ -133,12 +186,14 @@ export type LiveStreamState = {
 };
 
 type PositionListener = (event: LivePositionEvent) => void;
+type RoadMatchListener = (event: LiveRoadMatchEvent) => void;
 type StateListener = (state: LiveStreamState) => void;
 
 type Shared = {
   key: string;
   connection: SseConnection;
   positionListeners: Set<PositionListener>;
+  roadMatchListeners: Set<RoadMatchListener>;
   stateListeners: Set<StateListener>;
   state: LiveStreamState;
   refCount: number;
@@ -179,11 +234,11 @@ function finiteNumber(value: unknown): number | null {
   return toFiniteNumber(value);
 }
 
-const MATCHED_SOURCES = ['SOLVED', 'CARRIED', 'NONE'] as const;
+const MATCHED_SOURCES = ['SOLVED', 'HELD', 'CARRIED', 'NONE'] as const;
 
-function matchedSourceOf(value: unknown): 'SOLVED' | 'CARRIED' | 'NONE' | null {
+function matchedSourceOf(value: unknown): 'SOLVED' | 'HELD' | 'CARRIED' | 'NONE' | null {
   return typeof value === 'string' && (MATCHED_SOURCES as readonly string[]).includes(value)
-    ? (value as 'SOLVED' | 'CARRIED' | 'NONE')
+    ? (value as 'SOLVED' | 'HELD' | 'CARRIED' | 'NONE')
     : null;
 }
 
@@ -251,9 +306,12 @@ export function parseLivePositionEvent(value: unknown): LivePositionEvent | null
   const speedKmh = finiteNumber(value.speedKmh) ?? finiteNumber(value.speed) ?? 0;
   const accuracy = finiteNumber(value.accuracyMeters) ?? finiteNumber(value.accuracy);
 
+  const positionId = finiteNumber(value.positionId);
+
   return {
     deviceId,
     vehicleId: vehicleId != null && Number.isSafeInteger(vehicleId) ? vehicleId : null,
+    positionId: positionId != null && Number.isSafeInteger(positionId) ? positionId : null,
     latitude,
     longitude,
     matchedLatitude: finiteNumber(value.matchedLatitude),
@@ -282,6 +340,45 @@ export function parseLivePositionEvent(value: unknown): LivePositionEvent | null
   };
 }
 
+/**
+ * Parse one ROAD_MATCH frame.
+ *
+ * A frame without a usable `positionId` is dropped outright. Without it the
+ * enrichment cannot be attributed to a fix, and applying it to "whatever is
+ * current" is precisely the stale-match bug — a road answer computed for one
+ * position moving a different one.
+ */
+export function parseLiveRoadMatchEvent(value: unknown): LiveRoadMatchEvent | null {
+  if (!isJsonObject(value)) return null;
+
+  const deviceId = finiteNumber(value.deviceId);
+  const positionId = finiteNumber(value.positionId);
+  if (
+    deviceId == null ||
+    !Number.isSafeInteger(deviceId) ||
+    positionId == null ||
+    !Number.isSafeInteger(positionId)
+  ) {
+    return null;
+  }
+
+  const vehicleId = finiteNumber(value.vehicleId);
+  return {
+    deviceId,
+    vehicleId: vehicleId != null && Number.isSafeInteger(vehicleId) ? vehicleId : null,
+    positionId,
+    matchedLatitude: finiteNumber(value.matchedLatitude),
+    matchedLongitude: finiteNumber(value.matchedLongitude),
+    roadBearing: finiteNumber(value.roadBearing),
+    matchConfidence: finiteNumber(value.matchConfidence),
+    matchedSource: matchedSourceOf(value.matchedSource) ?? 'NONE',
+    matchedGeometry: coordinatePairs(value.matchedGeometry),
+    matchStatus: matchStatusOf(value.matchStatus),
+    gpsTime: nullableString(value.gpsTime),
+    serverTime: nullableString(value.serverTime),
+  };
+}
+
 // ---------------------------------------------------------------- transport
 
 function publishState(next: Partial<LiveStreamState>): void {
@@ -297,6 +394,7 @@ function openShared(key: string): Shared {
     key,
     connection: { close: () => undefined },
     positionListeners: new Set(),
+    roadMatchListeners: new Set(),
     stateListeners: new Set(),
     state: { ...IDLE_STATE, status: 'connecting' },
     refCount: 0,
@@ -330,11 +428,28 @@ function openShared(key: string): Shared {
     },
     onEvent: (name, data) => {
       publishState({ lastMessageAt: Date.now() });
-      if (name !== 'POSITION') return;
+      if (name !== 'POSITION' && name !== 'ROAD_MATCH') return;
       let raw: unknown;
       try {
         raw = JSON.parse(data) as unknown;
       } catch {
+        return;
+      }
+      if (name === 'ROAD_MATCH') {
+        const enrichment = parseLiveRoadMatchEvent(raw);
+        if (!enrichment) return;
+        traceGps('matched', enrichment.deviceId, {
+          stage: 'sse_road_match',
+          positionId: enrichment.positionId,
+          matchedSource: enrichment.matchedSource,
+          matchStatus: enrichment.matchStatus,
+          vertices: enrichment.matchedGeometry.length,
+          gpsTime: enrichment.gpsTime,
+          sseLatencyMs: enrichment.gpsTime
+            ? Date.now() - Date.parse(enrichment.gpsTime)
+            : null,
+        });
+        container.roadMatchListeners.forEach((listener) => listener(enrichment));
         return;
       }
       const event = parseLivePositionEvent(raw);
@@ -351,6 +466,7 @@ function releaseShared(container: Shared): void {
   if (container.refCount > 0) return;
   container.connection.close();
   container.positionListeners.clear();
+  container.roadMatchListeners.clear();
   container.stateListeners.clear();
   if (shared === container) shared = null;
 }
@@ -364,6 +480,7 @@ function releaseShared(container: Shared): void {
  */
 export function useLivePositionStream(
   onPosition: PositionListener,
+  onRoadMatch: RoadMatchListener,
   enabled = true
 ): LiveStreamState {
   const token = useAppSelector((s) => s.auth.accessToken);
@@ -379,6 +496,8 @@ export function useLivePositionStream(
   // reopen the stream continuously and lose fixes the whole time.
   const handlerRef = useRef(onPosition);
   handlerRef.current = onPosition;
+  const roadMatchHandlerRef = useRef(onRoadMatch);
+  roadMatchHandlerRef.current = onRoadMatch;
 
   useEffect(() => {
     if (!enabled || !env.backendBaseUrl) {
@@ -399,13 +518,16 @@ export function useLivePositionStream(
     container.refCount += 1;
 
     const forward: PositionListener = (event) => handlerRef.current(event);
+    const forwardMatch: RoadMatchListener = (event) => roadMatchHandlerRef.current(event);
     const onState: StateListener = (next) => setState(next);
     container.positionListeners.add(forward);
+    container.roadMatchListeners.add(forwardMatch);
     container.stateListeners.add(onState);
     setState(container.state);
 
     return () => {
       container.positionListeners.delete(forward);
+      container.roadMatchListeners.delete(forwardMatch);
       container.stateListeners.delete(onState);
       releaseShared(container);
     };
@@ -419,6 +541,7 @@ export function closeLivePositionStream(): void {
   if (!shared) return;
   shared.connection.close();
   shared.positionListeners.clear();
+  shared.roadMatchListeners.clear();
   shared.stateListeners.clear();
   shared = null;
   currentToken = null;

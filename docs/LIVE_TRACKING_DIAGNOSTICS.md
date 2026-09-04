@@ -9,14 +9,19 @@ track and no seeded position anywhere in this system.
 
 ```
 phone sensor
+  -> gpsPipeline.GpsAcquisitionGate               WARM-UP: nothing leaves the
+                                                  phone until several fresh,
+                                                  accurate, mutually consistent
+                                                  fixes agree
   -> mobileGpsPayload.validateMobileGpsLocation   accept / reject, with a reason
   -> phoneTracker.postFix                         newest fix always wins
   -> POST /api/ingest/positions
   -> PositionIngestService                        validate, hold, resolve speed + heading
   -> positions row + device_current_position      the stored point
-  -> LivePositionPublisher (AFTER_COMMIT, async)
-  -> LiveRoadMatcher                              road-snapped point + travelled geometry
-  -> LivePositionBroadcaster                      SSE POSITION frame
+  -> LiveRoadMatchWorker (AFTER_COMMIT, async)    one pipeline, one sample
+  -> LiveRoadMatcher                              validate + rolling 8-10 point window
+  -> Geoapify Map Matching                        road point + travelled geometry
+  -> persist match + LivePositionBroadcaster      one SSE POSITION frame
   -> livePositionStream.parseLivePositionEvent
   -> livePositions.applyLiveEvent                 validate again, accept / reject
   -> liveRouteTrail.appendTrail                   the travelled route line
@@ -27,18 +32,71 @@ Each stage either passes the same accepted point on or refuses it with a
 recorded reason. **A refused point is never replaced with a generated one**: the
 vehicle holds its last trusted position and the label on its freshness changes.
 
+### Warm-up, and why the first fix is never published
+
+A cold GPS returns a position long before it returns a good one. Its first
+readings are a fused cell/Wi-Fi estimate or a two-satellite solution: they pass
+every structural check, carry a plausible accuracy number, and sit anywhere
+within a block or two of the truth. Published immediately they become the
+route's first vertex, the trip's origin and the stored playback record's
+opening point — permanently — and everything after them is measured from a
+position that was never real. That is the whole of "the live route is wrong at
+the start and gets better after a while": nothing heals, the pipeline simply
+leaves the bad opening behind.
+
+`GpsAcquisitionGate` holds the session closed until
+`GPS_ACQUISITION.minSamples` consecutive fixes are each fresh, each inside a
+tighter-than-usual accuracy ceiling, strictly ordered in time, and separated by
+steps their elapsed time can explain. One disagreeing sample restarts the run,
+because a receiver whose consecutive fixes contradict each other has not
+converged.
+
+The step test is Haversine over elapsed time — a *speed*, not a distance — so
+warm-up completes just as readily for a phone that starts tracking in a moving
+car as for one on a desk. There is no per-travel-mode threshold to re-tune for
+walking, cycling or driving.
+
+The gate sits **before the POST**, which is what makes Live and Playback agree
+by construction: a fix refused during warm-up is never ingested, so it can
+never be matched, drawn live, or replayed later. The tracker screen shows
+`Acquiring GPS… n/N stable fixes` while this is happening; it is a healthy
+state, not an error.
+
+Under cover the strict ceiling relaxes once, after `maxWarmupMs`, to the
+ordinary steady-state ceiling — so a receiver that genuinely cannot do better
+still starts tracking rather than leaving the vehicle invisible. It never
+relaxes past that, so warm-up can never admit a fix ordinary validation would
+refuse.
+
+### One collector uploads at a time
+
+Both collectors stay registered — the background task is what keeps tracking
+alive once the app leaves the screen — but only one of them POSTs. The
+foreground watcher owns uploads while the app is on screen; the background task
+owns them the rest of the time, and `setForegroundCollectorActive` /
+`isForegroundCollectorActive` is the single predicate both consult.
+
+They used to both upload, at 1 Hz each, for the same device. The backend
+deduplicated the result (`verdict=REJECTED:DUPLICATE` on every other frame), so
+no data was corrupted — but it was two uploads per second where one is needed,
+and the two are not equivalent: the background task drains its delivery
+serially, awaiting each POST, so on a slow link its queue never catches up.
+Observed on the test fleet as a device whose stored GPS time ran a steady
+58 seconds behind its arrival time while a second device on the same phone was
+current. That is the "delayed coordinates" symptom, and it was self-inflicted.
+
 ### Which coordinate is used for what
 
 | | source | used for |
 |---|---|---|
 | **raw** | the device's reported coordinate | auditing only |
-| **validated** | raw, after the checks | distance, speed, **bearing** |
-| **matched** | where the road matcher placed it | the drawn marker and route |
+| **validated** | raw, after the checks | duplicate/jump rejection and sensor speed/status inputs |
+| **matched** | where Geoapify placed it | marker movement, route, road bearing/rotation and continuity checks |
 | **display** | matched, eased between fixes | the rendered marker |
 
-Movement maths never reads a matched coordinate. Two consecutive fixes can be
-snapped onto opposite carriageways of a dual road, and the bearing between those
-two points runs *across* the road rather than along it.
+Validation deliberately remains in raw-sensor space; rendered movement remains
+in matched-road space. Road bearing is reconciled with the observed travel
+direction so a bidirectional road cannot rotate the vehicle backwards.
 
 ## Turning the trace on
 
@@ -68,6 +126,7 @@ real road, which means a release build.
 ```
 [gps:raw]       lat=… lng=… accuracy=… speedMps=… heading=… fixAgeMs=…
 [gps:validated] lat=… lng=… uploadLatencyMs=…        <- sensor-to-server latency
+[gps:rejected]  reason=acquiring:… samples=n needed=N  <- still warming up
 [gps:rejected]  reason=…                              <- every refusal, with why
 [gps:sse]       event=open|error|retry
 [gps:matched]   raw=… validated=… matched=… isMatched=… deviceCourse=…
@@ -96,6 +155,16 @@ real road, which means a release build.
   vertex counts, and `routeSource` on `[gps:matched]` says whether each stretch
   came from road geometry (`matched`) or from the segment between two accepted
   points (`accepted`).
+* **"Nothing is being sent at all."** Look for `reason=acquiring:…`. Warm-up is
+  working; the receiver has not converged. `samples=n needed=N` is the
+  progress, and the `acquiring:` suffix names what keeps resetting the run.
+
+Every client-side record also carries a one-line `pipeline` summary —
+`RAW <coord> -> ACCEPTED|REJECTED -> reason -> MATCHED(source) <coord> ->
+LIVE_APPENDED|PLAYBACK_STORED|SKIPPED` — alongside the structured fields. It
+answers the question the structured fields do not: *did this coordinate end up
+on my route?* An accepted fix can still be held, and a held fix extends
+nothing.
 
 ## Road matching
 
@@ -109,32 +178,21 @@ the app draws what the server matched.
 
 | Setting | Default | Notes |
 |---|---|---|
-| `APP_MAP_MATCHING_ENGINE` | `OSRM` | or `VALHALLA`, or `NONE` to turn it off |
-| `APP_MAP_MATCHING_BASE_URL` | `https://router.project-osrm.org` | **public demo server** — see below |
-| `APP_MAP_MATCHING_LIVE_MIN_INTERVAL_MS` | `0` | 0 = every accepted fix is matched |
-| `APP_MAP_MATCHING_LIVE_MIN_MOVEMENT` | `5` | a vehicle that has not moved this far holds its match |
-| `APP_MAP_MATCHING_TIMEOUT_MS` | `4000` | per request |
+| `MAP_MATCHING_PROVIDER` | `GEOAPIFY` | or `NONE` to turn it off |
+| `GEOAPIFY_API_KEY` | unset | backend-only Map Matching API credential |
+| `GEOAPIFY_MAP_MATCHING_URL` | `https://api.geoapify.com/v1/mapmatching` | POST endpoint |
+| `MAP_MATCHING_WINDOW_SIZE` | `10` | clamped to the latest 8-10 validated fixes |
+| `GPS_MAX_ACCURACY_METERS` | `30` | less accurate fixes never reach matching |
+| `MAP_MATCHING_TIMEOUT_MS` | `2000` | per attempt |
+| `MAP_MATCHING_MAX_RETRIES` | `1` | transient 429/5xx/transport failures only |
 
-**No API key is involved.** OSRM and Valhalla are keyless; the only
-`EXPO_PUBLIC_GEOAPIFY_API_KEY` in this project is for map *tiles* and has
-nothing to do with matching.
+`GEOAPIFY_API_KEY` exists only in backend configuration. The app's separately
+restricted `EXPO_PUBLIC_GEOAPIFY_TILES_API_KEY` can access map tiles only and
+must never reuse the matching credential.
 
-> The default points at the **public OSRM demo server**. It works with zero
-> setup, which is why it is the default — but it is rate-limited, its usage
-> policy does not permit production traffic, and every vehicle coordinate sent
-> to it leaves your infrastructure. Before carrying a real fleet:
->
-> ```
-> # One-time: fetch an OSM extract for your region and prepare it, then:
-> docker run -p 5000:5000 -v "$PWD/osrm-data:/data" osrm/osrm-backend osrm-routed --algorithm mld /data/region.osrm
->
-> # Then point the backend at it:
-> APP_MAP_MATCHING_BASE_URL=http://localhost:5000
-> ```
-
-The application logs which engine and URL it is using at startup and then probes
-it once, so a wrong URL or a stopped container shows up in the boot log rather
-than as a toast on somebody's History tab hours later.
+The application logs whether the provider, URL, and key are configured without
+logging the URL query string or secret. It does not spend a paid API request on
+a synthetic startup probe.
 
 ### The four states, and why they are not one state
 
@@ -147,7 +205,7 @@ are different problems and the app says which:
 | `MATCHED` / `PARTIAL` | On road geometry | — |
 | `UNMATCHED` | Engine answered, could not place this trace | Nobody — unmapped ground, or imprecise fixes |
 | `UNAVAILABLE` | Configured, **not answering** | You: wrong URL, container down, firewall |
-| `DISABLED` | Nothing configured | You: set `APP_MAP_MATCHING_BASE_URL` |
+| `DISABLED` | Nothing configured | You: set the backend `GEOAPIFY_API_KEY` |
 
 `UNAVAILABLE` and `DISABLED` are announced on the Live tab as well as History.
 `UNMATCHED` is not — it happens routinely on unmapped ground, and toasting it
@@ -162,11 +220,10 @@ each paying the full request timeout — a wedged router used to cost a history
 read `4s × number of chunks` before it drew anything. It half-opens after a
 cooldown that backs off to one probe a minute, and closes on the first success.
 
-While it is open the live matcher **carries the last valid snap correction onto
-each new fix** (bounded to 25 m, cleared by a coverage gap). The vehicle keeps
-moving, on the road it was last known to be on, and the route is not drawn
-through buildings — rather than either freezing the marker or dropping it back
-to raw coordinates. A trace the engine *declines* is not counted as a failure:
+While it is open the live matcher **holds the exact last valid matched road
+coordinate** and emits no new route geometry. It never substitutes the failed
+sample's raw coordinate, so no diagonal or building-crossing segment is added.
+A trace the engine *declines* is not counted as a failure:
 that is the engine working, and counting it would open the breaker on a run of
 rural trips.
 

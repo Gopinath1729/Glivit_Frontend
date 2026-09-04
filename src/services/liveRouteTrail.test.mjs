@@ -3,8 +3,8 @@ import test from 'node:test';
 
 import {
   appendTrail,
+  drawableRuns,
   mergeLiveTrailHistory,
-  progressLiveTrail,
   safeMatchedGeometry,
   travelledSegment,
 } from './liveRouteTrail.ts';
@@ -24,23 +24,35 @@ function at(metresNorth, metresEast = 0) {
 const T0 = Date.parse('2026-09-01T10:00:00Z');
 
 /**
- * Replays a sequence of accepted fixes exactly as the live reducer does, so the
+ * Replays a sequence of accepted fixes exactly as the live pipeline does, so the
  * assertions are about the route a driver would actually see.
  *
  * Each step advances the GPS clock by `afterMs` (default three seconds, which
  * with the ~50 m steps below is a plausible 60 km/h). The clock is not optional
  * decoration: the segment rules are about elapsed time and implied speed as
  * much as distance, and a fixture that omits it cannot exercise them.
+ *
+ * `matchedSource` is the load-bearing input now. It is what says whether the
+ * backend produced a road for this fix, and the whole point of the rewrite is
+ * that only `SOLVED` road geometry may extend the authoritative line.
  */
 function driveRoute(steps) {
   let trail = [];
+  let diagnostic = [];
   let previousDisplay = null;
   let previousTimestampMs = null;
   let clock = T0;
+  let positionId = 1000;
+  // Mirrors the reducer's own bookkeeping: the drawn route is open only where
+  // road geometry was actually appended. A fix with no road answer closes it,
+  // so the next matched segment starts a new run rather than reaching back
+  // across the stretch nobody could place.
+  let roadRouteOpen = false;
   const sources = [];
   const modes = [];
   for (const step of steps) {
     clock += step.afterMs ?? 3_000;
+    positionId += 1;
     if (step.held) {
       // A held fix extends nothing, and does not move the drawn position.
       sources.push('held');
@@ -49,78 +61,241 @@ function driveRoute(steps) {
     }
     const segment = travelledSegment({
       matchedGeometry: step.matchedGeometry ?? [],
-      isMatched: step.isMatched ?? false,
+      matchedSource: step.matchedSource ?? 'NONE',
       previousDisplay,
       previousTimestampMs,
       currentDisplay: step.display,
       currentTimestampMs: clock,
       gapBefore: step.gapBefore ?? false,
       newTrip: step.newTrip ?? false,
+      roadRouteOpen,
     });
+    roadRouteOpen =
+      segment.source === 'carried' ? roadRouteOpen : segment.source === 'matched';
     sources.push(segment.source);
     modes.push(segment.mode);
-    trail = appendTrail(trail, segment.vertices, segment.mode);
+    trail = appendTrail(trail, segment.vertices, segment.mode, {
+      positionId,
+      timestampMs: clock,
+    });
+    diagnostic = appendTrail(diagnostic, segment.diagnosticVertices, segment.diagnosticMode, {
+      positionId,
+      timestampMs: clock,
+    });
     previousDisplay = step.display;
     previousTimestampMs = clock;
   }
-  return { trail, sources, modes };
+  return { trail, diagnostic, sources, modes };
 }
 
-test('the route line appears with no map-matching engine configured at all', () => {
-  // matchedGeometry is empty on every fix, which is what a stock deployment
-  // sends (app.map-matching.base-url is blank). The route must still be drawn.
+/** Coordinates only, for assertions about what is drawn. */
+function drawn(trail) {
+  return trail.map((run) => run.vertices);
+}
+
+// ---------------------------------------------------------------- the rules
+
+test('a 90-degree turn is drawn as the L the matcher returned, not as a chord', () => {
+  // The two fixes sit either side of a corner. The matched geometry is the L
+  // that joins them; the chord between the fixes cuts through the building on
+  // the inside of the turn. Only the L may be drawn.
   const { trail, sources } = driveRoute([
-    { display: at(0), newTrip: true },
-    { display: at(50) },
-    { display: at(100) },
-    { display: at(150) },
-  ]);
-
-  assert.equal(trail.length, 1, 'one continuous run');
-  assert.equal(trail[0].length, 4, 'every accepted point is on the line');
-  assert.deepEqual(sources, ['accepted', 'accepted', 'accepted', 'accepted']);
-});
-
-test('accepted points are appended in chronological order', () => {
-  const { trail } = driveRoute([
-    { display: at(0), newTrip: true },
-    { display: at(50) },
-    { display: at(100) },
-  ]);
-  const northings = trail[0].map((c) => Math.round((c.latitude - BASE_LAT) / METRE));
-  assert.deepEqual(northings, [0, 50, 100]);
-});
-
-test('road-matched geometry is preferred and drawn verbatim', () => {
-  const { trail, sources } = driveRoute([
-    { display: at(0), newTrip: true },
+    { display: at(0, 0), newTrip: true, matchedSource: 'SOLVED' },
     {
-      display: at(60),
-      isMatched: true,
-      // A curve the straight segment would cut across.
+      display: at(100, 100),
+      matchedSource: 'SOLVED',
       matchedGeometry: [
-        [at(0).latitude, at(0).longitude],
-        [at(20, 10).latitude, at(20, 10).longitude],
-        [at(40, 10).latitude, at(40, 10).longitude],
-        [at(60).latitude, at(60).longitude],
+        [at(0, 0).latitude, at(0, 0).longitude],
+        [at(100, 0).latitude, at(100, 0).longitude],
+        [at(100, 100).latitude, at(100, 100).longitude],
       ],
     },
   ]);
 
-  assert.deepEqual(sources, ['accepted', 'matched']);
-  // The curve's interior vertices survive, so the line follows the road.
-  assert.ok(trail[0].length >= 4);
+  assert.deepEqual(sources, ['matched', 'matched']);
+  const run = trail[trail.length - 1].vertices;
+  // The corner vertex survives, which is the whole difference between an L and
+  // a diagonal.
+  const hasCorner = run.some(
+    (vertex) =>
+      Math.abs(vertex.latitude - at(100, 0).latitude) < 1e-9 &&
+      Math.abs(vertex.longitude - at(100, 0).longitude) < 1e-9
+  );
+  assert.ok(hasCorner, 'the corner is on the drawn route');
+  assert.equal(run.length, 3, 'exactly the three road vertices, no invented chord');
 });
 
-test('unusable matched geometry falls back to the accepted segment, never to nothing', () => {
-  // Geometry that starts a kilometre from where the vehicle was: the solver put
-  // it on a different road. It must be refused - and the travelled stretch must
-  // still be drawn, because the vehicle demonstrably covered it.
+test('no road answer draws NO authoritative route at all', () => {
+  // The exact case that used to produce a straight blue line: two perfectly
+  // good fixes, and a matcher that returned nothing for them.
+  const { trail, diagnostic, sources } = driveRoute([
+    { display: at(0), newTrip: true, matchedSource: 'NONE' },
+    { display: at(50), matchedSource: 'NONE' },
+    { display: at(100), matchedSource: 'NONE' },
+  ]);
+
+  assert.deepEqual(sources, ['none', 'none', 'none']);
+  assert.equal(drawableRuns(trail).length, 0, 'nothing is drawn as a road');
+  // The evidence is not thrown away - it is offered separately, for a layer the
+  // UI must style as GPS-only.
+  assert.ok(drawableRuns(diagnostic).length > 0, 'the GPS-only diagnostic still has the stretch');
+});
+
+test('a matching outage never fabricates a road between two matched stretches', () => {
+  const { trail, diagnostic } = driveRoute([
+    { display: at(0), newTrip: true, matchedSource: 'SOLVED' },
+    {
+      display: at(50),
+      matchedSource: 'SOLVED',
+      matchedGeometry: [
+        [at(0).latitude, at(0).longitude],
+        [at(25).latitude, at(25).longitude],
+        [at(50).latitude, at(50).longitude],
+      ],
+    },
+    // The router goes down for one fix.
+    { display: at(100), matchedSource: 'NONE' },
+    // ...and comes back.
+    {
+      display: at(150),
+      matchedSource: 'SOLVED',
+      matchedGeometry: [
+        [at(100).latitude, at(100).longitude],
+        [at(125).latitude, at(125).longitude],
+        [at(150).latitude, at(150).longitude],
+      ],
+    },
+  ]);
+
+  const runs = drawableRuns(trail);
+  assert.equal(runs.length, 2, 'two matched runs, separated by the outage');
+  // The gap is real: the last vertex of run one and the first of run two are
+  // 50 m apart and NOT joined.
+  const endOfFirst = runs[0][runs[0].length - 1];
+  const startOfSecond = runs[1][0];
+  assert.ok(Math.abs(endOfFirst.latitude - at(50).latitude) < 1e-9);
+  assert.ok(Math.abs(startOfSecond.latitude - at(100).latitude) < 1e-9);
+  assert.ok(drawableRuns(diagnostic).length > 0, 'the unmatched stretch is on the GPS layer');
+});
+
+test('CARRIED keeps the marker where it is and invents no geometry', () => {
+  const { trail, diagnostic, sources } = driveRoute([
+    { display: at(0), newTrip: true, matchedSource: 'SOLVED' },
+    {
+      display: at(50),
+      matchedSource: 'SOLVED',
+      matchedGeometry: [
+        [at(0).latitude, at(0).longitude],
+        [at(50).latitude, at(50).longitude],
+      ],
+    },
+    // No new road answer. The previous road coordinate stands.
+    { display: at(50), matchedSource: 'CARRIED' },
+    { display: at(50), matchedSource: 'HELD' },
+  ]);
+
+  assert.deepEqual(sources, ['matched', 'matched', 'carried', 'carried']);
+  const runs = drawableRuns(trail);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].length, 2, 'the carried fixes added no vertices');
+  assert.equal(
+    drawableRuns(diagnostic).length,
+    0,
+    'a carried fix is not an unmatched stretch either - it is simply no news'
+  );
+});
+
+test('road-matched geometry is drawn verbatim, curves included', () => {
+  const curve = [];
+  for (let step = 0; step <= 10; step += 1) {
+    curve.push([at(step * 5, step * step * 0.4).latitude, at(step * 5, step * step * 0.4).longitude]);
+  }
   const { trail, sources } = driveRoute([
-    { display: at(0), newTrip: true },
+    { display: at(0, 0), newTrip: true, matchedSource: 'SOLVED' },
+    { display: at(50, 40), matchedSource: 'SOLVED', matchedGeometry: curve },
+  ]);
+
+  assert.deepEqual(sources, ['matched', 'matched']);
+  assert.ok(trail[0].vertices.length >= 8, 'the curve interior survives');
+});
+
+test('a one-vertex tail continues the road rather than fragmenting it', () => {
+  // Observed on a real drive: roughly one fix in six comes back SOLVED with a
+  // single geometry vertex, because the vehicle advanced without leaving the
+  // road segment it was already on. Both ends are engine-placed road positions,
+  // so the step between them IS that segment. Treating it as a failure broke the
+  // line into a piece per short step.
+  const { trail, sources } = driveRoute([
+    { display: at(0), newTrip: true, matchedSource: 'SOLVED' },
+    {
+      display: at(20),
+      afterMs: 1_000,
+      matchedSource: 'SOLVED',
+      matchedGeometry: [
+        [at(0).latitude, at(0).longitude],
+        [at(20).latitude, at(20).longitude],
+      ],
+    },
+    // The short tail: one vertex, 4 m of travel.
+    {
+      display: at(24),
+      afterMs: 1_000,
+      matchedSource: 'SOLVED',
+      matchedGeometry: [[at(24).latitude, at(24).longitude]],
+    },
+    // ...and a normal tail resumes.
+    {
+      display: at(44),
+      afterMs: 1_000,
+      matchedSource: 'SOLVED',
+      matchedGeometry: [
+        [at(24).latitude, at(24).longitude],
+        [at(44).latitude, at(44).longitude],
+      ],
+    },
+  ]);
+
+  assert.deepEqual(sources, ['matched', 'matched', 'matched', 'matched']);
+  assert.equal(drawableRuns(trail).length, 1, 'one continuous run, not three');
+});
+
+test('a LONG step with no geometry still breaks the line', () => {
+  // The same short-tail path must not become a licence to invent a road. Past
+  // the bound, the missing geometry means the road actually taken is unknown.
+  const { trail, sources } = driveRoute([
+    { display: at(0), newTrip: true, matchedSource: 'SOLVED' },
+    {
+      display: at(20),
+      afterMs: 1_000,
+      matchedSource: 'SOLVED',
+      matchedGeometry: [
+        [at(0).latitude, at(0).longitude],
+        [at(20).latitude, at(20).longitude],
+      ],
+    },
+    // 200 m in one step, and the matcher offered no road for it.
+    {
+      display: at(220),
+      afterMs: 4_000,
+      matchedSource: 'SOLVED',
+      matchedGeometry: [[at(220).latitude, at(220).longitude]],
+    },
+  ]);
+
+  assert.deepEqual(sources, ['matched', 'matched', 'none']);
+  assert.equal(drawableRuns(trail).length, 1, 'the unknown stretch is not drawn as road');
+  assert.equal(trail[0].vertices.length, 2, 'the earlier matched run is untouched');
+});
+
+test('unusable matched geometry is refused and draws nothing', () => {
+  // Geometry that starts a kilometre from where the vehicle was: the solver put
+  // it on a different road. It must be refused - and refusing it must NOT fall
+  // back to the chord, which is the fabrication this whole change removes.
+  const { trail, diagnostic, sources } = driveRoute([
+    { display: at(0), newTrip: true, matchedSource: 'SOLVED' },
     {
       display: at(60),
-      isMatched: true,
+      matchedSource: 'SOLVED',
       matchedGeometry: [
         [BASE_LAT + 0.02, BASE_LNG + 0.02],
         [BASE_LAT + 0.021, BASE_LNG + 0.021],
@@ -128,276 +303,203 @@ test('unusable matched geometry falls back to the accepted segment, never to not
     },
   ]);
 
-  assert.deepEqual(sources, ['accepted', 'accepted']);
-  assert.equal(trail[0].length, 2);
+  assert.deepEqual(sources, ['matched', 'none']);
+  assert.equal(drawableRuns(trail).length, 0, 'the refused stretch drew no road');
+  assert.ok(drawableRuns(diagnostic).length > 0);
 });
 
 test('held and rejected fixes never extend the route', () => {
+  const geometryFor = (from, to) => [
+    [at(from).latitude, at(from).longitude],
+    [at(to).latitude, at(to).longitude],
+  ];
   const { trail } = driveRoute([
-    { display: at(0), newTrip: true },
-    { display: at(50) },
+    { display: at(0), newTrip: true, matchedSource: 'SOLVED' },
+    { display: at(50), matchedSource: 'SOLVED', matchedGeometry: geometryFor(0, 50) },
     { held: true },
     { held: true },
-    { display: at(100) },
+    { display: at(100), matchedSource: 'SOLVED', matchedGeometry: geometryFor(50, 100) },
   ]);
 
-  assert.equal(trail.length, 1);
-  assert.equal(trail[0].length, 3, 'only the three accepted points are on the line');
-});
-
-test('a run that grows one vertex at a time still reaches the map', () => {
-  // Runs shorter than two points are not drawable, but they must be RETAINED:
-  // discarding them threw the vertex away, so a run built a point at a time
-  // could never reach two and the line stayed permanently empty.
-  let trail = appendTrail([], [at(0)], 'reset');
-  trail = appendTrail(trail, [at(50)], 'extend');
-  assert.equal(trail.length, 1);
-  assert.equal(trail[0].length, 2);
-});
-
-test('the route survives an update that carries no new geometry', () => {
-  // Standing still with the matcher holding: appendTrail is called with nothing
-  // to add and must return the run it already had, not an empty one.
-  const first = appendTrail([], [at(0), at(50)], 'extend');
-  const second = appendTrail(first, [], 'extend');
-  assert.deepEqual(second, first);
+  assert.equal(drawableRuns(trail).length, 1);
+  assert.equal(trail[0].vertices.length, 3, 'only the three matched vertices are on the line');
 });
 
 test('a trip reset starts a new run instead of bridging the gap', () => {
-  const { trail } = driveRoute([
-    { display: at(0), newTrip: true },
-    { display: at(50) },
-    // Four minutes of silence, then a fix somewhere else entirely.
-    { display: at(5000), newTrip: true, afterMs: 5 * 60_000 },
-    { display: at(5050) },
-  ]);
-
-  assert.equal(trail.length, 1, 'the previous trip is cleared, not joined');
-  const northings = trail[0].map((c) => Math.round((c.latitude - BASE_LAT) / METRE));
-  assert.deepEqual(northings, [5000, 5050]);
-});
-
-test('appending never mutates the runs it was given', () => {
-  const original = appendTrail([], [at(0), at(50)], 'extend');
-  const snapshot = original.map((run) => run.map((c) => ({ ...c })));
-
-  appendTrail(original, [at(100)], 'extend');
-  appendTrail(original, [at(200)], 'extend');
-
-  assert.deepEqual(original, snapshot, 'the previous state object is untouched');
-});
-
-test('duplicate vertices are collapsed rather than stacked on the polyline', () => {
-  const trail = appendTrail([], [at(0), at(0), at(0), at(50)], 'extend');
-  assert.equal(trail[0].length, 2);
-});
-
-test('live progress ends at the vehicle and follows the matched road curve', () => {
-  const road = [at(0), at(20, 10), at(40, 10), at(60)];
-  // Halfway between the endpoints is close to the curved middle road segment.
-  const progress = progressLiveTrail([road], at(30, 2));
-  const drawn = progress.runs[0];
-  const tail = drawn[drawn.length - 1];
-
-  assert.ok(drawn.length < road.length, 'road ahead of the vehicle is not drawn yet');
-  assert.deepEqual(tail, progress.position, 'the blue line and marker share one endpoint');
-  assert.ok(Math.round((tail.longitude - BASE_LNG) / METRE) >= 9, 'marker is projected onto the curve');
-});
-
-test('clipping live progress preserves every completed run before a GPS gap', () => {
-  const first = [at(0), at(20)];
-  const second = [at(100), at(120), at(140)];
-  const progress = progressLiveTrail([first, second], at(130));
-
-  assert.deepEqual(progress.runs[0], first);
-  assert.ok(progress.runs[1].length >= 2);
-});
-
-test('a marker far from the route is never snapped to unrelated geometry', () => {
-  const runs = [[at(0), at(20)]];
-  const candidate = at(20, 500);
-  const progress = progressLiveTrail(runs, candidate);
-
-  assert.equal(progress.position, candidate);
-  assert.equal(progress.runs, runs);
-});
-
-test('matched geometry with an impossible hop is refused', () => {
-  assert.deepEqual(
-    safeMatchedGeometry(
-      [
-        [at(0).latitude, at(0).longitude],
-        [BASE_LAT + 0.1, BASE_LNG],
-      ],
-      at(0),
-      at(50),
-      false
-    ),
-    []
-  );
-});
-
-test('matched geometry that does not end where the vehicle is, is refused', () => {
-  assert.deepEqual(
-    safeMatchedGeometry(
-      [
-        [at(0).latitude, at(0).longitude],
-        [at(30).latitude, at(30).longitude],
-      ],
-      at(0),
-      // The fix is 500 m past the end of the geometry.
-      at(500),
-      false
-    ),
-    []
-  );
-});
-
-test('the trail is bounded and keeps the newest vertices', () => {
-  let trail = [];
-  for (let i = 0; i < 4600; i += 1) {
-    trail = appendTrail(trail, [at(i * 10)], 'extend');
-  }
-  const total = trail.reduce((sum, run) => sum + run.length, 0);
-  assert.ok(total <= 4000, `expected at most 4000 vertices, got ${total}`);
-
-  const last = trail[trail.length - 1];
-  const newest = Math.round((last[last.length - 1].latitude - BASE_LAT) / METRE);
-  assert.equal(newest, 4599 * 10, 'the most recent position is still on the line');
-});
-
-// ---------------------------------------------------------------------------
-// The diagonal.
-//
-// These are the regression tests for the fault this module was rewritten for:
-// a telemetry silence being closed with one straight chord between the fixes
-// either side of it. Every one of them failed before `travelledSegment` was
-// given the clock.
-// ---------------------------------------------------------------------------
-
-test('a telemetry gap breaks the line instead of drawing a diagonal across it', () => {
   const { trail, modes } = driveRoute([
-    { display: at(0), newTrip: true },
-    { display: at(50) },
-    { display: at(100) },
-    // The app was backgrounded / the tunnel / the SSE reconnect. Forty-five
-    // seconds later the vehicle is 400 m further on. Nothing observed the road
-    // in between.
-    { display: at(500), afterMs: 45_000 },
-    { display: at(550) },
-  ]);
-
-  assert.equal(modes[3], 'break');
-  assert.equal(trail.length, 2, 'two runs, not one line straight through the gap');
-  assert.equal(trail[0].length, 3, 'everything drawn before the gap is KEPT');
-  assert.equal(trail[1].length, 2);
-  const firstRunEnd = Math.round((trail[0][2].latitude - BASE_LAT) / METRE);
-  const secondRunStart = Math.round((trail[1][0].latitude - BASE_LAT) / METRE);
-  assert.equal(firstRunEnd, 100);
-  assert.equal(secondRunStart, 500, 'the new run starts at the far side, nothing bridges them');
-});
-
-test('a gap the pipeline already flagged breaks the line even when it is brief', () => {
-  const { modes, trail } = driveRoute([
-    { display: at(0), newTrip: true },
-    { display: at(50) },
-    { display: at(100), gapBefore: true },
-  ]);
-  assert.equal(modes[2], 'break');
-  assert.equal(trail.length, 2);
-});
-
-test('a step no vehicle could have covered unobserved breaks the line', () => {
-  // 2 km in 60 s is only 120 km/h, so a speed check alone lets it through -
-  // and drawing it is a two-kilometre diagonal across the map.
-  const { modes, trail } = driveRoute([
-    { display: at(0), newTrip: true },
-    { display: at(50) },
-    { display: at(2050), afterMs: 60_000 },
-  ]);
-  assert.equal(modes[2], 'break');
-  assert.equal(trail.length, 2);
-});
-
-test('a break keeps the run it closed, so the travelled route is never erased', () => {
-  const { trail } = driveRoute([
-    { display: at(0), newTrip: true },
-    { display: at(50) },
-    { display: at(100) },
-    { display: at(600), afterMs: 30_000 },
-    { display: at(650) },
-    { display: at(1200), afterMs: 30_000 },
-    { display: at(1250) },
-  ]);
-  assert.equal(trail.length, 3, 'one run per contiguously observed stretch');
-  assert.deepEqual(
-    trail.map((run) => run.length),
-    [3, 2, 2]
-  );
-});
-
-test('matched geometry is refused when it does not attach to where the vehicle was', () => {
-  // The solver put this stretch on a road 300 m away. Drawing it would jump the
-  // line off the carriageway and back; the accepted segment is used instead.
-  const { sources, trail } = driveRoute([
-    { display: at(0), newTrip: true },
+    { display: at(0), newTrip: true, matchedSource: 'SOLVED' },
     {
       display: at(50),
-      isMatched: true,
+      matchedSource: 'SOLVED',
       matchedGeometry: [
-        [at(0, 300).latitude, at(0, 300).longitude],
-        [at(50, 300).latitude, at(50, 300).longitude],
+        [at(0).latitude, at(0).longitude],
+        [at(50).latitude, at(50).longitude],
+      ],
+    },
+    {
+      display: at(5_000),
+      newTrip: true,
+      matchedSource: 'SOLVED',
+      matchedGeometry: [
+        [at(5_000).latitude, at(5_000).longitude],
+        [at(5_050).latitude, at(5_050).longitude],
       ],
     },
   ]);
-  assert.deepEqual(sources, ['accepted', 'accepted']);
-  assert.equal(trail[0].length, 2);
+
+  assert.equal(modes[2], 'reset');
+  assert.equal(trail.length, 1, 'the previous journey is discarded, not joined');
 });
 
-test('matched geometry containing a long hop is refused', () => {
-  // `appendUnmatchedChunk` on the server contributes raw GPS coordinates to a
-  // run's geometry when a chunk fails to solve, so "matched" geometry can
-  // legitimately arrive containing chords. A 300 m hop between two adjacent
-  // road vertices is not a road.
-  assert.deepEqual(
-    safeMatchedGeometry(
-      [
-        [at(0).latitude, at(0).longitude],
-        [at(300).latitude, at(300).longitude],
-      ],
-      at(0),
-      at(300),
-      false
-    ),
-    []
-  );
-});
-
-test('a segment implying an impossible speed is broken, not drawn', () => {
+test('a telemetry gap breaks the line instead of drawing a diagonal across it', () => {
   const { modes } = driveRoute([
-    { display: at(0), newTrip: true },
-    // 300 m in one second.
-    { display: at(300), afterMs: 1_000 },
+    { display: at(0), newTrip: true, matchedSource: 'SOLVED' },
+    {
+      display: at(50),
+      matchedSource: 'SOLVED',
+      matchedGeometry: [
+        [at(0).latitude, at(0).longitude],
+        [at(50).latitude, at(50).longitude],
+      ],
+    },
+    // Ninety seconds of silence, then a fix 900 m away.
+    {
+      display: at(950),
+      afterMs: 90_000,
+      matchedSource: 'SOLVED',
+      matchedGeometry: [
+        [at(950).latitude, at(950).longitude],
+        [at(1_000).latitude, at(1_000).longitude],
+      ],
+    },
   ]);
-  assert.equal(modes[1], 'break');
+
+  assert.equal(modes[2], 'break');
 });
 
-test('a remounted live screen continues the backend trip history', () => {
-  const history = [[at(0), at(50), at(100)]];
-  const live = [[at(100), at(150), at(200)]];
-
-  const merged = mergeLiveTrailHistory(history, live);
-
-  assert.equal(merged.length, 1);
-  assert.deepEqual(merged[0], [at(0), at(50), at(100), at(150), at(200)]);
+test('appending never mutates the runs it was given', () => {
+  const original = appendTrail([], [at(0), at(10)], 'extend', { positionId: 1, timestampMs: T0 });
+  const snapshot = drawn(original).map((run) => run.map((vertex) => ({ ...vertex })));
+  appendTrail(original, [at(20)], 'extend', { positionId: 2, timestampMs: T0 + 1000 });
+  assert.deepEqual(drawn(original), snapshot);
 });
 
-test('hydration never closes a telemetry gap or joins a different trip', () => {
-  const history = [[at(0), at(50)]];
-  const live = [[at(500), at(550)], [at(900), at(950)]];
+test('duplicate vertices are collapsed rather than stacked on the polyline', () => {
+  const trail = appendTrail([], [at(0), at(0), at(0), at(10)], 'extend', {
+    positionId: 1,
+    timestampMs: T0,
+  });
+  assert.equal(trail[0].vertices.length, 2);
+});
 
-  const merged = mergeLiveTrailHistory(history, live);
+test('geometry containing an impossible hop is refused', () => {
+  const refused = safeMatchedGeometry(
+    [
+      [at(0).latitude, at(0).longitude],
+      [BASE_LAT + 0.05, BASE_LNG + 0.05],
+      [at(50).latitude, at(50).longitude],
+    ],
+    at(0),
+    at(50),
+    false
+  );
+  assert.deepEqual(refused, []);
+});
 
-  assert.equal(merged.length, 3);
-  assert.deepEqual(merged.map((run) => run.length), [2, 2, 2]);
+test('geometry that does not end where the vehicle is, is refused', () => {
+  const refused = safeMatchedGeometry(
+    [
+      [at(0).latitude, at(0).longitude],
+      [at(20).latitude, at(20).longitude],
+    ],
+    at(0),
+    at(500),
+    false
+  );
+  assert.deepEqual(refused, []);
+});
+
+// ------------------------------------------------- hydration and identity
+
+/** One hydrated run, as Live Track builds them from the playback response. */
+function historyRun(vertices, firstPositionId, lastPositionId, firstMs, lastMs) {
+  return {
+    vertices,
+    firstPositionId,
+    lastPositionId,
+    firstTimestampMs: firstMs,
+    lastTimestampMs: lastMs,
+  };
+}
+
+test('a remounted live screen continues the backend trip by positionId', () => {
+  const history = [historyRun([at(0), at(50), at(100)], 900, 902, T0, T0 + 6_000)];
+  const live = [historyRun([at(100), at(150), at(200)], 903, 905, T0 + 9_000, T0 + 15_000)];
+
+  const merged = mergeLiveTrailHistory(history, live, {
+    positionId: 902,
+    timestampMs: T0 + 6_000,
+  });
+
+  assert.equal(merged.length, 1, 'the two halves are one journey');
+  assert.deepEqual(drawn(merged)[0], [at(0), at(50), at(100), at(150), at(200)]);
+});
+
+test('a live run already contained in hydration is never appended twice', () => {
+  const history = [historyRun([at(0), at(50), at(100)], 900, 905, T0, T0 + 15_000)];
+  // The stream replayed a fix hydration already covers: same positionId range.
+  const live = [historyRun([at(100), at(150)], 904, 905, T0 + 12_000, T0 + 15_000)];
+
+  const merged = mergeLiveTrailHistory(history, live, {
+    positionId: 905,
+    timestampMs: T0 + 15_000,
+  });
+
+  // It may not EXTEND the hydrated run - that would draw the same ground twice
+  // and, on a loop, close a circle the vehicle never drove.
+  assert.equal(merged.length, 2, 'the duplicate opens a separate run rather than extending');
+  assert.deepEqual(drawn(merged)[0], [at(0), at(50), at(100)]);
+});
+
+test('proximity alone never joins history to the stream', () => {
+  // The classic false positive: the live head is 30 m from the history tail -
+  // well inside the old ~120 m rule - but it is a DIFFERENT road, and its
+  // positionId proves it is not the continuation of this sequence.
+  const history = [historyRun([at(0), at(100)], 900, 901, T0, T0 + 3_000)];
+  const live = [historyRun([at(100, 30), at(150, 30)], 880, 881, T0 - 60_000, T0 - 57_000)];
+
+  const merged = mergeLiveTrailHistory(history, live, {
+    positionId: 901,
+    timestampMs: T0 + 3_000,
+  });
+
+  assert.equal(merged.length, 2, 'nearby is not the same journey');
+});
+
+test('hydration refuses to join when either side carries no identity', () => {
+  const history = [historyRun([at(0), at(100)], null, null, T0, T0 + 3_000)];
+  const live = [historyRun([at(100), at(150)], 903, 904, T0 + 6_000, T0 + 9_000)];
+
+  const merged = mergeLiveTrailHistory(history, live, { positionId: null, timestampMs: null });
+
+  assert.equal(merged.length, 2, 'a visible break beats a guessed splice');
+});
+
+test('hydration never closes a telemetry gap between live runs', () => {
+  const history = [historyRun([at(0), at(50)], 900, 901, T0, T0 + 3_000)];
+  const live = [
+    historyRun([at(60), at(110)], 902, 903, T0 + 6_000, T0 + 9_000),
+    historyRun([at(900), at(950)], 910, 911, T0 + 300_000, T0 + 303_000),
+  ];
+
+  const merged = mergeLiveTrailHistory(history, live, {
+    positionId: 901,
+    timestampMs: T0 + 3_000,
+  });
+
+  assert.equal(merged.length, 2, 'the first live run joins; the one after the gap does not');
+  assert.deepEqual(
+    drawn(merged).map((run) => run.length),
+    [4, 2]
+  );
 });

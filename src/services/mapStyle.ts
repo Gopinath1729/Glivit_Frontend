@@ -92,6 +92,21 @@ function isPlaceholderKey(key: string): boolean {
   );
 }
 
+function configurationErrorStyle(message: string): Record<string, unknown> {
+  return {
+    version: 8,
+    metadata: { glivtConfigurationError: message },
+    sources: {},
+    layers: [
+      {
+        id: 'configuration-background',
+        type: 'background',
+        paint: { 'background-color': '#EDF4F7' },
+      },
+    ],
+  };
+}
+
 function getWebStyleInfo(variant: MapStyleVariant): {
   provider: WebMapProvider;
   style: MapStyleSpec;
@@ -107,25 +122,29 @@ function getWebStyleInfo(variant: MapStyleVariant): {
       blocking: true,
       code: 'missing_geoapify_key',
       message:
-        'This build has no Geoapify API key. Set EXPO_PUBLIC_GEOAPIFY_API_KEY and rebuild the app.',
+        'This build has no Geoapify tile key. Set EXPO_PUBLIC_GEOAPIFY_TILES_API_KEY and rebuild the app.',
     });
   } else if (!key) {
     issues.push({
       blocking: true,
       code: 'placeholder_geoapify_key',
       message:
-        'The Geoapify API key is still a placeholder. Set EXPO_PUBLIC_GEOAPIFY_API_KEY to a real key and rebuild the app.',
+        'The Geoapify tile key is still a placeholder. Set EXPO_PUBLIC_GEOAPIFY_TILES_API_KEY to a real restricted tile key and rebuild the app.',
     });
   }
 
-  // Geoapify is the only map-tile provider used by the app. An invalid or
-  // missing key is intentionally not hidden behind another public tile host:
-  // release builds fail configuration validation and local builds surface the
-  // real provider error instead of appearing to work against an unsupported
-  // fallback.
-  const styleUrl = `https://maps.geoapify.com/v1/styles/${GEOAPIFY_STYLES[variant]}/style.json?apiKey=${encodeURIComponent(key)}`;
+  // Never issue a request containing `apiKey=`. When configuration is missing,
+  // FleetWebMap recognises this local sentinel and shows the actionable issue
+  // without contacting Geoapify. Release builds are rejected even earlier by
+  // app.config.js.
+  const styleUrl = key
+    ? `https://maps.geoapify.com/v1/styles/${GEOAPIFY_STYLES[variant]}/style.json?apiKey=${encodeURIComponent(key)}`
+    : '';
+  const style = styleUrl
+    ? styleUrl
+    : configurationErrorStyle(issues[0]?.message || 'Geoapify map configuration is missing.');
 
-  if (!styleUrl.startsWith('https://')) {
+  if (styleUrl && !styleUrl.startsWith('https://')) {
     issues.push({
       blocking: true,
       code: 'insecure_style_url',
@@ -135,7 +154,7 @@ function getWebStyleInfo(variant: MapStyleVariant): {
 
   return {
     provider: 'geoapify',
-    style: styleUrl,
+    style,
     styleUrl,
     issues,
   };

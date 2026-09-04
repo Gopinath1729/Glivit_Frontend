@@ -63,14 +63,16 @@ import {
   haversineKm,
   lerpAngle,
   normalizeHeading,
-  routeSegments,
-  sampleAt,
   type PlaybackCoordinate,
 } from '@/src/services/playbackEngine';
 import { markerRotationFor } from '@/src/services/geoMath';
 import { traceCoord, traceGps } from '@/src/services/gpsDiagnostics';
-import { mergeLiveTrailHistory, progressLiveTrail } from '@/src/services/liveRouteTrail';
-import { useLivePositions, useSmoothedLivePosition } from '@/src/services/livePositions';
+import {
+  drawableRuns,
+  mergeLiveTrailHistory,
+  type LiveTrailRun,
+} from '@/src/services/liveRouteTrail';
+import { useLivePositions, useLiveRoadMotion } from '@/src/services/livePositions';
 
 import type { DeviceSummary, PlaybackTrackPoint } from '@/src/types/api';
 
@@ -98,8 +100,16 @@ if (Platform.OS === 'android') {
 }
 
 const SHEET_HANDLE_HEIGHT = 56;
-/** `bottomSheetContent` vertical padding, top and bottom. */
-const SHEET_VERTICAL_PADDING = 20;
+/**
+ * `bottomSheetContent` vertical padding, top and bottom.
+ *
+ * Must equal the stylesheet's `paddingTop` plus its BASE `paddingBottom` - the
+ * navigation-bar inset the content adds on top of that is accounted for
+ * separately in `sheetHeight`. It read 20 against a real 24, so the sheet was
+ * laid out four pixels shorter than its own content needed and the last row of
+ * labels was clipped.
+ */
+const SHEET_VERTICAL_PADDING = 24;
 /** Short enough to feel immediate, long enough not to look like a jump. */
 const SHEET_RESIZE_ANIMATION = {
   duration: 180,
@@ -111,14 +121,10 @@ const SHEET_RESIZE_ANIMATION = {
 const CONTROL_BUTTON_SIZE = 44;
 const CAMERA_MIN_GAP_MS = 560;
 const LIVE_STALE_AFTER_SEC = 15;
-// Bounds for the smooth live catch-up between the previous displayed position and
-// the newest streamed fix.
-const LIVE_TRANSITION_MIN_MS = 420;
-const LIVE_TRANSITION_MAX_MS = 3600;
-/** How often the live catch-up pushes a new position into React state (~30fps). */
-const LIVE_PUBLISH_INTERVAL_MS = 33;
-/** How long the marker takes to glide from one accepted fix to the next. */
-const LIVE_MARKER_EASE_MS = 1_000;
+// The live catch-up clock's constants used to live here. There is no catch-up
+// clock any more: the marker travels one matched road segment at a time, and how
+// long it takes is derived from the device's own reporting cadence inside
+// `useLiveRoadMotion` rather than from a screen-level constant.
 
 type CameraMode = 'follow' | 'chase' | 'cinematic' | 'top' | 'drone' | 'overview';
 const CAMERA_MODES: Record<
@@ -174,6 +180,16 @@ type Coordinate = {
 // cyan aura, legible over both street and satellite maps.
 const ROUTE_BLUE = '#1473E6';
 const ROUTE_BLUE_AURA = 'rgba(45, 174, 255, 0.30)';
+/**
+ * The GPS-only diagnostic line.
+ *
+ * Deliberately amber, thin and unaura'd so it cannot be confused with the
+ * authoritative road route above. It shows where the vehicle REPORTED being
+ * over a stretch the matcher could not place - a chord between fixes, not a
+ * road - and the whole point of the separate styling is that nobody reads it
+ * as one.
+ */
+const ROUTE_GPS_ONLY = '#F59E0B';
 
 const BRAND = {
   green: '#118a36',
@@ -428,11 +444,77 @@ export default function VehicleTrackerScreen() {
     { deviceId: deviceId as number, from: liveTripFrom, to: liveTripTo },
     { skip: !validDeviceId || !liveTripFrom || !liveTripTo }
   );
-  const { track: hydratedLiveTrack } = useMatchedHistoryRoute(liveTripPlayback);
-  const hydratedLiveTrail = useMemo(
-    () => routeSegments(hydratedLiveTrack),
-    [hydratedLiveTrack]
-  );
+  const { track: hydratedLiveTrack, route: hydratedRoute } =
+    useMatchedHistoryRoute(liveTripPlayback);
+  /**
+   * The already-recorded part of this trip, as identified runs.
+   *
+   * Each run carries the positionId and GPS time of the fixes at its ends, which
+   * is what lets the live stream be attached to it by IDENTITY. The previous
+   * version compared the two endpoints' coordinates and joined them if they were
+   * within ~120 m - a test that a parallel carriageway, a service road and a
+   * flyover all pass, so reopening the screen mid-trip could weld the route onto
+   * a road the vehicle had never been on.
+   */
+  const hydratedLiveTrail = useMemo<LiveTrailRun[]>(() => {
+    // No confident road for this range means no road to draw. The recorded fixes
+    // still exist - they are what the timeline and the readouts are built from -
+    // but joining them would be a chord across every stretch the matcher could
+    // not place, in the same blue as the geometry it could.
+    if (!hydratedRoute.hasMatchedGeometry) return [];
+    const points = hydratedLiveTrack.points;
+    return hydratedLiveTrack.runs
+      .map((run) => {
+        const slice = points
+          .slice(run.start, run.end + 1)
+          // Only vertices the matcher actually placed. A run can end on a fix it
+          // could not cover; that fix belongs to the journey, not to the road.
+          .filter((point) => point.mapMatched);
+        const vertices = slice.map((point) => ({ latitude: point.lat, longitude: point.lng }));
+        // Densified road vertices carry no id of their own; the run's identity
+        // is the first and last REAL fix inside it.
+        const ids = slice
+          .map((point) => point.positionId)
+          .filter((id): id is number => typeof id === 'number' && Number.isFinite(id));
+        const times = slice
+          .map((point) => Date.parse(point.t))
+          .filter((time) => Number.isFinite(time));
+        return {
+          vertices,
+          firstPositionId: ids.length > 0 ? ids[0] : null,
+          lastPositionId: ids.length > 0 ? ids[ids.length - 1] : null,
+          firstTimestampMs: times.length > 0 ? times[0] : null,
+          lastTimestampMs: times.length > 0 ? times[times.length - 1] : null,
+        } satisfies LiveTrailRun;
+      })
+      .filter((run) => run.vertices.length > 0);
+  }, [hydratedLiveTrack, hydratedRoute.hasMatchedGeometry]);
+  /**
+   * Where hydration stops and the stream starts.
+   *
+   * Everything up to and including this positionId came from the recorded trip;
+   * everything after it comes from SSE. A fix on both sides is de-duplicated by
+   * id rather than drawn twice.
+   */
+  const hydrationBoundary = useMemo(() => {
+    const tail = hydratedLiveTrail[hydratedLiveTrail.length - 1];
+    return tail
+      ? { positionId: tail.lastPositionId, timestampMs: tail.lastTimestampMs }
+      : null;
+  }, [hydratedLiveTrail]);
+  /**
+   * Route hydration is a state of its OWN, distinct from the live stream.
+   *
+   * Deliberately not folded into a single "loading" flag. The map, the live
+   * stream, the recorded part of the trip and the road answer all become ready
+   * at different moments and for different reasons, and collapsing them means a
+   * screen that is waiting for one of them looks like a screen that is broken.
+   * In particular the MARKER never waits on this: it is driven entirely by the
+   * live stream, so a slow history fetch can no longer replace a current
+   * position with stale history or blank the vehicle while it loads.
+   */
+  const routeHydrating =
+    validDeviceId && Boolean(liveTripFrom) && Boolean(liveTripTo) && !liveTripPlayback;
   // Fleet roster for the in-screen vehicle switcher. Selecting a different
   // vehicle re-points every data source on this screen (device detail, live SSE
   // stream, route buffer, camera) rather than only swapping the 3D model.
@@ -469,8 +551,26 @@ export default function VehicleTrackerScreen() {
    *
    * The ingest pipeline accumulates it as each fix is accepted. It is never
    * derived from the polyline, the animated marker or the road-matched geometry.
+   *
+   * <h3>Two sources, and why the fallback is needed</h3>
+   * The live stream carries it on every frame, and that is the value to prefer
+   * while frames are arriving. But a vehicle that is offline, stale, or simply
+   * has not pushed a frame since this screen opened produces none - and the
+   * stream's default of 0 is indistinguishable from a genuine zero. That is why
+   * an offline vehicle read "Covered 0.0 km / Trip 0.0 km" while the server had
+   * it at 0.67 km.
+   *
+   * The device snapshot is the fallback, and it is the SAME number: both come
+   * from `device_current_position.trip_distance_km`. The live frame is
+   * preferred only once one has actually been accepted for this device.
    */
-  const totalDistanceKm = live.tripDistanceKm;
+  const tripDistanceKm =
+    live.lastEventAt != null
+      ? live.tripDistanceKm
+      : Number.isFinite(deviceDetail?.tripDistanceKm)
+        ? (deviceDetail!.tripDistanceKm as number)
+        : live.tripDistanceKm;
+  const totalDistanceKm = tripDistanceKm;
   const insets = useSafeAreaInsets();
   const { height, width } = useWindowDimensions();
   const mapRef = useRef<MapView>(null);
@@ -488,7 +588,6 @@ export default function VehicleTrackerScreen() {
   const lastProjectionAtRef = useRef(0);
   const lastValidHeadingRef = useRef<number | null>(null);
   const manualInteractionRef = useRef(false);
-  const liveTransitionFrameRef = useRef<number | null>(null);
   const sheetTranslateY = useRef(new Animated.Value(0)).current;
   const sheetHeightRef = useRef(0);
   const sheetDragStartRef = useRef(0);
@@ -500,13 +599,17 @@ export default function VehicleTrackerScreen() {
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initialRouteFitRef = useRef(false);
   const liveFollowingRef = useRef(false);
-  const trackDurationRef = useRef(0);
-  const trackStartRef = useRef<number | null>(null);
-  // Position along the live buffer (ms since the trip's first fix). It is only
-  // ever driven forward to the newest fix by the live catch-up animation below —
-  // there is no user-controlled playback clock, rate, or scrubbing on this screen.
-  const [elapsedMs, setElapsedMs] = useState(0);
-  const elapsedMsRef = useRef(0);
+  // There is deliberately NO recorded-timeline clock on this screen any more.
+  //
+  // Live Track used to run two independent motion mechanisms at once: a
+  // `sampleAt(track, elapsedMs)` playback clock catching up to the newest fix,
+  // AND a separate marker ease toward the newest matched coordinate, with a
+  // projection of the second onto the route on top. Three components each
+  // claimed a position for the same instant, and whichever rendered last won -
+  // which is why the marker could visibly stutter, sit behind the line, or jump
+  // back to a position it had already left. The single authority is now
+  // `useLiveRoadMotion` below: one distance, along one matched road segment.
+  // Recorded playback keeps its own clock on the Route Playback screen.
   // This is a live-only screen: the marker is always pinned to (and smoothly
   // animated toward) the newest streamed fix. There is no pause/resume state.
   const [isLiveFollowing, setIsLiveFollowing] = useState(true);
@@ -594,34 +697,50 @@ export default function VehicleTrackerScreen() {
   });
   const markerCategory = markerCategoryOverride ?? vehicleCategory;
 
-  const sample = useMemo(() => sampleAt(track, elapsedMs), [track, elapsedMs]);
-  elapsedMsRef.current = elapsedMs;
   liveFollowingRef.current = isLiveFollowing;
-  trackDurationRef.current = track.totalDurationMs;
   /**
-   * The drawn position, eased toward the newest road-matched fix.
-   *
-   * Rendering is driven by an animation frame over values already in memory, so
-   * it is completely independent of the network: a slow routing service or a
-   * dropped stream can delay the NEXT position, never the current one's motion.
+   * The authoritative travelled route: hydrated history plus the live stream,
+   * joined by positionId rather than by proximity.
    */
-  const smoothedLive = useSmoothedLivePosition(
-    live.displayPosition,
-    live.displayHeading,
-    LIVE_MARKER_EASE_MS,
-    // A fix that broke the route is placed, not eased: there is no observed
-    // ground between the two coordinates for the marker to travel over, so
-    // animating it drives the vehicle through whatever is there.
-    live.displayDiscontinuous
-  );
   const completeLiveTrail = useMemo(
-    () => mergeLiveTrailHistory(hydratedLiveTrail, live.trail),
-    [hydratedLiveTrail, live.trail]
+    () => mergeLiveTrailHistory(hydratedLiveTrail, live.trail, hydrationBoundary),
+    [hydratedLiveTrail, hydrationBoundary, live.trail]
   );
-  const liveProgress = useMemo(
-    () => progressLiveTrail(completeLiveTrail, smoothedLive.position),
-    [completeLiveTrail, smoothedLive.position]
+  /**
+   * The ONE live motion clock.
+   *
+   * Travels the marker a monotonically increasing DISTANCE along the current
+   * matched road segment, and returns the route clipped at that same distance.
+   * Because both come from one polyline and one number, the blue line always
+   * ends directly behind the vehicle, and the vehicle always rides the road -
+   * including through a 90-degree turn, which component-wise interpolation
+   * between two matched endpoints cuts diagonally.
+   */
+  const motion = useLiveRoadMotion(
+    live.roadSegment,
+    completeLiveTrail,
+    live.displayPosition,
+    live.displayHeading
   );
+  /**
+   * The GPS-only diagnostic overlay.
+   *
+   * Stretches with no road answer. Drawn thin and dashed in a deliberately
+   * different colour, and never as the authoritative route: a matching outage
+   * must read as "we do not know which road", not as a confident blue line
+   * across the buildings between two fixes.
+   */
+  const diagnosticSegments = useMemo(
+    () => drawableRuns(live.diagnosticTrail),
+    [live.diagnosticTrail]
+  );
+  /** True while the road answer for the newest fix has not arrived yet. */
+  const roadMatchPending = live.roadMatchPending;
+  const roadMatchUnavailable =
+    live.matchStatus === 'UNAVAILABLE' || live.matchStatus === 'DISABLED';
+  /** The transport, separately from anything about the vehicle. */
+  const liveStreamConnecting =
+    liveEnabled && (live.stream.status === 'connecting' || live.stream.status === 'reconnecting');
 
   // Final stage of the trace: the coordinate and rotation the marker is actually
   // given. Fired per ACCEPTED fix, not per animation frame - the easing runs at
@@ -673,13 +792,9 @@ export default function VehicleTrackerScreen() {
     lastKnownCoordinateRef.current = null;
   }
   const vehicleCoordinate = useMemo<Coordinate>(() => {
-    const candidate: Coordinate | null =
-      liveProgress.position ??
-      smoothedLive.position ??
-      (sample ? { latitude: sample.latitude, longitude: sample.longitude } : null);
-
     const resolved =
-      candidate ??
+      motion.position ??
+      live.displayPosition ??
       (seedPoint ? { latitude: seedPoint.lat, longitude: seedPoint.lng } : null) ??
       lastKnownCoordinateRef.current;
 
@@ -687,7 +802,7 @@ export default function VehicleTrackerScreen() {
     // Only ever reached before anything at all has been received, and the
     // marker is not rendered in that state (see hasVehicleCoordinate).
     return resolved ?? { latitude: 0, longitude: 0 };
-  }, [liveProgress.position, sample, seedPoint, smoothedLive.position]);
+  }, [live.displayPosition, motion.position, seedPoint]);
 
   /**
    * True once any position has been established, and never false again for the
@@ -697,7 +812,7 @@ export default function VehicleTrackerScreen() {
    * refetch - and reappear minutes later when the next packet happened to land.
    */
   const hasVehicleCoordinate = lastKnownCoordinateRef.current != null;
-  const heading = smoothedLive.heading;
+  const heading = motion.heading;
   // Live values change on every animation frame. Callbacks read them through a
   // ref instead of closing over them, so their identity stays stable and the
   // memoised bottom sheet is not re-rendered (and its native-driven transform
@@ -707,8 +822,8 @@ export default function VehicleTrackerScreen() {
   // The rendered route only depends on accepted GPS history, never on the
   // per-frame playback position, so it is not rebuilt on every animation frame.
   const renderRoute = useMemo(
-    () => completeLiveTrail.flatMap((run) => renderableRuns(run)).flat(),
-    [completeLiveTrail]
+    () => motion.route.flatMap((run) => renderableRuns(run)).flat(),
+    [motion.route]
   );
   /**
    * The live route as one polyline per observed run.
@@ -719,52 +834,46 @@ export default function VehicleTrackerScreen() {
    * the same runs history uses means a break is drawn as a break.
    */
   const liveRouteSegments = useMemo<PlaybackCoordinate[][]>(() => {
-    // `live.trail` is already the travelled route in chronological order: road
-    // geometry where the backend matched it, and the segment between two
-    // ACCEPTED points where it did not. Nothing is filtered or re-derived here,
-    // so the line cannot be affected by the marker, the status, the follow mode
-    // or a rerender - it only ever changes when a new point is accepted.
-    // Keep the route source stable between accepted GPS fixes. Clipping the
-    // polyline to the per-frame eased marker caused the entire GeoJSON source
-    // to be replaced ~30 times per second, competing with camera easing and
-    // making the page visibly shake. The accepted route advances once per real
-    // fix; only the marker is animated between those endpoints.
-    return completeLiveTrail.flatMap((segment) => renderableRuns(segment));
-  }, [completeLiveTrail]);
+    // `motion.route` is the travelled route clipped at the vehicle: road
+    // geometry the backend actually matched, and nothing else. There is no
+    // fallback to the chord between two accepted fixes - a stretch with no road
+    // answer contributes no blue line at all and appears, if the operator wants
+    // it, only on the GPS-only diagnostic layer below.
+    return motion.route.flatMap((segment) => renderableRuns(segment));
+  }, [motion.route]);
+  /** The GPS-only overlay, thinned the same way but drawn very differently. */
+  const diagnosticRouteSegments = useMemo<PlaybackCoordinate[][]>(
+    () => diagnosticSegments.flatMap((segment) => renderableRuns(segment)),
+    [diagnosticSegments]
+  );
   // Route diagnostics are emitted once per accepted fix. `liveProgress` changes
   // every animation frame; tracing that value would produce ~30 log records a
   // second and hide the GPS packet that caused the movement.
   useEffect(() => {
-    const segments = live.trail.flatMap((segment) => renderableRuns(segment));
+    const segments = drawableRuns(live.trail);
+    const tail = segments[segments.length - 1];
     traceGps('render', deviceId ?? 'live', {
-      stage: 'route',
+      stage: 'route_append',
+      positionId: live.trail[live.trail.length - 1]?.lastPositionId ?? null,
       runs: segments.length,
       vertices: segments.reduce((total, segment) => total + segment.length, 0),
-      lastVertex: segments.length
-        ? traceCoord(
-            segments[segments.length - 1][segments[segments.length - 1].length - 1].latitude,
-            segments[segments.length - 1][segments[segments.length - 1].length - 1].longitude
-          )
+      lastVertex: tail
+        ? traceCoord(tail[tail.length - 1].latitude, tail[tail.length - 1].longitude)
         : 'none',
+      diagnosticRuns: live.diagnosticTrail.length,
+      matchStatus: live.matchStatus,
+      roadMatchPending: live.roadMatchPending,
     });
-  }, [deviceId, live.trail]);
-  const trackStartMs = useMemo(() => {
-    const start = track.points[0]?.t ? Date.parse(track.points[0].t) : Number.NaN;
-    return Number.isFinite(start) ? start : null;
-  }, [track.points]);
-
-  useEffect(() => {
-    const previousStart = trackStartRef.current;
-    trackStartRef.current = trackStartMs;
-    if (previousStart == null || trackStartMs == null || previousStart === trackStartMs) return;
-    setElapsedMs((current) =>
-      Math.min(Math.max(previousStart + current - trackStartMs, 0), track.totalDurationMs)
-    );
-  }, [track.totalDurationMs, trackStartMs]);
-
+  }, [
+    deviceId,
+    live.diagnosticTrail.length,
+    live.matchStatus,
+    live.roadMatchPending,
+    live.trail,
+  ]);
   // The vehicle is always at the newest fix, so covered and total are the same
   // backend number.
-  const coveredKm = live.tripDistanceKm;
+  const coveredKm = tripDistanceKm;
   // The backend's canonical speedKmh for the newest accepted fix - already
   // converted from the device's own unit exactly once, at ingest, and already
   // smoothed and clamped there. It is never recomputed, rescaled or estimated
@@ -835,8 +944,15 @@ export default function VehicleTrackerScreen() {
   const isStopped = resolvedState.state === 'STOPPED';
   const isOffline = resolvedState.offline;
   const currentSpeed = isOffline || isStopped ? 0 : reportedSpeed;
+  // The newest accepted fix's own ignition, then the device snapshot. The
+  // interpolated playback sample used to sit between them; it no longer exists,
+  // and reading a per-frame animation value for a discrete device signal was
+  // never right anyway.
   const latestIgnition =
-    live.latest?.ignition ?? sample?.ignition ?? deviceDetail?.ignition ?? null;
+    live.latest?.ignition ??
+    track.points[track.points.length - 1]?.ignition ??
+    deviceDetail?.ignition ??
+    null;
   const status = isAlertActive
     ? 'Alert'
     : isImmobilised
@@ -891,8 +1007,6 @@ export default function VehicleTrackerScreen() {
    * selected vehicle's live location and every readout refresh for it.
    */
   useEffect(() => {
-    setElapsedMs(0);
-    elapsedMsRef.current = 0;
     setIsLiveFollowing(true);
     setIsFollowing(true);
     setAutoFollowSuspended(false);
@@ -901,7 +1015,6 @@ export default function VehicleTrackerScreen() {
     lastAddressRef.current = null;
     manualInteractionRef.current = false;
     initialRouteFitRef.current = false;
-    trackStartRef.current = null;
     lastCameraAtRef.current = 0;
     lastCameraCoordinateRef.current = null;
     lastCameraModeRef.current = null;
@@ -918,7 +1031,6 @@ export default function VehicleTrackerScreen() {
     setIsFollowing(true);
     if (cameraMode === 'overview') setCameraMode('follow');
     setIsLiveFollowing(true);
-    setElapsedMs(trackDurationRef.current);
   }, [cameraMode]);
   const mapStyleInfo = useMemo(
     () => getMapStyleInfo(isNightMode ? 'dark' : isSatelliteMode ? 'bright' : 'street'),
@@ -1844,69 +1956,22 @@ export default function VehicleTrackerScreen() {
   // streamed fix via the single live catch-up animation below. Recorded-timeline
   // playback lives on the separate Route Playback screen.
 
-  useEffect(() => {
-    // Smoothly catch up to each new live fix. Cancelling the previous RAF before
-    // starting the next prevents duplicate animations when updates arrive fast.
-    if (!appActive || !isLiveFollowing) return;
-    if (liveTransitionFrameRef.current != null) {
-      cancelAnimationFrame(liveTransitionFrameRef.current);
-    }
-    const from = Math.min(elapsedMsRef.current, track.totalDurationMs);
-    const to = track.totalDurationMs;
-    if (to <= from) {
-      setElapsedMs(to);
-      return;
-    }
-    if (isStopped || isOffline) {
-      setElapsedMs(to);
-      return;
-    }
-    const recordedGapMs = to - from;
-    const duration = Math.min(
-      LIVE_TRANSITION_MAX_MS,
-      Math.max(LIVE_TRANSITION_MIN_MS, recordedGapMs * 0.82)
-    );
-    const startedAt = Date.now();
-    // Publish at ~30fps rather than every frame. Everything downstream is
-    // already slower than that (the camera moves at most every 560ms, the
-    // projection at 25fps, the 3D overlay at ~30fps), and a 60fps setState here
-    // re-rendered the whole screen — which detached and re-attached the bottom
-    // sheet's native-driven transform on every frame, making it flicker.
-    let lastPublishedAt = 0;
-    const animate = () => {
-      const now = Date.now();
-      const fraction = Math.min(1, (now - startedAt) / duration);
-      if (fraction >= 1 || now - lastPublishedAt >= LIVE_PUBLISH_INTERVAL_MS) {
-        lastPublishedAt = now;
-        const eased = 1 - (1 - fraction) ** 3;
-        setElapsedMs(from + (to - from) * eased);
-      }
-      if (fraction < 1) {
-        liveTransitionFrameRef.current = requestAnimationFrame(animate);
-      } else {
-        liveTransitionFrameRef.current = null;
-      }
-    };
-    liveTransitionFrameRef.current = requestAnimationFrame(animate);
-    return () => {
-      if (liveTransitionFrameRef.current != null) {
-        cancelAnimationFrame(liveTransitionFrameRef.current);
-        liveTransitionFrameRef.current = null;
-      }
-    };
-  }, [appActive, isLiveFollowing, isStopped, isOffline, track.totalDurationMs]);
+  // The live catch-up animation that used to live here has been removed.
+  //
+  // It drove a recorded-timeline clock (`elapsedMs`) toward the end of the live
+  // buffer and the marker was sampled from THAT, while a second mechanism eased
+  // the marker toward the newest matched coordinate at the same time. Two
+  // clocks, one marker. `useLiveRoadMotion` is now the only thing that moves the
+  // vehicle, and it moves it along the matched road rather than along a
+  // time axis over straight chords between fixes.
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
       const nextActive = isForeground(state);
       if (nextActive && liveFollowingRef.current) {
-        if (liveTransitionFrameRef.current != null) {
-          cancelAnimationFrame(liveTransitionFrameRef.current);
-          liveTransitionFrameRef.current = null;
-        }
-        // Resume at the authoritative latest fix instead of replaying animation
-        // frames accumulated while the app was in the background.
-        setElapsedMs(trackDurationRef.current);
+        // Nothing to resume: the marker is driven by the newest matched segment,
+        // which the stream re-delivers on reconnect. There is no accumulated
+        // animation state to replay.
       }
       setAppActive(nextActive);
     });
@@ -1966,6 +2031,52 @@ export default function VehicleTrackerScreen() {
     if (liveMatchNotice) showToast(liveMatchNotice);
   }, [liveMatchNotice, showToast]);
 
+  /**
+   * The one place the pipeline's outstanding stage is turned into words.
+   *
+   * Ordered by what an operator can act on. A missing road matcher is a
+   * deployment fault they can fix; a stream still connecting and a trip still
+   * hydrating are transient and merely need saying so the screen does not look
+   * stuck. Everything below is about the ROUTE - the vehicle itself is drawn
+   * throughout, from the live stream, in every one of these states.
+   */
+  const pipelineNotice = useMemo<
+    {
+      text: string;
+      icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
+      tone: string;
+    } | null
+  >(() => {
+    if (roadMatchUnavailable) {
+      return {
+        text: 'Road matching unavailable — GPS only, no road drawn',
+        icon: 'road-variant',
+        tone: ROUTE_GPS_ONLY,
+      };
+    }
+    if (liveStreamConnecting) {
+      return {
+        text: live.stream.status === 'reconnecting' ? 'Reconnecting…' : 'Connecting…',
+        icon: 'access-point',
+        tone: '#93C5FD',
+      };
+    }
+    if (routeHydrating) {
+      return { text: 'Loading travelled route…', icon: 'map-marker-path', tone: '#93C5FD' };
+    }
+    if (roadMatchPending && diagnosticRouteSegments.length > 0) {
+      return { text: 'Waiting for road match…', icon: 'progress-clock', tone: ROUTE_GPS_ONLY };
+    }
+    return null;
+  }, [
+    diagnosticRouteSegments.length,
+    live.stream.status,
+    liveStreamConnecting,
+    roadMatchPending,
+    roadMatchUnavailable,
+    routeHydrating,
+  ]);
+
   const fallbackMarkers = useMemo<WebMapMarker[]>(
     () => [
       {
@@ -1991,10 +2102,19 @@ export default function VehicleTrackerScreen() {
   );
   const fallbackPolylines = useMemo<[number, number][][]>(
     () =>
+      // [longitude, latitude] for MapLibre GeoJSON. This conversion is correct
+      // and is deliberately the only place it happens.
       liveRouteSegments.map((segment) =>
         segment.map((coordinate) => [coordinate.longitude, coordinate.latitude])
       ),
     [liveRouteSegments]
+  );
+  const fallbackDiagnosticPolylines = useMemo<[number, number][][]>(
+    () =>
+      diagnosticRouteSegments.map((segment) =>
+        segment.map((coordinate) => [coordinate.longitude, coordinate.latitude])
+      ),
+    [diagnosticRouteSegments]
   );
 
   useEffect(() => {
@@ -2007,9 +2127,6 @@ export default function VehicleTrackerScreen() {
       }
       if (toastTimerRef.current) {
         clearTimeout(toastTimerRef.current);
-      }
-      if (liveTransitionFrameRef.current != null) {
-        cancelAnimationFrame(liveTransitionFrameRef.current);
       }
       if (cameraFrameRef.current != null) {
         cancelAnimationFrame(cameraFrameRef.current);
@@ -2224,6 +2341,21 @@ export default function VehicleTrackerScreen() {
               updates. No per-frame progress lines, gradients, or traffic colours. */}
           {isRouteVisible ? (
             <>
+              {/* GPS-only diagnostic, UNDER the road route and visibly
+                  different: thin, amber, no aura. A stretch the matcher could
+                  not place is evidence of where the vehicle said it was, not a
+                  road it drove on, and drawing the two the same way is what made
+                  a matching outage look like a route through buildings. */}
+              {diagnosticRouteSegments.map((segment, index) => (
+                <StableRouteLine
+                  key={`live-track-gps-only-${index}`}
+                  auraColor=""
+                  color={ROUTE_GPS_ONLY}
+                  coordinates={segment}
+                  width={2}
+                  zIndex={11}
+                />
+              ))}
               {liveRouteSegments.map((segment, index) => (
                 <StableRouteLine
                   key={`live-track-route-${index}`}
@@ -2259,6 +2391,7 @@ export default function VehicleTrackerScreen() {
           markers={fallbackMarkers}
           onInteraction={handleManualMapInteraction}
           onProjectionChange={handleWebProjection}
+          diagnosticPolylines={fallbackDiagnosticPolylines}
           polylines={fallbackPolylines}
           selectedId="vehicle"
           style={styles.mapCanvas}
@@ -2266,6 +2399,24 @@ export default function VehicleTrackerScreen() {
       )}
 
       <View pointerEvents="none" style={styles.mapShade} />
+
+      {/* Road-matching state, stated rather than implied.
+          A matching outage must read as "we do not know which road", with the
+          vehicle still on screen and NO fabricated line - not as a confident
+          blue route across whatever lies between two fixes. The toast announces
+          the transition; this pill is the standing statement, because an
+          operator who joined after the toast expired still needs to know why
+          the line stopped growing. */}
+      {pipelineNotice ? (
+        <View pointerEvents="none" style={[styles.roadMatchPill, { top: headerTop + 74 }]}>
+          <MaterialCommunityIcons
+            color={pipelineNotice.tone}
+            name={pipelineNotice.icon}
+            size={16}
+          />
+          <Text style={styles.roadMatchPillText}>{pipelineNotice.text}</Text>
+        </View>
+      ) : null}
 
       {vehicleScreenPoint && tooltipVisible ? (
         <Animated.View
@@ -2822,7 +2973,16 @@ const LiveDetailsSheet = memo(function LiveDetailsSheet({
           48 px handle that actually measures SHEET_HANDLE_HEIGHT. */}
       <Animated.View
         pointerEvents={expanded ? 'auto' : 'none'}
-        style={[styles.bottomSheetContent, { opacity: expanded ? 1 : 0 }]}
+        // The sheet's HEIGHT already reserves the navigation bar's inset (see
+        // `sheetHeight`), but the padding did not spend it, so the last row of
+        // content sat flush against - and under - the system navigation bar on
+        // a phone with three-button navigation. `edgeToEdgeEnabled` means the
+        // app draws behind that bar, so every bottom-anchored surface has to
+        // state the inset itself.
+        style={[
+          styles.bottomSheetContent,
+          { opacity: expanded ? 1 : 0, paddingBottom: insets.bottom + 14 },
+        ]}
       >
         <Text style={styles.sheetSectionTitle}>Live Info</Text>
 
@@ -2976,6 +3136,24 @@ const styles = StyleSheet.create({
   mapShade: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(255, 255, 255, 0.02)',
+  },
+  roadMatchPill: {
+    position: 'absolute',
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: 'rgba(17, 24, 39, 0.88)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.55)',
+  },
+  roadMatchPillText: {
+    color: '#F8FAFC',
+    fontSize: 12,
+    fontWeight: '600',
   },
   mapStateOverlay: {
     ...StyleSheet.absoluteFillObject,

@@ -5,8 +5,11 @@ import { Platform } from 'react-native';
 
 import { COMMON_API_HEADERS, env } from '@/src/config/env';
 import { traceGps } from '@/src/services/gpsDiagnostics';
+import { GpsAcquisitionGate } from '@/src/services/gpsPipeline';
 import {
   buildMobileGpsPayload,
+  heartbeatIntervalMs,
+  rawGpsPointOf,
   validateMobileGpsLocation,
   type PreviousMobileGpsFix,
 } from '@/src/services/mobileGpsPayload';
@@ -43,6 +46,69 @@ type MobileGpsTaskData = {
 };
 
 let previousBackgroundFix: PreviousMobileGpsFix | null = null;
+/** When this collector last sent a parked phone's "still here" heartbeat. */
+let lastStationaryBackgroundPostAtMs = 0;
+/**
+ * Warm-up for the background collector, and the token it belongs to.
+ *
+ * The task body outlives any one session - the OS may invoke it after the app
+ * process was recreated - so the gate is keyed by the ingest token it
+ * converged for. A different token means a different vehicle's receiver, and
+ * carrying the previous one's convergence across would let the new device's
+ * very first cold fix straight through, which is precisely the case the gate
+ * exists to catch.
+ */
+let backgroundAcquisition = new GpsAcquisitionGate();
+let backgroundAcquisitionToken: string | null = null;
+
+function acquisitionFor(ingestToken: string): GpsAcquisitionGate {
+  if (backgroundAcquisitionToken !== ingestToken) {
+    backgroundAcquisitionToken = ingestToken;
+    backgroundAcquisition = new GpsAcquisitionGate();
+  }
+  return backgroundAcquisition;
+}
+
+/**
+ * True while the foreground watcher is the collector in charge.
+ *
+ * <h3>Why one of the two has to stand down</h3>
+ * Both collectors are registered at once on purpose - the task is what keeps
+ * tracking alive once the app leaves the screen - but they were also both
+ * POSTING at once, at 1 Hz each, for the same device. That is two uploads per
+ * second where the product needs one, and the two are not equivalent: the task
+ * drains its delivery serially, awaiting each POST, so on a slow link its
+ * queue never catches up and its fixes arrive progressively later. Observed on
+ * the test fleet as a device whose stored GPS time ran a steady 58 seconds
+ * behind its arrival time while a second device on the same phone was current.
+ *
+ * That lag is the "delayed coordinates" and "GPS delayed" symptom, and it is
+ * self-inflicted. Exactly one collector uploads at any moment: the foreground
+ * watcher while the app is on screen, the background task the rest of the
+ * time. The task stays REGISTERED throughout, so the handover costs no fixes.
+ */
+let foregroundCollectorActive = false;
+
+/**
+ * Declares which collector owns uploads. Called by the foreground tracker.
+ *
+ * @param active true while the app is in the foreground AND its own 1 Hz
+ *               watcher is installed
+ */
+export function setForegroundCollectorActive(active: boolean): void {
+  foregroundCollectorActive = active;
+}
+
+/**
+ * The single predicate both collectors consult before uploading.
+ *
+ * Exported so the foreground tracker asks the same question rather than
+ * re-deriving the answer from AppState itself. Two derivations of "who owns
+ * uploads" is how both sides end up believing they do.
+ */
+export function isForegroundCollectorActive(): boolean {
+  return foregroundCollectorActive;
+}
 
 if (Platform.OS !== 'web' && !TaskManager.isTaskDefined(MOBILE_GPS_TASK)) {
   TaskManager.defineTask<MobileGpsTaskData>(MOBILE_GPS_TASK, async ({ data, error }) => {
@@ -57,6 +123,17 @@ if (Platform.OS !== 'web' && !TaskManager.isTaskDefined(MOBILE_GPS_TASK)) {
       return;
     }
     if (!session.ingestToken) return;
+
+    if (foregroundCollectorActive) {
+      // The foreground watcher already has this fix, from the same sensor, and
+      // will post it without the batch drain's latency. Posting it here as well
+      // is a duplicate upload of the same GPS sample.
+      traceGps('rejected', 'background', {
+        reason: 'foreground_collector_owns_uploads',
+        batchSize: data.locations.length,
+      });
+      return;
+    }
 
     // Oldest first, and every fix in the batch.
     //
@@ -74,8 +151,45 @@ if (Platform.OS !== 'web' && !TaskManager.isTaskDefined(MOBILE_GPS_TASK)) {
     // never the newest.
     const ordered = [...data.locations].sort((a, b) => a.timestamp - b.timestamp);
     const batch = ordered.slice(Math.max(0, ordered.length - MAX_BACKGROUND_BATCH));
+    if (batch.length < ordered.length) {
+      // Past the cap the OLDEST go, and that is a coverage gap: those fixes were
+      // never uploaded, so nothing downstream may draw a line across the ground
+      // they covered. Logged with its range rather than absorbed silently.
+      traceGps('rejected', 'background', {
+        reason: 'background_batch_overflow_coverage_gap',
+        droppedFixCount: ordered.length - batch.length,
+        droppedFromGpsTime: new Date(ordered[0].timestamp).toISOString(),
+        droppedToGpsTime: new Date(
+          ordered[ordered.length - batch.length - 1].timestamp
+        ).toISOString(),
+        oldestRetainedGpsTime: new Date(batch[0].timestamp).toISOString(),
+      });
+    }
 
+    const gate = acquisitionFor(session.ingestToken);
+    // Screened here, uploaded once below. Posting them one at a time and
+    // awaiting each round trip is what made the background collector fall
+    // progressively further behind on a slow link - a device on the test fleet
+    // ran a steady 58 seconds late while a second device on the same phone was
+    // current. The whole delivery now costs ONE round trip.
+    const payloads: ReturnType<typeof buildMobileGpsPayload>[] = [];
+    let newestStationary = false;
     for (const location of batch) {
+      // Warm-up first, and before any network work. A refused fix is never
+      // posted, so it never becomes a stored position, a live coordinate or a
+      // playback point - the same guarantee the foreground collector gives,
+      // enforced by the same gate rather than by a second copy of the rules.
+      const warmUp = gate.offer(rawGpsPointOf(location));
+      if (warmUp.state === 'acquiring') {
+        traceGps('rejected', 'background', {
+          reason: warmUp.reason ? `acquiring:${warmUp.reason}` : 'acquiring',
+          samples: warmUp.samples,
+          needed: warmUp.needed,
+          gpsTime: new Date(location.timestamp).toISOString(),
+          accuracy: location.coords.accuracy,
+        });
+        continue;
+      }
       const validation = validateMobileGpsLocation(location, previousBackgroundFix);
       if (!validation.accepted) {
         traceGps('rejected', 'background', {
@@ -85,31 +199,72 @@ if (Platform.OS !== 'web' && !TaskManager.isTaskDefined(MOBILE_GPS_TASK)) {
         });
         continue;
       }
-      try {
-        traceGps('raw', 'background', {
-          lat: location.coords.latitude,
-          lng: location.coords.longitude,
-          accuracy: location.coords.accuracy,
-          speedMps: location.coords.speed,
-          heading: location.coords.heading,
+
+      // A parked phone uploads at the heartbeat rate, not the sampling rate -
+      // the same rule the foreground collector has always applied. Throttled
+      // only when the DEVICE reported a stop, never merely because the fix was
+      // held: a phone that reports no speed at all does that routinely while
+      // driving, and throttling on that alone would cut a moving vehicle to one
+      // upload every ten seconds exactly as it pulled away.
+      const heartbeatMs = heartbeatIntervalMs(session.accuracy ?? 'balanced');
+      if (
+        validation.stationaryDrift &&
+        validation.deviceConfirmedStationary &&
+        lastStationaryBackgroundPostAtMs > 0 &&
+        Date.now() - lastStationaryBackgroundPostAtMs < heartbeatMs
+      ) {
+        traceGps('rejected', 'background', {
+          reason: 'stationary_heartbeat_throttled',
           gpsTime: new Date(location.timestamp).toISOString(),
-          fixAgeMs: Date.now() - location.timestamp,
-          batchSize: batch.length,
+          accuracy: location.coords.accuracy,
         });
-        await postLocation(location, session.ingestToken, session.accuracy ?? 'balanced');
-        previousBackgroundFix = validation.stationaryDrift && previousBackgroundFix
-          ? { ...previousBackgroundFix, timestamp: location.timestamp }
-          : {
-              latitude: location.coords.latitude,
-              longitude: location.coords.longitude,
-              timestamp: location.timestamp,
-            };
-      } catch {
-        // A transient network/API failure ends this delivery cleanly rather than
-        // continuing to push the rest of the batch at a link that is not there.
-        // The native location service invokes the task again with the next fix.
-        return;
+        continue;
       }
+
+      traceGps('raw', 'background', {
+        lat: location.coords.latitude,
+        lng: location.coords.longitude,
+        accuracy: location.coords.accuracy,
+        speedMps: location.coords.speed,
+        heading: location.coords.heading,
+        gpsTime: new Date(location.timestamp).toISOString(),
+        fixAgeMs: Date.now() - location.timestamp,
+        batchSize: batch.length,
+      });
+      payloads.push(buildMobileGpsPayload(location, session.accuracy ?? 'balanced'));
+      newestStationary =
+        validation.stationaryDrift && validation.deviceConfirmedStationary;
+      // The anchor advances per ACCEPTED fix, in order, so the next fix in this
+      // delivery is validated against its true predecessor.
+      previousBackgroundFix = validation.stationaryDrift && previousBackgroundFix
+        ? { ...previousBackgroundFix, timestamp: location.timestamp }
+        : {
+            latitude: location.coords.latitude,
+            longitude: location.coords.longitude,
+            timestamp: location.timestamp,
+          };
+    }
+
+    if (payloads.length === 0) return;
+    const newest = batch[batch.length - 1];
+    try {
+      await postPayloads(payloads, session.ingestToken);
+      lastStationaryBackgroundPostAtMs = newestStationary ? Date.now() : 0;
+      traceGps('validated', 'background', {
+        gpsTime: payloads[payloads.length - 1].recordedAt,
+        uploadLatencyMs: Date.now() - newest.timestamp,
+        fixAgeMs: Date.now() - newest.timestamp,
+        batchSize: payloads.length,
+      });
+    } catch {
+      // A transient network/API failure ends this delivery cleanly rather than
+      // retrying at a link that is not there. The native location service
+      // invokes the task again with the next fix.
+      traceGps('rejected', 'background', {
+        reason: 'background_upload_failed',
+        batchSize: payloads.length,
+        gpsTime: payloads[payloads.length - 1].recordedAt,
+      });
     }
   });
 }
@@ -121,6 +276,9 @@ export async function startBackgroundMobileGps(
   if (Platform.OS === 'web') return false;
   try {
     previousBackgroundFix = null;
+    lastStationaryBackgroundPostAtMs = 0;
+    backgroundAcquisitionToken = null;
+    backgroundAcquisition = new GpsAcquisitionGate();
     if (!(await TaskManager.isAvailableAsync())) return false;
     if (!(await Location.isBackgroundLocationAvailableAsync())) return false;
 
@@ -180,32 +338,41 @@ export async function stopBackgroundMobileGps(): Promise<void> {
     // Mobile GPS session from starting or stopping cleanly.
   } finally {
     previousBackgroundFix = null;
+    lastStationaryBackgroundPostAtMs = 0;
+    backgroundAcquisitionToken = null;
+    backgroundAcquisition = new GpsAcquisitionGate();
     await SecureStore.deleteItemAsync(MOBILE_GPS_SESSION_KEY).catch(() => undefined);
   }
 }
 
 /**
- * Posts one fix.
+ * Posts one delivery's worth of fixes, oldest first.
  *
  * Body construction is shared with the foreground tracker so the two cannot
  * disagree about units. In particular the speed goes out in metres per second
- * and is converted exactly once, server-side - this function used to convert to
- * km/h itself, which meant the unit contract lived in two files.
+ * and is converted exactly once, server-side.
+ *
+ * <p>A single fix still uses the single endpoint, so a one-fix delivery is
+ * byte-for-byte what it always was; two or more go to the batch endpoint, which
+ * ingests them individually and in order on the server.
  */
-async function postLocation(
-  location: Location.LocationObject,
-  ingestToken: string,
-  accuracy: 'balanced' | 'high'
+async function postPayloads(
+  payloads: ReturnType<typeof buildMobileGpsPayload>[],
+  ingestToken: string
 ): Promise<void> {
-  const response = await fetch(`${env.apiBaseUrl}/ingest/positions`, {
-    body: JSON.stringify(buildMobileGpsPayload(location, accuracy)),
-    headers: {
-      ...COMMON_API_HEADERS,
-      'Content-Type': 'application/json',
-      'X-Device-Token': ingestToken,
-    },
-    method: 'POST',
-  });
+  const single = payloads.length === 1;
+  const response = await fetch(
+    single ? `${env.apiBaseUrl}/ingest/positions` : `${env.apiBaseUrl}/ingest/positions/batch`,
+    {
+      body: JSON.stringify(single ? payloads[0] : { positions: payloads }),
+      headers: {
+        ...COMMON_API_HEADERS,
+        'Content-Type': 'application/json',
+        'X-Device-Token': ingestToken,
+      },
+      method: 'POST',
+    }
+  );
   if (!response.ok) {
     throw new Error(`Mobile GPS background upload failed with HTTP ${response.status}`);
   }

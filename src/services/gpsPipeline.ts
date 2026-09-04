@@ -132,6 +132,26 @@ export const GPS_LIMITS = {
   maxCarriedSnapMeters: 25,
   /** Matched geometry may not contain a hop longer than this. */
   maxGeometryStepMeters: 120,
+  /**
+   * Longest step the route may cover between two ENGINE-MATCHED positions when
+   * the matcher returned no intermediate road vertices.
+   *
+   * <p>The live matcher emits the road vertices travelled since the previous
+   * match. When a vehicle advances without leaving the road segment it is on,
+   * that tail legitimately contains one vertex or none - there is no new vertex
+   * to report - and on a real drive that is roughly one fix in six. Refusing
+   * those breaks the line into a piece per short step, which is a fragmented
+   * route drawn for a vehicle that never left the road.
+   *
+   * <p>Joining two matched positions across such a step is NOT the raw-GPS
+   * fallback this pipeline removed: both endpoints came from the routing engine
+   * and lie on the road, and the straight line between two points on one road
+   * segment IS that segment. The bound is what keeps it honest - past it, the
+   * absence of geometry means the road taken is genuinely unknown, and the line
+   * breaks. 30 m is about 108 km/h at a 1 Hz report rate, so it covers ordinary
+   * driving and excludes the long silences it is there to catch.
+   */
+  maxMatchedSegmentStepMeters: 30,
   /** How far matched geometry may sit from the points it claims to join. */
   maxGeometryEndpointGapMeters: 120,
   /** Recent validated fixes retained for the noise/movement decision. */
@@ -824,23 +844,22 @@ function resolveBearing(params: {
 export type MatchedCandidate = {
   latitude: unknown;
   longitude: unknown;
-  /** Matching confidence in [0,1], or null when this fix was not solved. */
+  /** Confidence of the latest road solve, retained while a coordinate is held. */
   confidence: number | null;
   /**
    * How the backend produced the coordinate.
    *
    * `SOLVED`  - the routing engine placed this fix on a road.
+   * `HELD`    - no new usable match; keep the exact previous road position.
    * `CARRIED` - the previous solve's correction was carried onto this fix
-   *             because the solve was debounced or the router was briefly
-   *             unavailable. It is still road-continuous; it is simply not a
-   *             new measurement, which is why it carries no confidence.
+   *             (legacy backend compatibility only).
    * `NONE`    - the validated coordinate, unmodified.
    *
    * Null for a backend that predates the field, which is read as `SOLVED` when
    * a confidence is present and `NONE` otherwise - the behaviour those clients
    * already had.
    */
-  source: 'SOLVED' | 'CARRIED' | 'NONE' | null;
+  source: 'SOLVED' | 'HELD' | 'CARRIED' | 'NONE' | null;
 };
 
 export type RoadMatchedPoint = {
@@ -852,7 +871,7 @@ export type RoadMatchedPoint = {
   /** Metres between the validated fix and where it was drawn. */
   snapDistanceMeters: number;
   confidence: number | null;
-  source: 'SOLVED' | 'CARRIED' | 'NONE';
+  source: 'SOLVED' | 'HELD' | 'CARRIED' | 'NONE';
 };
 
 /**
@@ -863,9 +882,8 @@ export type RoadMatchedPoint = {
  * solved one fix and was rate-limited on the next, the marker used to hop
  * between the snapped position and the raw one every other fix - which draws a
  * saw-tooth on and off the carriageway, and is a large part of "the route
- * crosses buildings". A CARRIED coordinate is the backend applying the previous
- * solve's correction so the line stays continuous; it is accepted here for
- * exactly that reason, bounded by the same carry limit the backend uses.
+ * crosses buildings". A HELD coordinate preserves the exact last road position
+ * until a fresh solve arrives. CARRIED remains accepted only for older servers.
  *
  * A held fix keeps the coordinate it was held at: applying a match to it would
  * move the vehicle immediately after deciding not to.
@@ -897,6 +915,21 @@ export function acceptMatchedCoordinate(
   const source =
     candidate.source ?? (candidate.confidence != null ? 'SOLVED' : 'NONE');
   if (source === 'NONE') return unmatched;
+
+  if (source === 'HELD') {
+    // A provider failure never promotes the new raw coordinate. The backend
+    // repeats its last trusted road coordinate and the client independently
+    // verifies that it is the same point it was already drawing.
+    if (!previousDisplay || distanceBetween(previousDisplay, matched) > 1) return unmatched;
+    return {
+      validated,
+      coordinate: previousDisplay,
+      onRoad: true,
+      snapDistanceMeters: distanceBetween(validated.coordinate, previousDisplay),
+      confidence: candidate.confidence,
+      source: 'HELD',
+    };
+  }
 
   const snapDistanceMeters = distanceBetween(validated.coordinate, matched);
 
@@ -946,6 +979,16 @@ export type SegmentBreakReason =
   | 'excessive_step'
   | 'impossible_speed'
   | 'road_discontinuity'
+  /**
+   * The vehicle drove continuously, but the stretch it just covered has no road
+   * geometry, so the drawn route has a hole in it there.
+   *
+   * A break for a reason that is about the MAP rather than about the telemetry.
+   * Without it, the next matched segment extends the run across the hole and
+   * joins the last matched vertex straight to the next one - a chord through
+   * whatever the matcher could not place.
+   */
+  | 'unmatched_stretch'
   | 'new_trip';
 
 export type SegmentDecision =
@@ -1032,8 +1075,27 @@ export function splitOnInvalidVertices(
  * Deliberately a flat object of primitives: a trace that has to be expanded in
  * a console to be read is not one anybody uses at the roadside.
  */
+/**
+ * What the pipeline did with a fix once it had finished judging it.
+ *
+ * The validation verdict alone does not answer the question an operator
+ * actually asks - "did this coordinate end up on my route?" - because an
+ * accepted fix can still be held, and a held fix extends nothing. Naming the
+ * outcome separately closes the trace: every fix now says both what was
+ * decided about it and what was done with it.
+ */
+export type GpsPipelineOutcome =
+  /** Extended the live polyline and became a stored playback point. */
+  | 'LIVE_APPENDED'
+  /** Persisted for replay, but did not extend the live line. */
+  | 'PLAYBACK_STORED'
+  /** Deliberately did nothing: rejected, held, or duplicated. */
+  | 'SKIPPED';
+
 export type GpsTraceRecord = {
   vehicleId: number | string | null;
+  /** The reporting device. Equal to `vehicleId` where one device is one vehicle. */
+  deviceId: number | string | null;
   timestamp: string;
   rawLat: number | null;
   rawLng: number | null;
@@ -1049,6 +1111,16 @@ export type GpsTraceRecord = {
   roadMatchedLatLng: string | null;
   snapDistance: number | null;
   finalRenderedLatLng: string | null;
+  outcome: GpsPipelineOutcome;
+  /**
+   * The whole journey of this fix on one line.
+   *
+   * `RAW -> ACCEPTED|REJECTED -> reason -> MATCHED -> outcome`. Structured
+   * fields are better for machines; a single greppable line is what gets a
+   * fault localised at the roadside, and reconstructing it by eye from
+   * fourteen separate keys is not something anybody does twice.
+   */
+  pipeline: string;
 };
 
 function coordinateText(coordinate: LatLng | null | undefined): string | null {
@@ -1063,11 +1135,25 @@ export function buildTraceRecord(params: {
   decision: GpsDecision;
   matched?: RoadMatchedPoint | null;
   rendered?: LatLng | null;
+  /** What the caller went on to do with this fix. Defaults to SKIPPED. */
+  outcome?: GpsPipelineOutcome;
+  /** The reporting device, when the caller knows it separately. */
+  deviceId?: number | string | null;
 }): GpsTraceRecord {
   const { raw, previous, decision, matched, rendered } = params;
   const accepted = decision.accepted ? decision.point : null;
+  const outcome: GpsPipelineOutcome = params.outcome ?? 'SKIPPED';
+  const verdict = !decision.accepted
+    ? `REJECTED -> ${decision.reason}`
+    : decision.point.held
+      ? 'ACCEPTED -> held_stationary_drift'
+      : 'ACCEPTED';
+  const matchStage = matched?.onRoad
+    ? `MATCHED(${matched.source}) ${coordinateText(matched.coordinate)}`
+    : 'UNMATCHED';
   return {
     vehicleId: raw.vehicleId,
+    deviceId: params.deviceId ?? raw.vehicleId,
     timestamp: Number.isFinite(raw.timestampMs)
       ? new Date(raw.timestampMs).toISOString()
       : String(raw.timestampMs),
@@ -1093,5 +1179,217 @@ export function buildTraceRecord(params: {
     roadMatchedLatLng: matched?.onRoad ? coordinateText(matched.coordinate) : null,
     snapDistance: matched?.onRoad ? matched.snapDistanceMeters : null,
     finalRenderedLatLng: coordinateText(rendered ?? matched?.coordinate ?? accepted?.coordinate),
+    outcome,
+    pipeline: `RAW ${coordinateText(checkCoordinate(raw.latitude, raw.longitude).valid
+      ? { latitude: raw.latitude as number, longitude: raw.longitude as number }
+      : null) ?? 'invalid'} -> ${verdict} -> ${matchStage} -> ${outcome}`,
   };
+}
+
+// ----------------------------------------------------------- acquisition
+
+/**
+ * The warm-up rules. Deliberately separate numbers from {@link GPS_LIMITS}.
+ *
+ * Steady-state limits answer "may this fix move a vehicle that is already
+ * being tracked correctly?". Acquisition answers a harder question: "is this
+ * receiver telling the truth yet at all?" - and it has no previously trusted
+ * position to measure against, which is exactly why it needs stricter evidence
+ * rather than looser.
+ */
+export const GPS_ACQUISITION = {
+  /** Consecutive agreeing fixes before the session is trusted. */
+  minSamples: 4,
+  /**
+   * Accuracy ceiling DURING warm-up.
+   *
+   * Tighter than {@link GPS_LIMITS.maxAccuracyMeters}. A cold receiver reports
+   * 30-50 m for its first several seconds while it is still deciding which
+   * satellites it can see, and those fixes pass the steady-state ceiling. They
+   * are also the ones that wander a hundred metres between consecutive
+   * readings, which is the zig-zag at the start of every route.
+   */
+  maxAccuracyMeters: 35,
+  /** A sample already this stale when it arrives is not evidence of "now". */
+  maxSampleAgeMs: 15_000,
+  /**
+   * Give up on the strict ceiling after this long.
+   *
+   * Indoors, in an urban canyon or under cover a receiver may never reach
+   * 35 m. Waiting forever means the vehicle never appears at all, which is
+   * worse than a slightly less precise start - so after this the ceiling
+   * relaxes to the steady-state one and warm-up completes on the ordinary
+   * rules. It never relaxes below those, so warm-up can never admit a fix that
+   * ordinary validation would refuse.
+   */
+  maxWarmupMs: 30_000,
+} as const;
+
+export type AcquisitionRejection =
+  | 'invalid_coordinate'
+  | 'invalid_timestamp'
+  | 'stale_sample'
+  | 'out_of_order'
+  | 'poor_accuracy'
+  | 'implausible_step';
+
+export type AcquisitionVerdict =
+  /** Counted, but the session is not trusted yet. Do not send, store or draw. */
+  | { state: 'acquiring'; samples: number; needed: number; reason: AcquisitionRejection | null }
+  /** This fix completes warm-up, or warm-up was already complete. Proceed. */
+  | { state: 'acquired'; samples: number };
+
+type AcquisitionSample = {
+  coordinate: LatLng;
+  timestampMs: number;
+  accuracyMeters: number | null;
+};
+
+/**
+ * The GPS warm-up gate: nothing is sent, stored or drawn until the receiver
+ * has proven itself.
+ *
+ * <h3>Why the first fix is the worst one</h3>
+ * A cold GPS returns a position long before it returns a good one. The first
+ * readings are typically a fused cell/Wi-Fi estimate or a two-satellite
+ * solution: they satisfy every structural check, carry a plausible accuracy
+ * number, and sit anywhere within a block or two of the truth. Posted
+ * immediately they become the route's first vertex, the trip's origin and the
+ * stored playback record's first point - permanently. Everything after them is
+ * measured from a position that was never real, which is why a live route is
+ * wrong at the start and "gets better after a while": the pipeline is not
+ * healing, it is simply leaving the bad opening behind.
+ *
+ * <h3>What counts as proof</h3>
+ * {@link GPS_ACQUISITION.minSamples} consecutive fixes that are each fresh,
+ * each inside the acquisition accuracy ceiling, strictly ordered in time, and
+ * separated by steps the elapsed time can actually explain. The step test is
+ * the same Haversine-over-elapsed-time physics the steady-state validator
+ * uses, so warm-up completes just as readily for a phone that starts tracking
+ * in a moving car as for one sitting on a desk. There is no fixed movement
+ * threshold to re-tune per travel mode - walking, cycling and driving all
+ * satisfy the same rule because the rule is expressed as a speed, not as a
+ * distance.
+ *
+ * A single failing sample resets the run. That is the point: a receiver whose
+ * consecutive fixes disagree with each other has not converged, and the run
+ * length is precisely the measurement of that.
+ *
+ * <h3>Scope</h3>
+ * One gate per tracked device session. Callers key it accordingly; a device
+ * change must construct a new gate rather than reuse this one, or one
+ * vehicle's warm-up would vouch for another vehicle's receiver.
+ */
+export class GpsAcquisitionGate {
+  private readonly samples: AcquisitionSample[] = [];
+  private startedAtMs: number | null = null;
+  private acquired = false;
+
+  /** True once warm-up has completed and ordinary validation has taken over. */
+  get isAcquired(): boolean {
+    return this.acquired;
+  }
+
+  /** Agreeing fixes collected so far in the current run. */
+  get sampleCount(): number {
+    return this.samples.length;
+  }
+
+  /** Forgets everything. Use on device change, sign-out or a tracking restart. */
+  reset(): void {
+    this.samples.length = 0;
+    this.startedAtMs = null;
+    this.acquired = false;
+  }
+
+  /**
+   * Offers one raw fix to the gate.
+   *
+   * @returns `acquired` when the caller may proceed with this fix, `acquiring`
+   *          when the caller must drop it and wait for the next one.
+   */
+  offer(raw: RawGpsPoint, now = Date.now()): AcquisitionVerdict {
+    if (this.acquired) return { state: 'acquired', samples: this.samples.length };
+    if (this.startedAtMs == null) this.startedAtMs = now;
+
+    const verdict = this.evaluate(raw, now);
+    if (verdict.state === 'acquired') this.acquired = true;
+    return verdict;
+  }
+
+  private fail(reason: AcquisitionRejection): AcquisitionVerdict {
+    // A disagreeing sample invalidates the whole run, not just itself. Keeping
+    // the earlier samples would let a receiver that alternates between a good
+    // and a bad solution accumulate its way to "converged" without ever having
+    // converged.
+    this.samples.length = 0;
+    return { state: 'acquiring', samples: 0, needed: GPS_ACQUISITION.minSamples, reason };
+  }
+
+  private evaluate(raw: RawGpsPoint, now: number): AcquisitionVerdict {
+    const coordinate = checkCoordinate(raw.latitude, raw.longitude);
+    if (!coordinate.valid) return this.fail('invalid_coordinate');
+    if (!Number.isFinite(raw.timestampMs)) return this.fail('invalid_timestamp');
+    if (raw.timestampMs > now + GPS_LIMITS.maxFutureSkewMs) return this.fail('invalid_timestamp');
+    if (now - raw.timestampMs > GPS_ACQUISITION.maxSampleAgeMs) {
+      // A buffered or delayed reading says where the phone WAS. Warm-up is a
+      // claim about the receiver right now, so it cannot be built out of one.
+      return this.fail('stale_sample');
+    }
+
+    const accuracy = raw.accuracyMeters;
+    if (accuracy != null && (!Number.isFinite(accuracy) || accuracy < 0)) {
+      return this.fail('poor_accuracy');
+    }
+    if (accuracy != null && accuracy > this.accuracyCeiling(now)) {
+      return this.fail('poor_accuracy');
+    }
+
+    const previous = this.samples[this.samples.length - 1];
+    if (previous) {
+      if (raw.timestampMs <= previous.timestampMs) return this.fail('out_of_order');
+      const distanceMeters = distanceBetween(previous.coordinate, coordinate.coordinate);
+      const deltaSeconds = (raw.timestampMs - previous.timestampMs) / 1000;
+      const impliedKph = deltaSeconds > 0 ? (distanceMeters / deltaSeconds) * 3.6 : Infinity;
+      // The same two rules the steady-state validator applies, for the same
+      // reason: the speed ceiling catches a teleport across a short interval,
+      // the step ceiling catches one across a long interval where the
+      // arithmetic makes the distance look reasonable. Together they let a car
+      // at 100 km/h through and keep a stationary receiver's 200 m hop out.
+      if (!Number.isFinite(impliedKph) || impliedKph > GPS_LIMITS.maxSpeedKph) {
+        return this.fail('implausible_step');
+      }
+      if (distanceMeters > GPS_LIMITS.maxStepMeters) return this.fail('implausible_step');
+    }
+
+    this.samples.push({
+      coordinate: coordinate.coordinate,
+      timestampMs: raw.timestampMs,
+      accuracyMeters: accuracy,
+    });
+    if (this.samples.length >= GPS_ACQUISITION.minSamples) {
+      return { state: 'acquired', samples: this.samples.length };
+    }
+    return {
+      state: 'acquiring',
+      samples: this.samples.length,
+      needed: GPS_ACQUISITION.minSamples,
+      reason: null,
+    };
+  }
+
+  /**
+   * The accuracy a sample must beat to count, which relaxes exactly once.
+   *
+   * Strict while there is any prospect of a better fix; the ordinary
+   * steady-state ceiling after {@link GPS_ACQUISITION.maxWarmupMs}, so a
+   * receiver that genuinely cannot do better under cover still starts tracking
+   * rather than leaving the vehicle invisible indefinitely.
+   */
+  private accuracyCeiling(now: number): number {
+    const warmingForMs = this.startedAtMs == null ? 0 : now - this.startedAtMs;
+    return warmingForMs >= GPS_ACQUISITION.maxWarmupMs
+      ? GPS_LIMITS.maxAccuracyMeters
+      : GPS_ACQUISITION.maxAccuracyMeters;
+  }
 }

@@ -44,6 +44,7 @@ import {
   useUploadVehicleDocumentMutation,
 } from '@/src/services/vehicleDocumentsApi';
 import { useHasPermission } from '@/src/store/hooks';
+import { useNowTick } from '@/src/hooks/useNowTick';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import {
   elevation,
@@ -298,6 +299,12 @@ function VehicleHero({
 
 function Overview({ data, stateColor }: { data: DeviceDetail; stateColor: string }) {
   const { colors: c } = useTheme();
+  // "Updated" is a function of the timestamp AND of now. Without a clock of its
+  // own it is only recomputed when the device data changes - and a vehicle that
+  // has stopped reporting produces no new data, so the figure froze at whatever
+  // it read when the screen was opened. A device seen 15 minutes ago still
+  // showed "7m" because that was true when the screen mounted.
+  const nowMs = useNowTick();
   const styles = useMemo(() => makeStyles(c), [c]);
   const speedUnit = data.speedUnit === 'MPH' ? 'mph' : 'km/h';
   // A phone acting as the tracker has no SIM, model or real IMEI of its own.
@@ -319,7 +326,7 @@ function Overview({ data, stateColor }: { data: DeviceDetail; stateColor: string
           tone={data.gpsValid ? c.success : c.danger}
           value={data.gpsValid ? 'Valid' : 'Invalid'}
         />
-        <Kpi icon="update" label="Updated" tone={c.info} value={formatAge(data.lastUpdate)} />
+        <Kpi icon="update" label="Updated" tone={c.info} value={formatAge(data.lastUpdate, nowMs)} />
       </View>
 
       <DetailCard icon="map-marker-outline" title="Live location">
@@ -901,11 +908,12 @@ function formatDateTime(value?: string | null) {
     : date.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 }
 
-function formatAge(value?: string | null) {
+function formatAge(value?: string | null, nowMs?: number) {
   if (!value) return 'Never';
   const time = new Date(value).getTime();
   if (Number.isNaN(time)) return 'Never';
-  const minutes = Math.max(0, Math.floor((Date.now() - time) / 60_000));
+  const now = nowMs != null && Number.isFinite(nowMs) ? nowMs : Date.now();
+  const minutes = Math.max(0, Math.floor((now - time) / 60_000));
   if (minutes < 1) return 'Now';
   if (minutes < 60) return `${minutes}m`;
   const hours = Math.floor(minutes / 60);

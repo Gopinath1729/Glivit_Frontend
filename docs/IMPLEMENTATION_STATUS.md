@@ -6,7 +6,7 @@ The user-facing product is focused on vehicles and their registered GPS devices:
 
 - live fleet and single-vehicle maps
 - smooth streamed marker movement with stale-fix protection
-- road snapping through a configurable OSRM-compatible service
+- backend-only Geoapify road map matching
 - trip history, route playback, stops, events, and Haversine distance
 - backend-owned `RUNNING`, `IDLE`, `STOPPED`, and `OFFLINE` detection from coordinates, time, and optional speed
 - geofence entry/exit alerts
@@ -28,7 +28,7 @@ A scheduled backend health monitor advances stationary devices from `IDLE` to `S
 - Expo SDK 54 / Android target API 36
 - foreground location only; no background-location or phone-tracker service
 - microphone permission blocked
-- production builds require an HTTPS backend and a Geoapify Map Tiles key; road matching uses the configured backend OSRM/Valhalla service
+- production builds require an HTTPS backend and a restricted Geoapify Map Tiles key; road matching uses the separate backend-only Geoapify credential
 - EAS production output is an AAB; Play submission defaults to an Internal testing draft
 - release instructions and Play disclosures are in [PLAY_STORE_RELEASE.md](./PLAY_STORE_RELEASE.md)
 
@@ -44,6 +44,6 @@ A scheduled backend health monitor advances stationary devices from `IDLE` to `S
 
 An AAB cannot be created or uploaded until the repository is linked to the
 intended Expo owner/team and the deployment owner supplies a stable HTTPS
-backend, a production OSRM/Valhalla endpoint, a Geoapify Map Tiles key, Play
+backend, a Geoapify Map Matching credential, a separate Map Tiles key, Play
 Console app/listing access, and the legal privacy-policy details. Google review
 and any required closed-testing period are external to the codebase.

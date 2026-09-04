@@ -1,14 +1,21 @@
 /**
  * Converts a recorded GPS duration into a usable wall-clock playback duration.
  *
- * The old implementation forced every route into 30 seconds. A full working
- * day therefore shot across the map, while a short trip moved at the same rate.
- * This keeps timing proportional to the real timestamps: standard playback is
- * 30x recorded time, never shorter than one minute and never longer than twenty.
+ * The old implementation forced every route into 30 seconds. Its first fix
+ * still compressed the recorded clock by 30x, so even the UI's slow 0.5x mode
+ * moved at 15x real time. On an ordinary city trip that makes the marker skip
+ * whole junctions between frames and makes a correctly matched road look like
+ * a bad route.
+ *
+ * Standard playback now advances four recorded seconds per wall-clock second.
+ * The speed chips remain useful (0.5x = a relaxed 2x recorded clock, 4x = a
+ * quick 16x scan), while the normal setting leaves enough frames for curves,
+ * stops and bearing changes to be visible. Very short and multi-day ranges are
+ * still bounded, but the bounds are intentionally much less aggressive.
  */
-export const PLAYBACK_TIME_COMPRESSION = 30;
-export const MIN_PLAYBACK_WALL_MS = 60_000;
-export const MAX_PLAYBACK_WALL_MS = 20 * 60_000;
+export const PLAYBACK_TIME_COMPRESSION = 4;
+export const MIN_PLAYBACK_WALL_MS = 2 * 60_000;
+export const MAX_PLAYBACK_WALL_MS = 60 * 60_000;
 
 export function playbackWallDurationMs(recordedDurationMs: number): number {
   if (!Number.isFinite(recordedDurationMs) || recordedDurationMs <= 0) {
@@ -33,4 +40,3 @@ export function advancePlaybackElapsed(
   const rate = duration / wallDuration;
   return Math.min(duration, Math.max(0, elapsedMs) + Math.max(0, frameDeltaMs) * rate * speed);
 }
-

@@ -39,7 +39,23 @@ export type RouteRunGeometry = {
 };
 
 export type MatchedRoute = {
+  /**
+   * The AUTHORITATIVE road route: confident matched runs only.
+   *
+   * Never contains validated GPS. A stretch the engine could not place is not a
+   * road, and putting it here made it indistinguishable from one - which is how
+   * a single failed chunk in the middle of a good trace produced a confident
+   * blue diagonal across a town centre.
+   */
   runs: RouteRunGeometry[];
+  /**
+   * Stretches with NO road answer, as validated GPS, for a labelled overlay.
+   *
+   * Drawn - if at all - thin, dashed and captioned "GPS only". This is where the
+   * old fallback went: it is still available, still visible, and no longer
+   * pretending to be a road.
+   */
+  diagnosticRuns: RouteRunGeometry[];
   status: MapMatchStatus;
   confidence: number;
   /** True when at least one run came back from the routing engine. */
@@ -48,6 +64,7 @@ export type MatchedRoute = {
 
 export const EMPTY_MATCHED_ROUTE: MatchedRoute = {
   runs: [],
+  diagnosticRuns: [],
   status: 'DISABLED',
   confidence: 0,
   hasMatchedGeometry: false,
@@ -124,49 +141,39 @@ export function resolveMatchedRoute(playback: PlaybackResponse | undefined | nul
     .filter((run): run is RouteRunGeometry => run !== null);
   const matched = parsed.filter((run) => run.matched && run.confidence >= 0.2);
 
-  if (matched.length > 0) {
-    return {
-      runs: matched,
-      status: playback.matchStatus ?? 'PARTIAL',
-      confidence: playback.matchConfidence ?? 0,
-      hasMatchedGeometry: true,
-    };
-  }
-
   // ---------------------------------------------------------------------
-  // No CONFIDENT road geometry for this range.
+  // Two lists, never one.
   //
-  // This used to return no runs at all, which is why the History tab showed a
-  // journey with no route line on it. And it was not a rare edge: the backend
-  // only marks a run `matched` when EVERY chunk of it matched, and the default
-  // routing endpoint is a shared demo server that rate-limits, so a single
-  // throttled chunk anywhere in the day removed the whole day's line.
+  // The backend now emits a SEPARATE run wherever the engine could not place
+  // the trace, instead of splicing those raw coordinates into the geometry
+  // either side of them. This mirrors that split on the client: `runs` is the
+  // road and only the road; everything else - unmatched runs from the backend,
+  // and the reconstructed GPS runs used when the response carries no geometry
+  // at all - goes to `diagnosticRuns`.
   //
-  // The backend still returns geometry for those runs - the validated fixes,
-  // already split at the coverage gaps IT detected - and drawing that is not
-  // the thing this guard was protecting against. The artefact it was written
-  // for is a chord across a gap, and the runs are gap-split by construction,
-  // so a break is still drawn as a break. What is drawn is reported as
-  // GPS-derived by `matchStatus`, which the screen already surfaces, so the
-  // degradation stays visible instead of becoming an empty map.
-  //
-  // Joining fixes does cut corners. A cut corner is a worse-looking route; an
-  // absent route is a broken feature.
+  // The previous behaviour promoted the GPS fallback into `runs` whenever no
+  // matched run existed, with the reasoning that "a cut corner is a worse
+  // looking route; an absent route is a broken feature". That is true about
+  // completeness and false about honesty: drawn identically to matched
+  // geometry, the fallback is a chord across whatever lies between two fixes,
+  // and it is indistinguishable from a road at a glance. The feature is not
+  // absent now - the same geometry is still returned, still drawn if the screen
+  // wants it, and explicitly labelled as GPS rather than road.
   // ---------------------------------------------------------------------
-  // A healthy backend returns an unmatched RouteRun containing the validated
-  // fixes. Older deployments and interrupted matcher responses can return an
-  // empty route array while still returning all validated playback points. An
-  // empty map is never the correct representation of that data: rebuild the
-  // same gap-split GPS runs from the points as the final visible degradation.
-  const fallback = (parsed.length > 0
-    ? parsed
-    : validatedRunsFrom(playback.points ?? [])
+  const unmatched = parsed.filter((run) => !matched.includes(run));
+  const diagnosticRuns = (
+    unmatched.length > 0 || matched.length > 0
+      ? unmatched
+      : validatedRunsFrom(playback.points ?? [])
   ).filter((run) => run.coordinates.length >= 2);
+
   return {
-    runs: fallback,
-    status: playback.matchStatus ?? 'UNMATCHED',
-    confidence: 0,
-    hasMatchedGeometry: false,
+    runs: matched,
+    diagnosticRuns,
+    status:
+      playback.matchStatus ?? (matched.length > 0 ? 'PARTIAL' : 'UNMATCHED'),
+    confidence: matched.length > 0 ? (playback.matchConfidence ?? 0) : 0,
+    hasMatchedGeometry: matched.length > 0,
   };
 }
 

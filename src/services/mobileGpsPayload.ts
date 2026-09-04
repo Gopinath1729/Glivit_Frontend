@@ -24,6 +24,31 @@ import { validateGpsSample, type RawGpsPoint } from '@/src/services/gpsPipeline'
  * speed, the route and the vehicle's reported freshness all at once.
  */
 
+/**
+ * How often a STATIONARY phone uploads anyway.
+ *
+ * A parked phone's fixes are drift: the pipeline holds them rather than drawing
+ * them, so uploading every one costs battery and mobile data to move nothing.
+ * Skipping them entirely is not an option either - they are the evidence the
+ * device is still online, and without them the backend reaches its offline
+ * timeout and reports a vehicle that is sitting right there as not reporting.
+ *
+ * Defined HERE, once, because both collectors need it and neither can import
+ * the other: `phoneTracker` already imports the background task, so putting the
+ * numbers there would be a cycle. The foreground collector honoured this rate
+ * and the background one did not, which meant a parked phone with the app off
+ * screen uploaded at the full 1 Hz sampling rate indefinitely - 93 of one test
+ * device's 268 rows were stationary duplicates that should have been ten
+ * seconds apart.
+ */
+export const HIGH_ACCURACY_HEARTBEAT_MS = 10_000;
+export const BALANCED_HEARTBEAT_MS = 30_000;
+
+/** The stationary upload interval for an accuracy mode. */
+export function heartbeatIntervalMs(accuracy: 'balanced' | 'high'): number {
+  return accuracy === 'high' ? HIGH_ACCURACY_HEARTBEAT_MS : BALANCED_HEARTBEAT_MS;
+}
+
 export type MobileGpsPayload = {
   latitude: number;
   longitude: number;
@@ -97,6 +122,31 @@ const REASON_FOR: Record<string, MobileGpsRejectionReason> = {
 };
 
 /**
+ * One Expo location object, as the pipeline's raw sample.
+ *
+ * Extracted so the warm-up gate and the steady-state validator are fed byte
+ * for byte the same reading. Building the shape twice is how a unit or a
+ * null-handling rule ends up applied at one stage and not the other.
+ */
+export function rawGpsPointOf(location: Location.LocationObject): RawGpsPoint {
+  const { latitude, longitude, accuracy, speed } = location.coords;
+  return {
+    vehicleId: null,
+    timestampMs: location.timestamp,
+    latitude,
+    longitude,
+    accuracyMeters: typeof accuracy === 'number' && Number.isFinite(accuracy) ? accuracy : null,
+    // Expo reports metres per second and uses a negative value for "unknown".
+    // Converting here is display-only: the wire still carries m/s and the
+    // server owns the single conversion. See the speed note at the top.
+    deviceSpeedKmh:
+      typeof speed === 'number' && Number.isFinite(speed) && speed >= 0 ? speed * 3.6 : null,
+    reportedHeading: null,
+    source: 'device',
+  };
+}
+
+/**
  * Client-side collection gate.
  *
  * <h3>It no longer owns any rules</h3>
@@ -116,21 +166,7 @@ export function validateMobileGpsLocation(
   previous: PreviousMobileGpsFix | null,
   now = Date.now()
 ): MobileGpsValidation {
-  const { latitude, longitude, accuracy, speed } = location.coords;
-  const raw: RawGpsPoint = {
-    vehicleId: null,
-    timestampMs: location.timestamp,
-    latitude,
-    longitude,
-    accuracyMeters: typeof accuracy === 'number' && Number.isFinite(accuracy) ? accuracy : null,
-    // Expo reports metres per second and uses a negative value for "unknown".
-    // Converting here is display-only: the wire still carries m/s and the
-    // server owns the single conversion. See the speed note at the top.
-    deviceSpeedKmh:
-      typeof speed === 'number' && Number.isFinite(speed) && speed >= 0 ? speed * 3.6 : null,
-    reportedHeading: null,
-    source: 'device',
-  };
+  const raw = rawGpsPointOf(location);
 
   const decision = validateGpsSample({
     raw,

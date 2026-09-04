@@ -6,7 +6,9 @@ import {
   buildTraceRecord,
   checkCoordinate,
   coverageLimitsFor,
+  GPS_ACQUISITION,
   GPS_LIMITS,
+  GpsAcquisitionGate,
   GpsRollingWindow,
   haversineMeters,
   segmentConnectivity,
@@ -453,6 +455,25 @@ test('a carried correction keeps the line on the road while the router is thrott
   assert.equal(stretched.onRoad, false);
 });
 
+test('a failed match holds the exact previous road position', () => {
+  const previousDisplay = at(0, 6);
+  const validated = validateGpsSample({
+    raw: raw({ metresNorth: 50, timestampMs: NOW }),
+    previous: anchor({ timestampMs: NOW - 3_000 }),
+    now: NOW,
+  }).point;
+
+  const held = acceptMatchedCoordinate(
+    validated,
+    { ...previousDisplay, confidence: 0.92, source: 'HELD' },
+    previousDisplay
+  );
+
+  assert.equal(held.onRoad, true);
+  assert.equal(held.source, 'HELD');
+  assert.deepEqual(held.coordinate, previousDisplay);
+});
+
 test('a held fix is drawn where it was held, never moved by a road match', () => {
   const previousDisplay = at(0, 4);
   const validated = validateGpsSample({
@@ -517,6 +538,9 @@ test('the trace record carries every field needed to locate a bad coordinate', (
     'roadMatchedLatLng',
     'snapDistance',
     'finalRenderedLatLng',
+    'deviceId',
+    'outcome',
+    'pipeline',
   ]) {
     assert.ok(field in record, `trace record is missing ${field}`);
   }
@@ -525,6 +549,42 @@ test('the trace record carries every field needed to locate a bad coordinate', (
   assert.ok(record.distanceMeters > 390);
   assert.equal(record.deltaSeconds, 1);
   assert.ok(record.calculatedSpeed > 1_000);
+  assert.equal(record.outcome, 'SKIPPED');
+  assert.match(record.pipeline, /^RAW .* -> REJECTED -> impossible_jump -> UNMATCHED -> SKIPPED$/);
+});
+
+test('the one-line pipeline summary names every stage of an accepted fix', () => {
+  const previous = anchor({ timestampMs: NOW - 1_000 });
+  const goodRaw = raw({ metresNorth: 12, timestampMs: NOW, deviceSpeedKmh: 43 });
+  const decision = validateGpsSample({ raw: goodRaw, previous, now: NOW });
+  assert.equal(decision.accepted, true);
+  const matched = acceptMatchedCoordinate(
+    decision.point,
+    { ...at(12, 3), confidence: 0.9, source: 'SOLVED' },
+    previous.display
+  );
+  const record = buildTraceRecord({
+    raw: goodRaw,
+    previous,
+    decision,
+    matched,
+    deviceId: 42,
+    outcome: 'LIVE_APPENDED',
+  });
+  assert.equal(record.deviceId, 42);
+  assert.match(record.pipeline, /^RAW .* -> ACCEPTED -> MATCHED\(SOLVED\) .* -> LIVE_APPENDED$/);
+});
+
+test('a held fix is reported as accepted but appended to nothing', () => {
+  const previous = anchor({ timestampMs: NOW - 1_000, speedKmh: 0 });
+  // Inside the drift radius, with the device reporting a stop: parked wander.
+  const drift = raw({ metresNorth: 3, timestampMs: NOW, deviceSpeedKmh: 0 });
+  const decision = validateGpsSample({ raw: drift, previous, now: NOW });
+  assert.equal(decision.accepted, true);
+  assert.equal(decision.point.held, true);
+  const record = buildTraceRecord({ raw: drift, previous, decision, outcome: 'SKIPPED' });
+  assert.equal(record.validationResult, 'accepted_held');
+  assert.match(record.pipeline, /ACCEPTED -> held_stationary_drift .* -> SKIPPED$/);
 });
 
 test('haversine agrees with a known short distance', () => {
@@ -619,4 +679,158 @@ test('a validated fix on a slow tracker is not flagged as following a gap', () =
   });
   assert.equal(decision.accepted, true);
   assert.equal(decision.point.gapBefore, false);
+});
+
+// ------------------------------------------------------------- acquisition
+
+/** A raw fix for the warm-up gate, at `metresNorth`/`metresEast` from base. */
+function warmupFix(offsetMs, metresNorth = 0, metresEast = 0, accuracyMeters = 8) {
+  const coordinate = at(metresNorth, metresEast);
+  return {
+    vehicleId: 7,
+    timestampMs: NOW + offsetMs,
+    latitude: coordinate.latitude,
+    longitude: coordinate.longitude,
+    accuracyMeters,
+    deviceSpeedKmh: null,
+    reportedHeading: null,
+    source: 'device',
+  };
+}
+
+test('the warm-up gate refuses the first fix and every fix before the run is complete', () => {
+  const gate = new GpsAcquisitionGate();
+  for (let i = 0; i < GPS_ACQUISITION.minSamples - 1; i += 1) {
+    const verdict = gate.offer(warmupFix(i * 1_000), NOW + i * 1_000);
+    assert.equal(verdict.state, 'acquiring', `sample ${i} must not complete warm-up`);
+    assert.equal(gate.isAcquired, false);
+  }
+  const last = GPS_ACQUISITION.minSamples - 1;
+  const final = gate.offer(warmupFix(last * 1_000), NOW + last * 1_000);
+  assert.equal(final.state, 'acquired');
+  assert.equal(gate.isAcquired, true);
+});
+
+test('once acquired the gate never gates again', () => {
+  const gate = new GpsAcquisitionGate();
+  for (let i = 0; i < GPS_ACQUISITION.minSamples; i += 1) {
+    gate.offer(warmupFix(i * 1_000), NOW + i * 1_000);
+  }
+  // A fix that would have failed warm-up outright still passes now: after
+  // acquisition the steady-state validator owns the decision, and running two
+  // sets of rules over one fix is what the shared pipeline exists to prevent.
+  const after = gate.offer(warmupFix(10_000, 0, 0, 999), NOW + 10_000);
+  assert.equal(after.state, 'acquired');
+});
+
+test('a cold receiver reporting poor accuracy never completes warm-up', () => {
+  const gate = new GpsAcquisitionGate();
+  for (let i = 0; i < 10; i += 1) {
+    const verdict = gate.offer(
+      warmupFix(i * 1_000, 0, 0, GPS_ACQUISITION.maxAccuracyMeters + 5),
+      NOW + i * 1_000
+    );
+    assert.equal(verdict.state, 'acquiring');
+    assert.equal(verdict.reason, 'poor_accuracy');
+  }
+  assert.equal(gate.isAcquired, false);
+});
+
+test('one disagreeing sample resets the run rather than counting toward it', () => {
+  const gate = new GpsAcquisitionGate();
+  gate.offer(warmupFix(0), NOW);
+  gate.offer(warmupFix(1_000), NOW + 1_000);
+  assert.equal(gate.sampleCount, 2);
+  // 5 km sideways in one second: the classic cold-start excursion.
+  const spike = gate.offer(warmupFix(2_000, 5_000), NOW + 2_000);
+  assert.equal(spike.state, 'acquiring');
+  assert.equal(spike.reason, 'implausible_step');
+  assert.equal(gate.sampleCount, 0, 'the run restarts, it does not merely skip the bad sample');
+});
+
+test('warm-up completes for a phone that starts tracking in a moving car', () => {
+  const gate = new GpsAcquisitionGate();
+  // 100 km/h is ~27.8 m per second. No fixed movement threshold is involved:
+  // the rule is a speed, so walking, cycling and driving all satisfy it.
+  let verdict;
+  for (let i = 0; i < GPS_ACQUISITION.minSamples; i += 1) {
+    verdict = gate.offer(warmupFix(i * 1_000, i * 27.8), NOW + i * 1_000);
+  }
+  assert.equal(verdict.state, 'acquired');
+});
+
+test('warm-up completes at walking pace just as readily', () => {
+  const gate = new GpsAcquisitionGate();
+  let verdict;
+  for (let i = 0; i < GPS_ACQUISITION.minSamples; i += 1) {
+    // ~5 km/h.
+    verdict = gate.offer(warmupFix(i * 1_000, i * 1.4), NOW + i * 1_000);
+  }
+  assert.equal(verdict.state, 'acquired');
+});
+
+test('a stale buffered reading is not evidence the receiver is working now', () => {
+  const gate = new GpsAcquisitionGate();
+  const verdict = gate.offer(
+    warmupFix(0),
+    NOW + GPS_ACQUISITION.maxSampleAgeMs + 1_000
+  );
+  assert.equal(verdict.state, 'acquiring');
+  assert.equal(verdict.reason, 'stale_sample');
+});
+
+test('an out-of-order fix resets the run', () => {
+  const gate = new GpsAcquisitionGate();
+  gate.offer(warmupFix(2_000), NOW + 2_000);
+  const backwards = gate.offer(warmupFix(1_000), NOW + 2_100);
+  assert.equal(backwards.reason, 'out_of_order');
+  assert.equal(gate.sampleCount, 0);
+});
+
+test('null island and NaN coordinates are refused during warm-up', () => {
+  const gate = new GpsAcquisitionGate();
+  const nullIsland = gate.offer(
+    { ...warmupFix(0), latitude: 0, longitude: 0 },
+    NOW
+  );
+  assert.equal(nullIsland.reason, 'invalid_coordinate');
+  const notANumber = gate.offer({ ...warmupFix(1_000), latitude: Number.NaN }, NOW + 1_000);
+  assert.equal(notANumber.reason, 'invalid_coordinate');
+  assert.equal(gate.isAcquired, false);
+});
+
+test('the accuracy ceiling relaxes to the steady-state one, and no further', () => {
+  const gate = new GpsAcquisitionGate();
+  // Start the warm-up clock with a sample that is refused on accuracy.
+  const tooLoose = GPS_ACQUISITION.maxAccuracyMeters + 5;
+  assert.equal(gate.offer(warmupFix(0, 0, 0, tooLoose), NOW).reason, 'poor_accuracy');
+
+  const late = NOW + GPS_ACQUISITION.maxWarmupMs;
+  let verdict;
+  for (let i = 0; i < GPS_ACQUISITION.minSamples; i += 1) {
+    const at = late + i * 1_000;
+    verdict = gate.offer({ ...warmupFix(0, 0, 0, tooLoose), timestampMs: at }, at);
+  }
+  assert.equal(verdict.state, 'acquired', 'a persistently 40 m receiver still starts eventually');
+
+  const strict = new GpsAcquisitionGate();
+  const beyondSteadyState = GPS_LIMITS.maxAccuracyMeters + 1;
+  const veryLate = NOW + GPS_ACQUISITION.maxWarmupMs * 4;
+  const refused = strict.offer(
+    { ...warmupFix(0, 0, 0, beyondSteadyState), timestampMs: veryLate },
+    veryLate
+  );
+  assert.equal(refused.reason, 'poor_accuracy', 'relaxing never goes past the steady-state ceiling');
+});
+
+test('reset returns the gate to its cold state', () => {
+  const gate = new GpsAcquisitionGate();
+  for (let i = 0; i < GPS_ACQUISITION.minSamples; i += 1) {
+    gate.offer(warmupFix(i * 1_000), NOW + i * 1_000);
+  }
+  assert.equal(gate.isAcquired, true);
+  gate.reset();
+  assert.equal(gate.isAcquired, false);
+  assert.equal(gate.sampleCount, 0);
+  assert.equal(gate.offer(warmupFix(0), NOW).state, 'acquiring');
 });

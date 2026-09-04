@@ -9,6 +9,7 @@ import type { DeviceSummary } from '@/src/types/api';
 import {
   useLivePositionStream,
   type LivePositionEvent,
+  type LiveRoadMatchEvent,
   type LiveStreamState,
 } from './livePositionStream';
 import { validateLivePositionEvent } from './livePositions';
@@ -63,6 +64,16 @@ export type FleetTarget = {
   rawLongitude: number;
   /** True when latitude/longitude came from the road matcher. */
   matched: boolean;
+  /**
+   * Identity of the fix this target came from.
+   *
+   * The road answer arrives on its own frame, after the position, and is applied
+   * to the target only when it names THIS fix. Applying "the latest match" to
+   * "the latest target" is the stale-match substitution: on a moving vehicle the
+   * two are routinely different fixes, and the marker gets snapped onto the road
+   * it was on a second ago.
+   */
+  positionId: number | null;
   speedKmh: number;
   accuracyMeters: number | null;
   ignition: boolean | null;
@@ -129,6 +140,9 @@ function seedTarget(device: DeviceSummary): FleetTarget | null {
     rawLatitude: latitude,
     rawLongitude: longitude,
     matched: false,
+    // A seeded target has no live fix behind it yet, so no road answer may be
+    // applied to it. The first POSITION frame supplies the identity.
+    positionId: null,
     speedKmh: device.speed ?? 0,
     accuracyMeters: null,
     ignition: device.ignition ?? null,
@@ -263,6 +277,7 @@ export function useFleetLivePositions(seed: DeviceSummary[], enabled = true): Fl
         rawLatitude,
         rawLongitude,
         matched,
+        positionId: event.positionId,
         speedKmh: Number.isFinite(event.speedKmh) ? event.speedKmh : previous?.speedKmh ?? 0,
         accuracyMeters: event.accuracyMeters,
         ignition: event.ignition,
@@ -296,7 +311,41 @@ export function useFleetLivePositions(seed: DeviceSummary[], enabled = true): Fl
     [dispatch]
   );
 
-  const stream = useLivePositionStream(onPosition, enabled);
+  /**
+   * The road answer for one fleet marker.
+   *
+   * Applied only when it names the fix the target currently holds. A `SOLVED`
+   * match moves the marker onto the road; `CARRIED`/`HELD` leaves it exactly
+   * where it is; `NONE` leaves the validated coordinate showing and says so.
+   * Nothing here draws a route - the fleet map shows markers, and the road
+   * geometry belongs to the per-vehicle tracking screen.
+   */
+  const onRoadMatch = useCallback((event: LiveRoadMatchEvent) => {
+    const target = targetsRef.current.get(event.deviceId);
+    if (!target || target.positionId == null || target.positionId !== event.positionId) {
+      return;
+    }
+    if (
+      event.matchedSource !== 'SOLVED' ||
+      !usable(event.matchedLatitude, event.matchedLongitude)
+    ) {
+      return;
+    }
+    target.latitude = event.matchedLatitude as number;
+    target.longitude = event.matchedLongitude as number;
+    target.matched = true;
+    target.updatedAt = Date.now();
+    traceGps('matched', event.deviceId, {
+      stage: 'fleet_road_match',
+      positionId: event.positionId,
+      drawn: traceCoord(target.latitude, target.longitude),
+      raw: traceCoord(target.rawLatitude, target.rawLongitude),
+      matchStatus: event.matchStatus,
+    });
+    setVehicleCount((count) => count + 1);
+  }, []);
+
+  const stream = useLivePositionStream(onPosition, onRoadMatch, enabled);
 
   return useMemo(
     () => ({ targetsRef, connected: stream.connected, stream, vehicleCount }),

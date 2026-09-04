@@ -210,6 +210,7 @@ function buildPickerHtml(
     var CENTRE = { lat: ${initial.latitude}, lng: ${initial.longitude} };
     var RADIUS = ${radiusMeters};
     var map, marker;
+    var STYLE = ${style};
 
     /** Ground circle as a polygon, so the ring stays true to scale at any zoom. */
     function ringPolygon(lat, lng, metres) {
@@ -231,9 +232,14 @@ function buildPickerHtml(
     }
 
     try {
+      var configurationError =
+        STYLE && typeof STYLE === 'object' && STYLE.metadata
+          ? STYLE.metadata.glivtConfigurationError
+          : '';
+      if (configurationError) throw new Error(String(configurationError));
       map = new maplibregl.Map({
         container: 'map',
-        style: ${style},
+        style: STYLE,
         center: [CENTRE.lng, CENTRE.lat],
         zoom: 14.5,
         attributionControl: { compact: true }

@@ -143,9 +143,10 @@ function distanceKm(latA: number, lngA: number, latB: number, lngB: number): num
 /** Builds the merged entry for one device from a packet and what we already had. */
 function merge(existing: LiveVehicle | undefined, event: LivePositionEvent): LiveVehicle {
   const rawUsable = usableCoordinate(event.latitude, event.longitude);
-  const matched =
+  const solved =
     rawUsable &&
     usableCoordinate(event.matchedLatitude, event.matchedLongitude) &&
+    (event.matchedSource == null || event.matchedSource === 'SOLVED') &&
     event.matchConfidence != null &&
     event.matchConfidence >= 0.2 &&
     distanceKm(
@@ -154,6 +155,18 @@ function merge(existing: LiveVehicle | undefined, event: LivePositionEvent): Liv
       event.matchedLatitude as number,
       event.matchedLongitude as number
     ) <= 0.06;
+  const held =
+    rawUsable &&
+    event.matchedSource === 'HELD' &&
+    existing != null &&
+    usableCoordinate(event.matchedLatitude, event.matchedLongitude) &&
+    distanceKm(
+      existing.latitude,
+      existing.longitude,
+      event.matchedLatitude as number,
+      event.matchedLongitude as number
+    ) <= 0.001;
+  const matched = solved || held;
 
   const rawLatitude = rawUsable ? event.latitude : existing?.rawLatitude ?? event.latitude;
   const rawLongitude = rawUsable ? event.longitude : existing?.rawLongitude ?? event.longitude;
@@ -164,19 +177,14 @@ function merge(existing: LiveVehicle | undefined, event: LivePositionEvent): Liv
     ? (event.matchedLongitude as number)
     : existing?.matchedLongitude ?? null;
 
-  // Display coordinate preference: this packet's matched road position, then
-  // this packet's validated GPS, then whatever we were already drawing. The
-  // final fallback is what guarantees a vehicle is never moved to nowhere.
+  // Once a road coordinate exists, an unmatched packet retains it. Raw GPS is
+  // only allowed to bootstrap a vehicle that has never had a road match.
   const latitude = matched
     ? (event.matchedLatitude as number)
-    : rawUsable
-      ? event.latitude
-      : existing?.latitude ?? rawLatitude;
+    : existing?.latitude ?? (rawUsable ? event.latitude : rawLatitude);
   const longitude = matched
     ? (event.matchedLongitude as number)
-    : rawUsable
-      ? event.longitude
-      : existing?.longitude ?? rawLongitude;
+    : existing?.longitude ?? (rawUsable ? event.longitude : rawLongitude);
 
   return {
     deviceId: event.deviceId,

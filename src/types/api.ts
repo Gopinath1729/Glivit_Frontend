@@ -165,6 +165,15 @@ export type DeviceSummary = {
 };
 
 export type DeviceDetail = DeviceSummary & {
+  /**
+   * The backend's running trip distance for this device, in km.
+   *
+   * Sent by `DeviceDetail` on the server and simply not declared here, so the
+   * live screen had nothing to show for a vehicle that was not currently
+   * streaming and displayed 0.0 km for a trip the server had measured at
+   * 0.67 km.
+   */
+  tripDistanceKm?: number | null;
   model?: string | null;
   driverName?: string | null;
   driverPhone?: string | null;
@@ -479,6 +488,23 @@ export type PlaybackTrackPoint = {
   lat: number;
   lng: number;
   /**
+   * Identity of the stored fix behind this point.
+   *
+   * The boundary between a hydrated trip and the live stream is expressed with
+   * this and nothing else: history is every point up to and including the last
+   * hydrated `positionId`, the stream is everything after it, and a fix that
+   * appears in both is de-duplicated by id.
+   *
+   * It replaces a spatial join. The two halves used to be attached whenever the
+   * last history vertex happened to sit within ~120 m of the first live one —
+   * which a parallel carriageway, a service road or the street under a flyover
+   * all satisfy, so reopening the screen could splice the route onto the wrong
+   * road. Proximity is not identity.
+   *
+   * Optional for a backend that predates the field.
+   */
+  positionId?: number | null;
+  /**
    * Where the backend map matcher placed this fix on the OSM road network.
    * Absent when the matcher could not place it confidently, in which case the
    * reported coordinate is used and the route is reported as unmatched rather
@@ -600,6 +626,16 @@ export type MapMatchStatus =
   | 'MATCHED'
   | 'PARTIAL'
   | 'UNMATCHED'
+  /**
+   * The road answer for this fix has been asked for and has not come back yet.
+   *
+   * Deliberately distinct from `UNMATCHED`. Nothing has been decided, so the UI
+   * must neither draw a road for this stretch nor report a matching fault; it
+   * shows the vehicle and waits. The live pipeline publishes the validated fix
+   * immediately and its ROAD_MATCH enrichment a moment later, and this is the
+   * state in between.
+   */
+  | 'PENDING'
   | 'UNAVAILABLE'
   | 'DISABLED';
 

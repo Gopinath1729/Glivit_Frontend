@@ -65,7 +65,24 @@ import {
 const SPEEDS = [0.5, 1, 2, 4] as const;
 const ROUTE_BLUE = '#1473E6';
 const ROUTE_BLUE_AURA = 'rgba(45, 174, 255, 0.30)';
-const ROUTE_BLUE_BASE = 'rgba(75, 151, 235, 0.48)';
+/**
+ * The whole journey, drawn before and behind the travelled highlight.
+ *
+ * At 48% alpha over a light basemap this was very nearly invisible - reported
+ * as "the blue history route line is missing", because at a glance it is. It
+ * is deliberately still lighter than {@link ROUTE_BLUE} so the travelled part
+ * remains distinguishable as playback progresses, but it now has to be legible
+ * on its own: the route a trip took is the primary content of this screen.
+ */
+const ROUTE_BLUE_BASE = 'rgba(52, 122, 214, 0.85)';
+/**
+ * The GPS-only diagnostic line.
+ *
+ * Amber, thin and dashed-equivalent, and deliberately nothing like the road
+ * route: it marks a stretch the matcher could not place, which is a chord
+ * between fixes rather than a road the vehicle drove.
+ */
+const ROUTE_GPS_ONLY = '#F59E0B';
 type CameraMode = 'follow' | 'chase' | 'cinematic' | 'drone' | 'top' | 'overview';
 const CAMERAS: { id: CameraMode; icon: string; label: string }[] = [
   { id: 'follow', icon: 'navigation-variant', label: 'Follow' },
@@ -296,7 +313,11 @@ export default function TripPlaybackScreen() {
 
   // The route is the road the backend matched this history onto, and the track
   // rides that road. Nothing here joins raw fixes into a line.
-  const { track } = useMatchedHistoryRoute(data);
+  const {
+    track,
+    route: matchedRoute,
+    gpsOnlySegments,
+  } = useMatchedHistoryRoute(data);
   const points = track.points;
   /** A day only has playable history when there are at least two real fixes. */
   const hasTrack = points.length >= 2;
@@ -510,6 +531,12 @@ export default function TripPlaybackScreen() {
           cameraCommandId={cameraCommandId}
           cameraMode={camera}
           events={data.events ?? []}
+          // The road route is drawn only where the engine actually matched. The
+          // stretches it could not place travel separately, as an explicitly
+          // labelled GPS-only overlay, so one failed chunk can never appear as
+          // a confident blue diagonal inside an otherwise matched trace.
+          gpsOnlySegments={gpsOnlySegments}
+          hasMatchedGeometry={matchedRoute.hasMatchedGeometry}
           onReady={handleMapReady}
           playing={appActive && playing}
           speed={speed}
@@ -663,8 +690,18 @@ export default function TripPlaybackScreen() {
         </View>
       ) : null}
 
-      {/* Bottom control deck */}
-      <View style={[styles.deck, { paddingBottom: 14 }]}>
+      {/* Bottom control deck.
+
+          The padding carries the system navigation bar's inset explicitly. It
+          was a hardcoded 14, and with `edgeToEdgeEnabled` the app draws behind
+          the navigation bar - so on a phone with three-button navigation the
+          play button and the speed chips sat UNDERNEATH it. Tapping them hit
+          Home or Back instead, which is why playback appeared not to start,
+          the speed controls appeared not to work, and the app appeared to
+          "exit" when the transport controls were used. The deck is absolutely
+          positioned, so it does not inherit the SafeAreaView's own padding and
+          has to state the inset itself. */}
+      <View style={[styles.deck, { paddingBottom: insets.bottom + 14 }]}>
         <View style={styles.statRow}>
           <View style={styles.speedBlock}>
             <Text style={styles.speedValue}>{curSpeed}</Text>
@@ -1157,6 +1194,16 @@ type CinematicTripMapProps = {
   cameraCommandId: number;
   cameraMode: CameraMode;
   events: PlaybackEventMarker[];
+  /**
+   * Stretches with no road answer, as validated GPS.
+   *
+   * Drawn as a thin dashed amber overlay beneath the road route, never as part
+   * of it. Splicing them together is what produced a single blue polyline of
+   * `matched road + raw chord + matched road`.
+   */
+  gpsOnlySegments: { latitude: number; longitude: number }[][];
+  /** False when the engine placed nothing at all: there is no road to draw. */
+  hasMatchedGeometry: boolean;
   onReady: () => void;
   playing: boolean;
   speed: number;
@@ -1217,6 +1264,8 @@ function CinematicTripMap({
   cameraCommandId,
   cameraMode,
   events,
+  gpsOnlySegments,
+  hasMatchedGeometry,
   onReady,
   playing,
   speed,
@@ -1309,16 +1358,41 @@ function CinematicTripMap({
   // own runs already break at the coverage gaps the backend flagged; this
   // catches a step inside a run that no observed stretch of road could be, so a
   // diagonal can never survive to the polyline.
+  //
+  // The blue route is road geometry and ONLY road geometry.
+  //
+  // When the range produced no confident match at all there is no road to draw,
+  // so both blue layers are empty and the journey appears on the GPS-only
+  // overlay below instead. The track still contains every fix - playback, the
+  // timeline, the speed readout and the stop dwell all need them - it simply is
+  // not the thing being drawn in blue. Drawing it wholesale is what turned
+  // `matched road + failed chunk + matched road` into one confident polyline
+  // with a diagonal through the middle of it.
   const fullRouteSegments = useMemo(
-    () => routeSegments(track).flatMap((segment) => splitRouteCoordinates(segment)),
-    [track]
+    () =>
+      hasMatchedGeometry
+        ? routeSegments(track).flatMap((segment) => splitRouteCoordinates(segment))
+        : [],
+    [hasMatchedGeometry, track]
   );
   const travelledRouteSegs = useMemo(
     () =>
-      travelledRouteSegments(track, playbackSample).flatMap((segment) =>
-        splitRouteCoordinates(segment)
-      ),
-    [playbackSample, track]
+      hasMatchedGeometry
+        ? travelledRouteSegments(track, playbackSample).flatMap((segment) =>
+            splitRouteCoordinates(segment)
+          )
+        : [],
+    [hasMatchedGeometry, playbackSample, track]
+  );
+  /**
+   * Stretches with no road answer, drawn thin, dashed and amber.
+   *
+   * Split on the same segment rule as the road route, so a coverage gap stays a
+   * gap even on the diagnostic layer.
+   */
+  const diagnosticRouteSegments = useMemo(
+    () => gpsOnlySegments.flatMap((segment) => splitRouteCoordinates(segment)),
+    [gpsOnlySegments]
   );
 
   const styleInfo = getMapStyleInfo('bright');
@@ -1343,6 +1417,13 @@ function CinematicTripMap({
       ),
     [travelledRouteSegs]
   );
+  const webDiagnosticPolylines = useMemo<[number, number][][]>(
+    () =>
+      diagnosticRouteSegments.map((segment) =>
+        segment.map((point) => [point.longitude, point.latitude] as [number, number])
+      ),
+    [diagnosticRouteSegments]
+  );
 
   const validEvents = useMemo(
     () => (events ?? []).filter((event) => isDisplayCoordinate(event.lat, event.lng)),
@@ -1355,8 +1436,14 @@ function CinematicTripMap({
 
   const webHistory = useMemo(
     () => {
-      const firstPoint = fullRouteSegments[0]?.[0];
-      const lastSegment = fullRouteSegments[fullRouteSegments.length - 1];
+      // Start/end pins mark the JOURNEY, so they fall back to the diagnostic
+      // geometry when no road matched - a trip with no matched road still
+      // started and ended somewhere, and dropping its pins as well would make
+      // an unmatched day look like no data at all.
+      const terminalSegments =
+        fullRouteSegments.length > 0 ? fullRouteSegments : diagnosticRouteSegments;
+      const firstPoint = terminalSegments[0]?.[0];
+      const lastSegment = terminalSegments[terminalSegments.length - 1];
       const lastPoint = lastSegment?.[lastSegment.length - 1];
       return {
         routes: fullRouteSegments.map((segment) =>
@@ -1378,7 +1465,7 @@ function CinematicTripMap({
         end: lastPoint ? { lat: lastPoint.latitude, lng: lastPoint.longitude } : null,
       };
     },
-    [fullRouteSegments, validEvents, validStops]
+    [diagnosticRouteSegments, fullRouteSegments, validEvents, validStops]
   );
 
   const reportReady = useCallback(() => {
@@ -1395,6 +1482,9 @@ function CinematicTripMap({
       projectionRequestRef.current += 1;
     };
   }, [reportReady, useNativeMap]);
+
+  /** The camera command this effect last acted on. See `modeChanged` below. */
+  const lastCameraCommandRef = useRef(cameraCommandId);
 
   useEffect(() => {
     setAutoFollow(true);
@@ -1443,7 +1533,15 @@ function CinematicTripMap({
     if (!cur.hasValidPosition) return;
 
     const now = Date.now();
-    const modeChanged = lastCameraModeRef.current !== cameraMode;
+    // A re-tap of the ALREADY-active camera button is a request to re-frame,
+    // not a no-op. Overview is the one where that matters: after scrubbing or
+    // playing, "fit the whole journey again" is exactly what the button is for,
+    // and gating the refit on a mode CHANGE alone made the second tap do
+    // nothing. `cameraCommandId` was already incremented on every tap; it was
+    // simply not read here.
+    const modeChanged =
+      lastCameraModeRef.current !== cameraMode || lastCameraCommandRef.current !== cameraCommandId;
+    lastCameraCommandRef.current = cameraCommandId;
     if (cameraMode === 'overview') {
       if (modeChanged) {
         try {
@@ -1541,6 +1639,7 @@ function CinematicTripMap({
     }
   }, [
     autoFollow,
+    cameraCommandId,
     cameraMode,
     cur.hasValidPosition,
     cur.heading,
@@ -1595,6 +1694,7 @@ function CinematicTripMap({
         <FleetWebMap
           cameraMode={cameraMode}
           followSelected={autoFollow}
+          diagnosticPolylines={webDiagnosticPolylines}
           history={webHistory}
           mapStyle={styleInfo.webStyle}
           markers={webMarkers}
@@ -1631,6 +1731,20 @@ function CinematicTripMap({
           showsUserLocation={false}
           style={StyleSheet.absoluteFillObject}
           toolbarEnabled={false}>
+          {/* GPS-only diagnostic, beneath the road route and unmistakably
+              different: thin, amber, no aura. It shows where the vehicle
+              reported being over a stretch the matcher could not place. It is
+              not a road and must never be drawn as one. */}
+          {diagnosticRouteSegments.map((segment, index) => (
+            <StableRouteLine
+              key={`trip-gps-only-${index}`}
+              auraColor=""
+              color={ROUTE_GPS_ONLY}
+              coordinates={segment}
+              width={2}
+              zIndex={11}
+            />
+          ))}
           {fullRouteSegments.map((segment, index) => (
             <StableBaseRoute
               key={`trip-base-${index}`}

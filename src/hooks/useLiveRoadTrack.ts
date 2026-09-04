@@ -1,7 +1,7 @@
 import { useMemo } from 'react';
 
 import { buildPlaybackTrack, type PlaybackTrack } from '@/src/services/playbackEngine';
-import type { LiveCoordinate } from '@/src/services/livePositions';
+import { drawableRuns, type LiveCoordinate, type LiveTrailRun } from '@/src/services/liveRouteTrail';
 import type { PlaybackTrackPoint } from '@/src/types/api';
 
 /**
@@ -46,6 +46,6 @@ export function useLiveRoadTrack(
  * never the accepted fixes joined together, so it follows the road through
  * curves and turns and leaves a coverage gap as a gap.
  */
-export function useLiveTrailSegments(trail: LiveCoordinate[][]): LiveCoordinate[][] {
-  return useMemo(() => trail.filter((run) => run.length >= 2), [trail]);
+export function useLiveTrailSegments(trail: readonly LiveTrailRun[]): LiveCoordinate[][] {
+  return useMemo(() => drawableRuns(trail), [trail]);
 }

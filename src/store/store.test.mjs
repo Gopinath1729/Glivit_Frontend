@@ -436,6 +436,38 @@ test('a confident, nearby road match is what gets drawn', () => {
   assert.equal(state.byDeviceId[1].rawLatitude, 12.9716, 'the raw fix is still recorded');
 });
 
+test('an unmatched update holds the previous matched road coordinate', () => {
+  let state = liveVehiclesReducer(
+    undefined,
+    livePositionReceived(
+      packet({
+        matchedLatitude: 12.97165,
+        matchedLongitude: 77.59465,
+        matchConfidence: 0.9,
+        matchedSource: 'SOLVED',
+      })
+    )
+  );
+  state = liveVehiclesReducer(
+    state,
+    livePositionReceived(
+      packet({
+        latitude: 12.9718,
+        longitude: 77.5948,
+        lastGpsTime: iso(2_000),
+        deviceTime: iso(2_000),
+        matchedLatitude: 12.97165,
+        matchedLongitude: 77.59465,
+        matchConfidence: 0.9,
+        matchedSource: 'HELD',
+      })
+    )
+  );
+
+  assert.equal(state.byDeviceId[1].latitude, 12.97165);
+  assert.equal(state.byDeviceId[1].longitude, 77.59465);
+});
+
 test('the polled roster seeds unknown vehicles but never moves a live one', () => {
   let state = liveVehiclesReducer(undefined, livePositionReceived(packet()));
   state = liveVehiclesReducer(

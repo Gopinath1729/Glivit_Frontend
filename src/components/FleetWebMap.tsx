@@ -71,6 +71,17 @@ type FleetWebMapProps = {
   cameraMode?: WebMapCameraMode;
   /** Every currently-travelled route run, kept separate across GPS gaps. */
   polylines?: [number, number][][];
+  /**
+   * Stretches with NO road answer, drawn as an explicitly different overlay.
+   *
+   * Thin, dashed and amber, beneath the road route. It exists so a map-matching
+   * outage can still show where the vehicle was reported to be without that
+   * evidence being mistaken for a road: joining two GPS fixes with a solid blue
+   * line is a chord through whatever lies between them, and the reason routes
+   * appeared to cross buildings. Optional - a caller that would rather show
+   * nothing at all simply omits it.
+   */
+  diagnosticPolylines?: [number, number][][];
   /** Legacy single-run input. Prefer `polylines` for live tracking/playback. */
   polyline?: [number, number][]; // [lng, lat] pairs
   /** Recorded route + stop markers drawn beneath the live polyline. */
@@ -91,6 +102,10 @@ const WEB_MAP_LOAD_TIMEOUT_MS = 20000;
 
 type WebMapStatus = 'loading' | 'ready' | 'error';
 
+function sanitizeMapErrorMessage(message: string): string {
+  return message.replace(/([?&]apiKey=)[^& )]*/gi, '$1[redacted]');
+}
+
 /**
  * Web-only fallback. react-native-maps has no free native web renderer, so web
  * keeps the existing MapLibre GL JS view with OpenFreeMap/Geoapify styles.
@@ -101,6 +116,7 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
     markers,
     mapStyle,
     polylines,
+    diagnosticPolylines,
     polyline,
     history,
     geofences,
@@ -174,6 +190,13 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
         .filter((line) => line.length >= 2),
     [polyline, polylines]
   );
+  const diagnosticCoordinates = useMemo(
+    () =>
+      (diagnosticPolylines ?? [])
+        .map((line) => sanitizeWebRoute(line))
+        .filter((line) => line.length >= 2),
+    [diagnosticPolylines]
+  );
   const geofencePayload = useMemo(
     () =>
       (geofences ?? [])
@@ -206,10 +229,11 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
 
   const syncRoute = useCallback(() => {
     webRef.current?.injectJavaScript(
-      `window.__glivtSyncRoutes && window.__glivtSyncRoutes(${JSON.stringify(routeCoordinates)}); true;`
+      `window.__glivtSyncRoutes && window.__glivtSyncRoutes(${JSON.stringify(routeCoordinates)});` +
+        `window.__glivtSyncDiagnosticRoutes && window.__glivtSyncDiagnosticRoutes(${JSON.stringify(diagnosticCoordinates)}); true;`
     );
     lastSyncedRouteRef.current = routeCoordinates;
-  }, [routeCoordinates]);
+  }, [diagnosticCoordinates, routeCoordinates]);
 
   const historyPayload = useMemo(
     () => ({
@@ -250,6 +274,7 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
     (fit = false) => {
       webRef.current?.injectJavaScript(
         `window.__glivtSyncRoutes && window.__glivtSyncRoutes(${JSON.stringify(routeCoordinates)});` +
+          `window.__glivtSyncDiagnosticRoutes && window.__glivtSyncDiagnosticRoutes(${JSON.stringify(diagnosticCoordinates)});` +
           `window.__glivtSyncHistory && window.__glivtSyncHistory(${JSON.stringify(historyPayload)});` +
           `window.__glivtSyncGeofences && window.__glivtSyncGeofences(${JSON.stringify(geofencePayload)});` +
           `window.__glivtSyncMarkers && window.__glivtSyncMarkers(${JSON.stringify(markerPayload)}, ${fit ? 'true' : 'false'}); true;`
@@ -259,7 +284,7 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
       lastSyncedGeofencesRef.current = geofencePayload;
       lastSyncedMarkersRef.current = markerPayload;
     },
-    [geofencePayload, historyPayload, markerPayload, routeCoordinates]
+    [diagnosticCoordinates, geofencePayload, historyPayload, markerPayload, routeCoordinates]
   );
 
   useEffect(() => {
@@ -342,7 +367,9 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
       }
       if (msg.type === 'error') {
         setStatus('error');
-        setErrorMessage(msg.message || 'Map tiles could not be loaded.');
+        setErrorMessage(
+          sanitizeMapErrorMessage(msg.message || 'Map tiles could not be loaded.')
+        );
         return;
       }
       if (msg.type === 'select' && msg.id != null) {
@@ -386,7 +413,11 @@ export const FleetWebMap = forwardRef<FleetWebMapHandle, FleetWebMapProps>(funct
         domStorageEnabled
         onError={(event) => {
           setStatus('error');
-          setErrorMessage(event.nativeEvent.description || 'Map WebView failed to load.');
+          setErrorMessage(
+            sanitizeMapErrorMessage(
+              event.nativeEvent.description || 'Map WebView failed to load.'
+            )
+          );
         }}
         onHttpError={(event) => {
           setStatus('error');
@@ -554,19 +585,27 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
         }
       }
       function reportError(message) {
+        var safeMessage = String(message || 'Map tiles could not be loaded.')
+          .replace(/([?&]apiKey=)[^& )]*/gi, '$1[redacted]');
         var err = document.getElementById('err');
         err.style.display = 'block';
-        err.textContent = 'Map error: ' + message;
-        post({ type:'error', message: message });
+        err.textContent = 'Map error: ' + safeMessage;
+        post({ type:'error', message: safeMessage });
       }
       try {
         var STYLE = ${JSON.stringify(mapStyle)};
         var BASE_READY = false;
         var MARKERS = [];
         var LINES = [];
+        var DIAGNOSTIC_LINES = [];
         var GEOFENCES = [];
         var HISTORY = { routes: [], stops: [] };
         if (!window.maplibregl) throw new Error('MapLibre GL JS did not load.');
+        var configurationError =
+          STYLE && typeof STYLE === 'object' && STYLE.metadata
+            ? STYLE.metadata.glivtConfigurationError
+            : '';
+        if (configurationError) throw new Error(String(configurationError));
         if (typeof STYLE === 'string' && STYLE.indexOf('https://') !== 0) {
           throw new Error('Map style URL must use HTTPS.');
         }
@@ -780,6 +819,18 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
             paint:{ 'line-color':'#0878FF',
                     'line-width':['interpolate',['linear'],['zoom'],8,3,14,6,18,9] } }, labelLayerId);
 
+          // GPS-only diagnostic. Deliberately thin, dashed and amber, and drawn
+          // UNDER the road route: it must never be mistakable for the
+          // authoritative road-following line. It carries stretches the matcher
+          // could not place, which are chords between fixes rather than roads.
+          map.addSource('gps-only-route', { type:'geojson', data: emptyCollection() });
+          map.addLayer({ id:'gps-only-route', type:'line', source:'gps-only-route',
+            layout:{ 'line-cap':'butt','line-join':'round' },
+            paint:{ 'line-color':'#F59E0B',
+                    'line-opacity':0.85,
+                    'line-dasharray':[2, 2],
+                    'line-width':['interpolate',['linear'],['zoom'],8,1,14,2,18,3] } }, 'route-aura');
+
           // Recorded history sits beneath the live/progress route: one muted
           // line per observed run (never joined across a coverage gap) plus a
           // red numbered circle for every detected stop.
@@ -830,6 +881,11 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
                     'text-halo-width':1.4 } }, labelLayerId);
           syncGeofenceSource();
           BASE_READY = true;
+          // Replay whatever arrived before the style finished loading. Without
+          // this a diagnostic overlay pushed during load is silently lost.
+          if (DIAGNOSTIC_LINES.length) {
+            window.__glivtSyncDiagnosticRoutes(DIAGNOSTIC_LINES);
+          }
           post({ type:'ready' });
         });
         map.on('move', function () { reportProjection(false); });
@@ -963,6 +1019,19 @@ function buildHtml(mapStyle: MapStyleSpec, realisticMarkerUri: string): string {
             routeSource.setData({
               type:'FeatureCollection',
               features: LINES.map(function (line) {
+                return { type:'Feature', properties:{}, geometry:{ type:'LineString', coordinates: line } };
+              })
+            });
+          }
+        };
+        window.__glivtSyncDiagnosticRoutes = function (lines) {
+          DIAGNOSTIC_LINES = Array.isArray(lines) ? lines : [];
+          if (!BASE_READY) return;
+          var source = map.getSource('gps-only-route');
+          if (source) {
+            source.setData({
+              type:'FeatureCollection',
+              features: DIAGNOSTIC_LINES.map(function (line) {
                 return { type:'Feature', properties:{}, geometry:{ type:'LineString', coordinates: line } };
               })
             });

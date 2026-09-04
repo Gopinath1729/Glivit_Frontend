@@ -61,6 +61,15 @@ function normalizeBackendBaseUrl(value: string): string {
 
 const backendBaseUrl = normalizeBackendBaseUrl(rawBackendBaseUrl);
 
+// Both variables are explicitly public Map Tiles credentials. The legacy name
+// remains readable during migration so an already-configured development or
+// EAS environment cannot silently turn into `apiKey=` after an app update.
+// Never add a reference to the backend-only GEOAPIFY_API_KEY here.
+const geoapifyTilesApiKey =
+  process.env.EXPO_PUBLIC_GEOAPIFY_TILES_API_KEY ||
+  process.env.EXPO_PUBLIC_GEOAPIFY_API_KEY ||
+  '';
+
 if (__DEV__ && Platform.OS !== 'web' && !backendBaseUrl) {
   console.warn(
     '[api-config] Missing EXPO_PUBLIC_BACKEND_BASE_URL. Android emulator should use http://10.0.2.2:8085; physical devices should use the computer LAN IP.'
@@ -120,5 +129,5 @@ export const env = {
   apiBaseUrl: backendBaseUrl ? `${backendBaseUrl}/api` : '',
   isBackendConfigured,
   backendConfigurationError,
-  geoapifyApiKey: process.env.EXPO_PUBLIC_GEOAPIFY_API_KEY || '',
+  geoapifyApiKey: geoapifyTilesApiKey,
 };

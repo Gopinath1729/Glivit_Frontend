@@ -173,7 +173,15 @@ export default function TrackerModeScreen() {
                 styles={styles}
               />
             </View>
-            {stats.lastFix ? (
+            {stats.acquiring ? (
+              // Warm-up is a healthy state, not a failure, so it reads as
+              // progress rather than as the error line below. Nothing is being
+              // uploaded yet on purpose: the first coordinates a cold receiver
+              // produces are the ones that put a kink in the start of a route.
+              <Text style={styles.coordinates}>
+                Acquiring GPS… {stats.acquisitionSamples}/{stats.acquisitionNeeded} stable fixes
+              </Text>
+            ) : stats.lastFix ? (
               <Text style={styles.coordinates}>
                 {stats.lastFix.latitude.toFixed(5)}, {stats.lastFix.longitude.toFixed(5)}
               </Text>

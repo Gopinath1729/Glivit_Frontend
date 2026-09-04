@@ -22,6 +22,7 @@ import { apiErrorMessage } from '@/src/services/apiError';
 import { useDeleteDeviceMutation, useGetAllDevicesQuery } from '@/src/services/devicesApi';
 import { resolveDeviceRecordState } from '@/src/services/deviceState';
 import { useMobileGpsReadiness } from '@/src/services/mobileGpsStatus';
+import { useNowTick } from '@/src/hooks/useNowTick';
 import { dedupeByVehicle } from '@/src/services/vehicleIdentity';
 import { P } from '@/src/constants/permissions';
 import { useHasPermission } from '@/src/store/hooks';
@@ -92,6 +93,12 @@ export default function VehiclesScreen() {
     { search: search || undefined },
     { pollingInterval: 30_000, skipPollingIfUnfocused: true }
   );
+
+  // The age column counts up on its own clock. Without this the label is only
+  // recomputed when the query data changes - so a vehicle that has stopped
+  // reporting, whose data by definition stops changing, keeps displaying the
+  // age it had when it was last fresh.
+  const nowMs = useNowTick();
 
   // One row per vehicle: two trackers on the same vehicle are one vehicle.
   const allVehicles = useMemo(
@@ -287,6 +294,7 @@ This cannot be undone.`,
                 <DeviceRow
                   deleting={deletingVehicleId === vehicle.id}
                   device={vehicle}
+                  nowMs={nowMs}
                   key={vehicle.id}
                   onDelete={canDelete ? () => confirmDeleteVehicle(vehicle) : undefined}
                   onPress={() => openVehicle(vehicle)}

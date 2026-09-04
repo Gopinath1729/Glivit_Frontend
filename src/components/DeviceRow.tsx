@@ -42,11 +42,21 @@ export function DeviceRow({
   onPress,
   onDelete,
   deleting = false,
+  nowMs,
 }: {
   device: DeviceSummary;
   onPress: () => void;
   onDelete?: () => void;
   deleting?: boolean;
+  /**
+   * The clock the age column is measured against.
+   *
+   * Passed in rather than read from `Date.now()` inside the formatter so the
+   * age is a function of props alone: a caller that wants the label to keep
+   * counting up supplies a ticking value (see `useNowTick`), and the age of a
+   * device that has stopped reporting climbs instead of freezing at "now".
+   */
+  nowMs?: number;
 }) {
   const { colors: c, stateColors } = useTheme();
   const styles = useMemo(() => makeStyles(c), [c]);
@@ -105,7 +115,7 @@ export function DeviceRow({
       </View>
 
       <Text numberOfLines={1} style={styles.age}>
-        {formatAge(device.lastUpdate)}
+        {formatAge(device.lastUpdate, nowMs)}
       </Text>
 
       {onDelete ? (
@@ -131,11 +141,12 @@ export function DeviceRow({
 }
 
 /** Compact relative age — the column is too narrow for a formatted timestamp. */
-function formatAge(iso?: string | null) {
+function formatAge(iso?: string | null, nowMs?: number) {
   if (!iso) return '—';
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return '—';
-  const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
+  const now = nowMs != null && Number.isFinite(nowMs) ? nowMs : Date.now();
+  const seconds = Math.max(0, Math.round((now - then) / 1000));
   if (seconds < 60) return 'now';
   const minutes = Math.round(seconds / 60);
   if (minutes < 60) return `${minutes}m`;

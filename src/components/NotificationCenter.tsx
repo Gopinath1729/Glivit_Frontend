@@ -17,6 +17,7 @@ import { useGetAllDevicesQuery } from '@/src/services/devicesApi';
 import { useAcknowledgeEventMutation, useGetEventsQuery } from '@/src/services/operationsApi';
 import { useAppDispatch, useAppSelector, useHasPermission } from '@/src/store/hooks';
 import { markNotificationsRead } from '@/src/store/notificationsState';
+import { useNowTick } from '@/src/hooks/useNowTick';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { radius, spacing, typography, type ThemeColors, hexToRgba } from '@/src/theme/tokens';
 import type { EventDto } from '@/src/types/api';
@@ -37,11 +38,11 @@ type Notification = {
   vehicleParamName: string;
 };
 
-function relativeTime(iso?: string | null): { label: string; ms: number } {
+function relativeTime(iso: string | null | undefined, nowMs: number): { label: string; ms: number } {
   if (!iso) return { label: '-', ms: 0 };
   const ms = Date.parse(iso);
   if (!Number.isFinite(ms)) return { label: '-', ms: 0 };
-  const diff = Date.now() - ms;
+  const diff = nowMs - ms;
   if (diff < 60_000) return { label: 'Just now', ms };
   if (diff < 3_600_000) return { label: `${Math.floor(diff / 60_000)}m ago`, ms };
   if (diff < 86_400_000) return { label: `${Math.floor(diff / 3_600_000)}h ago`, ms };
@@ -193,11 +194,15 @@ export function NotificationCenter({ tint = '#EAF3FB' }: { tint?: string }) {
     return { byId };
   }, [devices]);
 
+  // Same clock as every other relative label: an alert list left open must not
+  // keep telling an operator that a twenty-minute-old event happened "Just now".
+  const nowMs = useNowTick();
+
   const notifications = useMemo<Notification[]>(() => {
     const items: Notification[] = [];
     for (const ev of (eventsPage?.content ?? []) as EventDto[]) {
       const key = `event:${ev.id}`;
-      const { label, ms } = relativeTime(ev.serverTime ?? ev.deviceTime);
+      const { label, ms } = relativeTime(ev.serverTime ?? ev.deviceTime, nowMs);
       items.push({
         key,
         kind: 'event',
@@ -226,7 +231,7 @@ export function NotificationCenter({ tint = '#EAF3FB' }: { tint?: string }) {
       if (a.read !== b.read) return a.read ? 1 : -1;
       return b.sortTime - a.sortTime;
     });
-  }, [c, deviceNameById, eventsPage?.content, readKeys]);
+  }, [c, deviceNameById, eventsPage?.content, nowMs, readKeys]);
 
   const unreadCount = notifications.reduce((n, item) => (item.read ? n : n + 1), 0);
   const loading = eventsFetching;

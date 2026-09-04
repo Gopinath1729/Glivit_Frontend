@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { validateMobileGpsLocation } from './mobileGpsPayload.ts';
+import {
+  BALANCED_HEARTBEAT_MS,
+  HIGH_ACCURACY_HEARTBEAT_MS,
+  heartbeatIntervalMs,
+  validateMobileGpsLocation,
+} from './mobileGpsPayload.ts';
 
 const NOW = Date.parse('2026-09-01T10:00:00Z');
 const BASE = { latitude: 12.9716, longitude: 77.5946, timestamp: NOW - 30_000 };
@@ -112,4 +117,22 @@ test('rejects a physically impossible jump', () => {
     validateMobileGpsLocation(location({ latitude: BASE.latitude + 0.1, speed: 30 }), BASE, NOW),
     { accepted: false, reason: 'impossible_jump' }
   );
+});
+
+// --------------------------------------------------------------- heartbeat
+
+test('both collectors read the stationary heartbeat from one place', () => {
+  // The foreground tracker honoured this rate and the background task did not,
+  // so a parked phone with the app off screen uploaded at the full 1 Hz
+  // sampling rate. Sharing one definition is what stops the two drifting again.
+  assert.equal(heartbeatIntervalMs('high'), HIGH_ACCURACY_HEARTBEAT_MS);
+  assert.equal(heartbeatIntervalMs('balanced'), BALANCED_HEARTBEAT_MS);
+});
+
+test('a parked phone uploads far less often than it samples', () => {
+  // Sampling is 1 Hz in both modes. Whatever the heartbeat is, it has to be a
+  // large multiple of that or the throttle is not doing anything.
+  const SAMPLE_MS = 1_000;
+  assert.ok(heartbeatIntervalMs('high') >= SAMPLE_MS * 5);
+  assert.ok(heartbeatIntervalMs('balanced') >= heartbeatIntervalMs('high'));
 });

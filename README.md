@@ -11,9 +11,13 @@ npx expo start
 ```
 
 Set `EXPO_PUBLIC_BACKEND_BASE_URL` to the Spring Boot API and set
-`EXPO_PUBLIC_GEOAPIFY_API_KEY` to a Geoapify key with Map Tiles enabled. Android
+`EXPO_PUBLIC_GEOAPIFY_TILES_API_KEY` to a restricted, Map-Tiles-only Geoapify
+key. Never reuse the backend `GEOAPIFY_API_KEY` here. Android
 emulators reach the host at `http://10.0.2.2:8085`; production releases require
 HTTPS.
+
+The legacy public tile variable `EXPO_PUBLIC_GEOAPIFY_API_KEY` remains accepted
+during migration, but new environments should use the tiles-specific name.
 
 ## Quality gate
 

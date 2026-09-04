@@ -7,6 +7,7 @@ import {
   EMPTY_MATCHED_ROUTE,
   pointsOnMatchedRoad,
   resolveMatchedRoute,
+  type Coordinate,
   type MatchedRoute,
 } from '@/src/services/matchedRoute';
 import type { PlaybackResponse } from '@/src/types/api';
@@ -37,8 +38,24 @@ import type { PlaybackResponse } from '@/src/types/api';
 export type MatchedHistoryRoute = {
   /** Playback timeline over road geometry. */
   track: PlaybackTrack;
-  /** Polylines to draw, one per contiguously observed run. */
+  /** Matched runs and, separately, the stretches with no road answer. */
   route: MatchedRoute;
+  /**
+   * The AUTHORITATIVE blue route: confident matched road only.
+   *
+   * Derived from `route.runs`, never from the track. The track deliberately
+   * still contains the uncovered fixes - playback needs their timestamps, their
+   * speeds and their place in the timeline - but those fixes are not road, so
+   * they are not in here. Drawing the track wholesale is what produced one
+   * polyline of `matched road + raw chord + matched road`.
+   */
+  roadSegments: Coordinate[][];
+  /**
+   * Stretches with no road answer, for an explicitly labelled overlay.
+   *
+   * Thin, dashed, captioned "GPS only". Never merged into `roadSegments`.
+   */
+  gpsOnlySegments: Coordinate[][];
 };
 
 export function useMatchedHistoryRoute(
@@ -46,7 +63,12 @@ export function useMatchedHistoryRoute(
 ): MatchedHistoryRoute {
   return useMemo(() => {
     if (!playback) {
-      return { track: buildPlaybackTrack([]), route: EMPTY_MATCHED_ROUTE };
+      return {
+        track: buildPlaybackTrack([]),
+        route: EMPTY_MATCHED_ROUTE,
+        roadSegments: [],
+        gpsOnlySegments: [],
+      };
     }
 
     const route = resolveMatchedRoute(playback);
@@ -70,12 +92,22 @@ export function useMatchedHistoryRoute(
       status: route.status,
       engine: playback.matchEngine,
       confidence: route.confidence,
-      runs: route.runs.length,
+      matchedRuns: route.runs.length,
+      gpsOnlyRuns: route.diagnosticRuns.length,
       fixes: (playback.points ?? []).length,
       roadVertices: track.points.length,
       rejected: playback.rejectedPoints,
     });
 
-    return { track, route };
+    return {
+      track,
+      route,
+      roadSegments: route.runs
+        .filter((run) => run.coordinates.length >= 2)
+        .map((run) => run.coordinates),
+      gpsOnlySegments: route.diagnosticRuns
+        .filter((run) => run.coordinates.length >= 2)
+        .map((run) => run.coordinates),
+    };
   }, [playback]);
 }

@@ -110,7 +110,7 @@ export default function GeofencesScreen() {
   const { colors: c, isDark } = useTheme();
   // Same style source as the live map, so the picker matches the app theme.
   const pickerStyleUrl = React.useMemo(
-    () => getMapStyleInfo(isDark ? 'dark' : 'street').webStyleUrl,
+    () => getMapStyleInfo(isDark ? 'dark' : 'street').webStyle,
     [isDark]
   );
   // Drawer navigator already applies the top safe-area inset to the header, so

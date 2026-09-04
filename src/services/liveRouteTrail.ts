@@ -8,6 +8,25 @@ import {
 } from './gpsPipeline';
 
 /**
+ * Geometry acceptance limits, shared with the rest of the pipeline.
+ *
+ * Overridable only so a test can state a rule in its own terms; production
+ * always uses the single definition in `gpsPipeline`.
+ */
+export type GeometryLimits = {
+  maxGeometryStepMeters: number;
+  maxGeometryEndpointGapMeters: number;
+  /** Longest matched-to-matched step allowed with no intermediate vertices. */
+  maxMatchedSegmentStepMeters: number;
+};
+
+const DEFAULT_GEOMETRY_LIMITS: GeometryLimits = {
+  maxGeometryStepMeters: GPS_LIMITS.maxGeometryStepMeters,
+  maxGeometryEndpointGapMeters: GPS_LIMITS.maxGeometryEndpointGapMeters,
+  maxMatchedSegmentStepMeters: GPS_LIMITS.maxMatchedSegmentStepMeters,
+};
+
+/**
  * The travelled route line, and nothing else.
  *
  * <h3>Why this is its own module</h3>
@@ -20,115 +39,100 @@ import {
  *
  * <h3>The rules</h3>
  * <ul>
- *   <li>Every ACCEPTED movement point extends the route, in the order the fixes
- *       were recorded.</li>
- *   <li>Road-matched geometry is used when the backend produced some, because it
- *       follows the road through curves and junctions.</li>
- *   <li>When it did not - no matching engine configured, a debounced solve, a
- *       match the confidence check refused - the segment between the previous
- *       accepted point and this one is used instead, AND ONLY IF the two are
- *       actually connectable. See below.</li>
+ *   <li>The authoritative blue route is drawn from ROAD GEOMETRY and from
+ *       nothing else. A `SOLVED` match with usable geometry extends it; every
+ *       other outcome extends it by nothing at all.</li>
+ *   <li>`CARRIED` (wire value `HELD`) means the matcher produced no new road.
+ *       The marker may keep the carried road coordinate, but no geometry is
+ *       invented for it, so the route does not grow.</li>
+ *   <li>`NONE`, `UNMATCHED`, `UNAVAILABLE`, `DISABLED` and geometry that fails
+ *       validation all leave the road route unextended. The stretch is offered
+ *       separately as GPS-only diagnostic vertices, which the UI must render as
+ *       a visibly different thin/dashed layer labelled "GPS only" - never as the
+ *       road-following route.</li>
  *   <li>Held, drifting and rejected fixes extend nothing at all.</li>
  *   <li>A trip reset or a coverage gap starts a NEW run rather than closing the
  *       gap with a chord across roads nobody observed.</li>
  * </ul>
  *
- * <h3>The rule that was missing</h3>
- * `travelledSegment` used to take no timestamps at all, so it could not tell a
- * one-second step from a ninety-second one and joined both with a straight line
- * between the two accepted coordinates. Every telemetry silence shorter than a
- * trip reset - a backgrounded app, a tunnel, an SSE reconnect, a server restart,
- * a road-matching backlog - therefore produced exactly one long diagonal chord
- * across whatever lay between the fixes either side of it. That is the diagonal
- * across the buildings, and no amount of smoothing, styling or layering could
- * remove it because the geometry itself was wrong.
- *
- * Every segment is now validated for elapsed time, step distance and implied
- * speed by {@link segmentConnectivity} before it is drawn, and a segment that
- * fails BREAKS the polyline into a new run instead of being drawn.
+ * <h3>The rule that changed, and why</h3>
+ * `travelledSegment` used to fall back to `[previousDisplay, currentDisplay]`
+ * whenever road geometry was absent or refused - "the vehicle demonstrably
+ * travelled it, only the geometry was unusable". That reasoning is true about
+ * the VEHICLE and false about the ROAD: the vehicle travelled some path between
+ * those two points, and the straight line between them is not it. Drawn in the
+ * same blue as matched geometry, it is indistinguishable from a road-following
+ * route while being a chord through whatever lies between - the diagonal across
+ * buildings, drawn by the very function that exists to prevent it. A map-
+ * matching outage must produce a visible vehicle, an explicit "road matching
+ * unavailable", and NO road; it must not produce a confident-looking line.
  */
 
 export type LiveCoordinate = LatLng;
+
+/**
+ * How the backend produced the coordinate for a fix.
+ *
+ * `CARRIED` is the specification's name for the wire value `HELD`; both mean
+ * "no new road answer, the previous road coordinate still stands" and both
+ * follow the same rule here - the marker may use it, the route may not grow
+ * from it.
+ */
+export type LiveMatchedSource = 'SOLVED' | 'HELD' | 'CARRIED' | 'NONE';
 
 /** Vertices retained across all runs before the oldest are dropped. */
 export const MAX_TRAIL_VERTICES = 4000;
 
 /** Two vertices closer than this are the same point as far as a polyline cares. */
 const MIN_VERTEX_SPACING_METERS = 0.5;
-/** Only the recent road tail can own the current live marker. */
-const LIVE_PROJECTION_TAIL_VERTICES = 64;
-/** A candidate farther away than this is not on the road geometry we have. */
-const MAX_LIVE_PROJECTION_METERS = 80;
-
-export type LiveTrailProgress = {
-  runs: LiveCoordinate[][];
-  position: LiveCoordinate | null;
-};
-
-/** Shortest signed longitude delta, safe across the antimeridian. */
-function longitudeDelta(from: number, to: number): number {
-  return ((((to - from) % 360) + 540) % 360) - 180;
-}
 
 /**
- * Clips the newest live route run at the animated vehicle and projects the
- * vehicle onto that road tail.
+ * One contiguous stretch of drawn route, with the identity of the fixes behind
+ * it.
  *
- * The backend appends the whole newly matched stretch as soon as a fix arrives,
- * while the marker needs roughly one second to reach that fix. Drawing the
- * uncut stretch puts the blue trail visibly ahead of the car. Projecting the
- * animation-frame coordinate onto the recent road vertices gives both layers
- * the same position: the car rides the curve and the route grows directly
- * behind it, like a navigation map.
+ * <h3>Why runs carry positionIds</h3>
+ * Deciding whether a hydrated trip and the live stream are the same journey used
+ * to be a distance test: if the history tail sat within ~120 m of the live head,
+ * they were joined. A parallel carriageway, a service road, a flyover and the
+ * street beneath it all pass that test, so reopening the screen mid-trip could
+ * splice the route onto a road the vehicle was never on. Proximity is not
+ * identity; a positionId is.
  */
-export function progressLiveTrail(
-  runs: LiveCoordinate[][],
-  candidate: LiveCoordinate | null
-): LiveTrailProgress {
-  if (!candidate || runs.length === 0) return { runs, position: candidate };
-  const lastRunIndex = runs.length - 1;
-  const run = runs[lastRunIndex];
-  if (run.length < 2) return { runs, position: candidate };
+export type LiveTrailRun = {
+  vertices: LiveCoordinate[];
+  /** Identity of the first fix that contributed to this run, when known. */
+  firstPositionId: number | null;
+  /** Identity of the last fix that contributed to this run, when known. */
+  lastPositionId: number | null;
+  /** GPS time of the first contributing fix, epoch ms. */
+  firstTimestampMs: number | null;
+  /** GPS time of the last contributing fix, epoch ms. */
+  lastTimestampMs: number | null;
+};
 
-  const startIndex = Math.max(0, run.length - LIVE_PROJECTION_TAIL_VERTICES);
-  const longitudeScale = Math.max(0.01, Math.cos((candidate.latitude * Math.PI) / 180));
-  let best:
-    | { segmentIndex: number; position: LiveCoordinate; distanceMeters: number }
-    | null = null;
-
-  for (let index = startIndex; index < run.length - 1; index += 1) {
-    const a = run[index];
-    const b = run[index + 1];
-    const dx = longitudeDelta(a.longitude, b.longitude) * longitudeScale;
-    const dy = b.latitude - a.latitude;
-    const px = longitudeDelta(a.longitude, candidate.longitude) * longitudeScale;
-    const py = candidate.latitude - a.latitude;
-    const lengthSquared = dx * dx + dy * dy;
-    const fraction =
-      lengthSquared > 0 ? Math.max(0, Math.min(1, (px * dx + py * dy) / lengthSquared)) : 0;
-    const position = {
-      latitude: a.latitude + dy * fraction,
-      longitude: ((((a.longitude + longitudeDelta(a.longitude, b.longitude) * fraction) + 180) % 360) + 360) % 360 - 180,
-    };
-    const distanceMeters = distanceBetween(candidate, position);
-    if (!best || distanceMeters < best.distanceMeters) {
-      best = { segmentIndex: index, position, distanceMeters };
-    }
-  }
-
-  if (!best || best.distanceMeters > MAX_LIVE_PROJECTION_METERS) {
-    return { runs, position: candidate };
-  }
-
-  const clippedLast = run.slice(0, best.segmentIndex + 1);
-  const tail = clippedLast[clippedLast.length - 1];
-  if (!tail || distanceBetween(tail, best.position) >= MIN_VERTEX_SPACING_METERS) {
-    clippedLast.push(best.position);
-  }
+/** An empty run keyed to one fix, ready to be extended. */
+function newRun(
+  vertices: LiveCoordinate[],
+  positionId: number | null,
+  timestampMs: number | null
+): LiveTrailRun {
   return {
-    runs: [...runs.slice(0, lastRunIndex), clippedLast],
-    position: best.position,
+    vertices: [...vertices],
+    firstPositionId: positionId,
+    lastPositionId: positionId,
+    firstTimestampMs: timestampMs,
+    lastTimestampMs: timestampMs,
   };
+}
+
+/** Just the coordinates, for a renderer that does not care about identity. */
+export function trailCoordinates(trail: readonly LiveTrailRun[]): LiveCoordinate[][] {
+  return trail.map((run) => run.vertices);
+}
+
+/** Drawable runs only: a single vertex is not a polyline. */
+export function drawableRuns(trail: readonly LiveTrailRun[]): LiveCoordinate[][] {
+  return trail.filter((run) => run.vertices.length >= 2).map((run) => run.vertices);
 }
 
 /**
@@ -144,87 +148,174 @@ function usable(latitude: unknown, longitude: unknown): LiveCoordinate | null {
   return coordinateOf(latitude, longitude);
 }
 
+/** Structurally valid vertices in a matcher tail. */
+function countUsableVertices(
+  geometry: readonly (readonly [number, number])[]
+): number {
+  let total = 0;
+  for (const [latitude, longitude] of geometry) {
+    if (usable(latitude, longitude)) total += 1;
+  }
+  return total;
+}
+
 /**
  * Appends the stretch covered since the previous accepted fix.
  *
- * Purely functional: the runs passed in are never mutated. The previous version
+ * Purely functional: the runs passed in are never mutated. An earlier version
  * copied the outer array but pushed into the SAME inner arrays, so every state
  * object the reducer had ever produced shared - and silently rewrote - one
  * another's geometry.
  */
 export function appendTrail(
-  trail: LiveCoordinate[][],
-  vertices: LiveCoordinate[],
-  mode: TrailAppendMode = 'extend'
-): LiveCoordinate[][] {
-  if (mode === 'reset') return vertices.length > 0 ? [[...vertices]] : [];
-  if (vertices.length === 0) return trail;
+  trail: readonly LiveTrailRun[],
+  vertices: readonly LiveCoordinate[],
+  mode: TrailAppendMode = 'extend',
+  identity: { positionId?: number | null; timestampMs?: number | null } = {}
+): LiveTrailRun[] {
+  const positionId = identity.positionId ?? null;
+  const timestampMs = identity.timestampMs ?? null;
+
+  if (mode === 'reset') {
+    return vertices.length > 0 ? [newRun([...vertices], positionId, timestampMs)] : [];
+  }
+  if (vertices.length === 0) return trail.map((run) => run);
 
   const runs = trail.map((run) => run);
   if (mode === 'break') {
     // A gap. The run that was open ends here and a NEW one starts at the far
     // side, so both stretches are still drawn and the unobserved ground between
     // them is left blank rather than crossed.
-    runs.push([...vertices]);
+    runs.push(newRun([...vertices], positionId, timestampMs));
     return trimTrail(runs);
   }
 
-  const last = runs.length > 0 ? [...runs[runs.length - 1]] : [];
-  if (runs.length > 0) runs[runs.length - 1] = last;
-  else runs.push(last);
+  const previous = runs.length > 0 ? runs[runs.length - 1] : null;
+  const extended: LiveTrailRun = previous
+    ? {
+        vertices: [...previous.vertices],
+        firstPositionId: previous.firstPositionId ?? positionId,
+        lastPositionId: positionId ?? previous.lastPositionId,
+        firstTimestampMs: previous.firstTimestampMs ?? timestampMs,
+        lastTimestampMs: timestampMs ?? previous.lastTimestampMs,
+      }
+    : newRun([], positionId, timestampMs);
+  if (previous) runs[runs.length - 1] = extended;
+  else runs.push(extended);
 
   for (const vertex of vertices) {
-    const tail = last[last.length - 1];
+    const tail = extended.vertices[extended.vertices.length - 1];
     if (tail && distanceBetween(tail, vertex) < MIN_VERTEX_SPACING_METERS) {
       continue;
     }
-    last.push(vertex);
+    extended.vertices.push(vertex);
   }
 
   return trimTrail(runs);
 }
 
 /**
+ * The boundary between a hydrated trip and the live stream.
+ *
+ * @param positionId  identity of the LAST fix hydration covers
+ * @param timestampMs GPS time of that fix, epoch ms
+ */
+export type HydrationBoundary = {
+  positionId: number | null;
+  timestampMs: number | null;
+};
+
+/**
  * Restores the part of the current trip recorded before Live Track mounted,
  * then continues it with the in-memory SSE trail.
  *
- * A process restart used to reduce every live route to the one replayed current
- * position: the backend still held the travelled trip, but this screen never
- * asked for it. Only the first live run may attach to history, and only when its
- * first vertex is close enough to the history tail to be the same observed
- * road. Later live runs retain their gaps verbatim.
+ * <h3>Identity, not proximity</h3>
+ * The first live run attaches to history only when BOTH hold:
+ * <ol>
+ *   <li>its first fix's positionId is strictly greater than the boundary's -
+ *       so it is genuinely the continuation of the hydrated sequence and not a
+ *       point hydration already contains; and</li>
+ *   <li>the step from the history tail to the live head passes the same
+ *       {@link segmentConnectivity} rule every other segment does - elapsed
+ *       time, step distance and implied speed - so a silence in the middle
+ *       still breaks the line.</li>
+ * </ol>
+ * Later live runs keep their gaps verbatim. Nothing is ever joined because two
+ * endpoints happen to be close.
+ *
+ * <p>When either side has no positionId - a legacy backend - the join is
+ * refused rather than guessed. A visible break is a truthful statement about
+ * missing information; a splice onto the wrong road is not.
  */
 export function mergeLiveTrailHistory(
-  history: LiveCoordinate[][],
-  live: LiveCoordinate[][]
-): LiveCoordinate[][] {
-  if (history.length === 0) return live.map((run) => [...run]);
-  if (live.length === 0) return history.map((run) => [...run]);
+  history: readonly LiveTrailRun[],
+  live: readonly LiveTrailRun[],
+  boundary: HydrationBoundary | null = null
+): LiveTrailRun[] {
+  if (history.length === 0) return live.map((run) => ({ ...run, vertices: [...run.vertices] }));
+  if (live.length === 0) return history.map((run) => ({ ...run, vertices: [...run.vertices] }));
 
-  let merged = history.map((run) => [...run]);
+  let merged: LiveTrailRun[] = history.map((run) => ({ ...run, vertices: [...run.vertices] }));
   live.forEach((run, index) => {
-    if (run.length === 0) return;
-    const lastHistoryRun = merged[merged.length - 1];
-    const historyTail = lastHistoryRun?.[lastHistoryRun.length - 1];
-    const liveHead = run[0];
-    const attaches =
-      index === 0 &&
-      historyTail != null &&
-      distanceBetween(historyTail, liveHead) <= GPS_LIMITS.maxGeometryEndpointGapMeters;
-    merged = appendTrail(merged, run, attaches ? 'extend' : 'break');
+    if (run.vertices.length === 0) return;
+    const attaches = index === 0 && attachesToHistory(merged, run, boundary);
+    merged = appendTrail(merged, run.vertices, attaches ? 'extend' : 'break', {
+      positionId: run.lastPositionId,
+      timestampMs: run.lastTimestampMs,
+    });
+    if (!attaches) {
+      // Preserve the live run's own identity on the run just created, so a
+      // later merge can reason about it too.
+      const last = merged[merged.length - 1];
+      merged[merged.length - 1] = {
+        ...last,
+        firstPositionId: run.firstPositionId,
+        firstTimestampMs: run.firstTimestampMs,
+      };
+    }
   });
   return merged;
 }
 
-function trimTrail(runs: LiveCoordinate[][]): LiveCoordinate[][] {
-  let total = runs.reduce((sum, run) => sum + run.length, 0);
+function attachesToHistory(
+  history: readonly LiveTrailRun[],
+  liveRun: LiveTrailRun,
+  boundary: HydrationBoundary | null
+): boolean {
+  const tail = history[history.length - 1];
+  const historyTailVertex = tail?.vertices[tail.vertices.length - 1];
+  const liveHead = liveRun.vertices[0];
+  if (!historyTailVertex || !liveHead) return false;
+
+  const boundaryPositionId = boundary?.positionId ?? tail?.lastPositionId ?? null;
+  const boundaryTimestampMs = boundary?.timestampMs ?? tail?.lastTimestampMs ?? null;
+  if (
+    boundaryPositionId == null ||
+    liveRun.firstPositionId == null ||
+    liveRun.firstPositionId <= boundaryPositionId
+  ) {
+    return false;
+  }
+  if (boundaryTimestampMs == null || liveRun.firstTimestampMs == null) return false;
+
+  return segmentConnectivity({
+    previousTimestampMs: boundaryTimestampMs,
+    currentTimestampMs: liveRun.firstTimestampMs,
+    distanceMeters: distanceBetween(historyTailVertex, liveHead),
+    gapBefore: false,
+    expectedIntervalMs: null,
+  }).connect;
+}
+
+function trimTrail(runs: LiveTrailRun[]): LiveTrailRun[] {
+  let total = runs.reduce((sum, run) => sum + run.vertices.length, 0);
   while (total > MAX_TRAIL_VERTICES && runs.length > 0) {
-    const head = [...runs[0]];
-    const drop = Math.min(head.length, total - MAX_TRAIL_VERTICES);
-    head.splice(0, drop);
+    const head = { ...runs[0], vertices: [...runs[0].vertices] };
+    const drop = Math.min(head.vertices.length, total - MAX_TRAIL_VERTICES);
+    head.vertices.splice(0, drop);
     total -= drop;
-    if (head.length < 2) {
-      total -= head.length;
+    if (head.vertices.length < 2) {
+      total -= head.vertices.length;
       runs.shift();
     } else {
       runs[0] = head;
@@ -234,7 +325,7 @@ function trimTrail(runs: LiveCoordinate[][]): LiveCoordinate[][] {
   // filter to `length >= 2` at render time - but discarding them here threw the
   // vertex away, so a run that grows one point at a time could never reach two
   // and the line stayed permanently empty. Only genuinely empty runs go.
-  return runs.filter((run) => run.length > 0);
+  return runs.filter((run) => run.vertices.length > 0);
 }
 
 /**
@@ -243,19 +334,15 @@ function trimTrail(runs: LiveCoordinate[][]): LiveCoordinate[][] {
  *
  * A run with a long hop in it, or one whose ends do not meet the points it
  * claims to join, is describing a different journey - typically because the
- * solver put the vehicle on a parallel road, or because a failed chunk
- * contributed raw GPS chords to what is presented as road geometry. Drawing it
- * is worse than drawing nothing, because it looks authoritative.
- *
- * The per-vertex hop limit is {@link GPS_LIMITS.maxGeometryStepMeters}. It used
- * to be one kilometre, which admits a diagonal right across a town centre
- * inside geometry the client is told is a road.
+ * solver put the vehicle on a parallel road. Drawing it is worse than drawing
+ * nothing, because it looks authoritative.
  */
 export function safeMatchedGeometry(
   geometry: readonly (readonly [number, number])[],
   previousDisplay: LiveCoordinate | null,
   current: LiveCoordinate,
-  newRun: boolean
+  newRunStart: boolean,
+  limits: GeometryLimits = DEFAULT_GEOMETRY_LIMITS
 ): LiveCoordinate[] {
   const vertices = geometry
     .map(([latitude, longitude]) => usable(latitude, longitude))
@@ -263,37 +350,62 @@ export function safeMatchedGeometry(
   if (vertices.length < 2) return [];
 
   for (let index = 1; index < vertices.length; index += 1) {
-    if (
-      distanceBetween(vertices[index - 1], vertices[index]) > GPS_LIMITS.maxGeometryStepMeters
-    ) {
+    if (distanceBetween(vertices[index - 1], vertices[index]) > limits.maxGeometryStepMeters) {
       return [];
     }
   }
   if (
-    !newRun &&
+    !newRunStart &&
     previousDisplay &&
-    distanceBetween(previousDisplay, vertices[0]) > GPS_LIMITS.maxGeometryEndpointGapMeters
+    distanceBetween(previousDisplay, vertices[0]) > limits.maxGeometryEndpointGapMeters
   ) {
     return [];
   }
   const end = vertices[vertices.length - 1];
-  if (distanceBetween(end, current) > GPS_LIMITS.maxGeometryEndpointGapMeters) {
+  if (distanceBetween(end, current) > limits.maxGeometryEndpointGapMeters) {
     return [];
   }
   return vertices;
 }
 
 export type TravelledSegment = {
+  /**
+   * Road vertices to append to the AUTHORITATIVE blue route.
+   *
+   * Empty whenever no usable road geometry was returned. It is never the chord
+   * between two fixes: see the module header for why that fallback was removed.
+   */
   vertices: LiveCoordinate[];
   /**
-   * Where the geometry came from, for the diagnostic trace.
+   * The same stretch expressed as validated GPS, for the optional "GPS only"
+   * diagnostic layer.
    *
-   * `matched` is road geometry from the backend; `accepted` is the segment
-   * between two validated points, used when no usable road geometry arrived.
+   * Populated only when there is no road answer. A renderer must draw it thin,
+   * dashed and labelled, in a colour that cannot be mistaken for the road
+   * route - or not draw it at all. It must never be merged into `vertices`.
    */
-  source: 'matched' | 'accepted';
-  /** How this segment joins what is already drawn. */
+  diagnosticVertices: LiveCoordinate[];
+  /**
+   * Where the geometry came from.
+   *
+   * `matched` is road geometry from the backend. `carried` is a fix whose road
+   * coordinate was carried over, contributing no geometry. `none` is a fix with
+   * no road answer, whose stretch is diagnostic-only.
+   */
+  source: 'matched' | 'carried' | 'none';
+  /** How this segment joins the AUTHORITATIVE road route. */
   mode: TrailAppendMode;
+  /**
+   * How this segment joins the GPS-only diagnostic layer.
+   *
+   * Deliberately separate from {@link mode}. The road route breaks wherever
+   * road geometry is missing; the diagnostic layer is about the vehicle's own
+   * motion and breaks only where the telemetry itself broke. Sharing one mode
+   * meant a run of unmatched fixes produced one single-vertex diagnostic run per
+   * fix - nothing drawable - so the very outage the layer exists to show was
+   * the case it could not show.
+   */
+  diagnosticMode: TrailAppendMode;
   /** Why the polyline was broken here, when it was. */
   breakReason: SegmentBreakReason | null;
   /** True when matched geometry arrived but failed {@link safeMatchedGeometry}. */
@@ -303,6 +415,8 @@ export type TravelledSegment = {
 /**
  * The stretch of route to append for one accepted movement point.
  *
+ * @param matchedSource        how the backend produced this fix's coordinate
+ * @param matchedGeometry      road vertices the matcher returned, `[lat, lng]`
  * @param previousDisplay      the coordinate the vehicle was last DRAWN at, or
  *                             null when this is the first point of a run
  * @param previousTimestampMs  GPS time of that previously drawn fix
@@ -316,19 +430,34 @@ export type TravelledSegment = {
  */
 export function travelledSegment(params: {
   matchedGeometry: readonly (readonly [number, number])[];
-  isMatched: boolean;
+  matchedSource: LiveMatchedSource | null;
   previousDisplay: LiveCoordinate | null;
   previousTimestampMs: number | null;
   currentDisplay: LiveCoordinate;
   currentTimestampMs: number;
   gapBefore?: boolean;
   newTrip?: boolean;
-  /** This device's typical gap between accepted fixes. */
   expectedIntervalMs?: number | null;
+  /**
+   * Whether the AUTHORITATIVE route currently ends at `previousDisplay`.
+   *
+   * False after any fix that contributed no road geometry. GPS connectivity and
+   * ROUTE continuity are different questions, and conflating them is a chord:
+   * a vehicle can drive continuously - so the segment rule says `extend` -
+   * across a stretch the matcher could not place, and the drawn line has a hole
+   * in it there. Extending the same run over that hole joins the last matched
+   * vertex straight to the next one, which is exactly the diagonal this module
+   * exists to prevent, re-created one level up.
+   *
+   * Defaults to true, which is the ordinary case of one matched fix following
+   * another.
+   */
+  roadRouteOpen?: boolean;
+  limits?: GeometryLimits;
 }): TravelledSegment {
   const {
     matchedGeometry,
-    isMatched,
+    matchedSource,
     previousDisplay,
     previousTimestampMs,
     currentDisplay,
@@ -336,11 +465,13 @@ export function travelledSegment(params: {
     gapBefore = false,
     newTrip = false,
     expectedIntervalMs = null,
+    roadRouteOpen = true,
+    limits = DEFAULT_GEOMETRY_LIMITS,
   } = params;
 
   // Every segment is judged BEFORE any geometry is chosen, so the same rule
   // applies whether the stretch would have been drawn from road vertices or
-  // from the chord between two fixes.
+  // reported as a GPS-only diagnostic.
   const connectivity =
     newTrip || !previousDisplay || previousTimestampMs == null
       ? ({ connect: false, reason: newTrip ? 'new_trip' : 'telemetry_gap' } as const)
@@ -352,48 +483,125 @@ export function travelledSegment(params: {
           expectedIntervalMs,
         });
 
+  // Two conditions, both required, before this segment may continue the ROAD
+  // route already drawn: the vehicle's own motion has to be continuous AND the
+  // route has to still be open where that motion started.
   const mode: TrailAppendMode = newTrip
+    ? 'reset'
+    : connectivity.connect && roadRouteOpen
+      ? 'extend'
+      : 'break';
+  // The diagnostic layer only cares about the first of those. It is a record of
+  // where the vehicle reported being, so it breaks where the TELEMETRY broke and
+  // nowhere else.
+  const diagnosticMode: TrailAppendMode = newTrip
     ? 'reset'
     : connectivity.connect
       ? 'extend'
       : 'break';
-  const breakReason = connectivity.connect ? null : connectivity.reason;
+  const breakReason = connectivity.connect
+    ? roadRouteOpen
+      ? null
+      : 'unmatched_stretch'
+    : connectivity.reason;
   // A broken run starts AT this coordinate; there is no previous point to draw
   // from, and inventing one is the whole fault this is here to prevent.
   const startsRun = mode !== 'extend';
 
-  if (isMatched && matchedGeometry.length > 0) {
+  const diagnostic =
+    diagnosticMode !== 'extend'
+      ? [currentDisplay]
+      : [previousDisplay as LiveCoordinate, currentDisplay];
+
+  // CARRIED / HELD: the matcher produced no new road. The marker keeps the
+  // carried coordinate; the route grows by nothing, because inventing the road
+  // between two carried points is exactly the fabrication being removed.
+  if (matchedSource === 'HELD' || matchedSource === 'CARRIED') {
+    return {
+      vertices: [],
+      diagnosticVertices: [],
+      source: 'carried',
+      mode,
+      diagnosticMode,
+      breakReason,
+      matchedGeometryRejected: false,
+    };
+  }
+
+  if (matchedSource === 'SOLVED') {
     const geometry = safeMatchedGeometry(
       matchedGeometry,
       previousDisplay,
       currentDisplay,
-      startsRun
+      startsRun,
+      limits
     );
     if (geometry.length >= 2) {
       return {
         vertices: geometry,
+        diagnosticVertices: [],
         source: 'matched',
         mode,
+        diagnosticMode,
         breakReason,
         matchedGeometryRejected: false,
       };
     }
-    // Fall through to the accepted-point segment rather than losing the stretch
-    // entirely: the vehicle demonstrably travelled it, only the road geometry
-    // for it was unusable.
+
+    // A SHORT TAIL, not a failure.
+    //
+    // The matcher reports the road vertices travelled since the previous match.
+    // A vehicle that advances without leaving its current road segment produces
+    // a tail of one vertex or none, because there is no new vertex to report -
+    // on a real drive that is roughly one fix in six. Both ends of this step are
+    // still coordinates the routing engine placed on the road, so the line
+    // between them lies along that segment; refusing it fragments the route of a
+    // vehicle that never left the road.
+    //
+    // Bounded on purpose. Past `maxMatchedSegmentStepMeters` the missing
+    // geometry means the road actually taken is unknown, and then this is the
+    // invented chord the pipeline exists to prevent - so it breaks instead.
+    const usable = countUsableVertices(matchedGeometry);
+    const shortTail = usable < 2;
+    const step =
+      previousDisplay == null ? 0 : distanceBetween(previousDisplay, currentDisplay);
+    if (shortTail && (startsRun || step <= limits.maxMatchedSegmentStepMeters)) {
+      return {
+        vertices: startsRun
+          ? [currentDisplay]
+          : [previousDisplay as LiveCoordinate, currentDisplay],
+        diagnosticVertices: [],
+        source: 'matched',
+        mode,
+        diagnosticMode,
+        breakReason,
+        matchedGeometryRejected: false,
+      };
+    }
+
+    // Geometry arrived and was genuinely refused - a hop inside it, or ends that
+    // do not meet the positions it claims to join. The vehicle travelled the
+    // stretch, but this is not the road it travelled, and the straight line
+    // between the two fixes is not the road either. The road route stays
+    // unextended; the stretch is offered as an explicitly GPS-only diagnostic.
     return {
-      vertices: startsRun ? [currentDisplay] : [previousDisplay as LiveCoordinate, currentDisplay],
-      source: 'accepted',
+      vertices: [],
+      diagnosticVertices: diagnostic,
+      source: 'none',
       mode,
+      diagnosticMode,
       breakReason,
-      matchedGeometryRejected: true,
+      matchedGeometryRejected: !shortTail,
     };
   }
 
+  // NONE, or SOLVED with no geometry at all: no road answer for this stretch.
   return {
-    vertices: startsRun ? [currentDisplay] : [previousDisplay as LiveCoordinate, currentDisplay],
-    source: 'accepted',
+    vertices: [],
+    diagnosticVertices: diagnostic,
+    source: 'none',
     mode,
+    diagnosticMode,
     breakReason,
     matchedGeometryRejected: false,
   };

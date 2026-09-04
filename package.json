@@ -11,7 +11,7 @@
     "lint": "expo lint",
     "test": "npm run test:company-code && npm run test:gps && npm run test:state",
     "test:company-code": "node --experimental-strip-types --test src/services/tenantIdentity.companyCode.test.mjs",
-    "test:gps": "node --import ./src/services/registerTestModuleHooks.mjs --experimental-strip-types --test src/services/gpsPipeline.test.mjs src/services/mobileGpsPayload.test.mjs src/services/playbackClock.test.mjs src/services/geoMath.test.mjs src/services/liveRouteTrail.test.mjs src/services/playbackHistory.test.mjs",
+    "test:gps": "node --import ./src/services/registerTestModuleHooks.mjs --experimental-strip-types --test src/services/gpsPipeline.test.mjs src/services/mobileGpsPayload.test.mjs src/services/playbackClock.test.mjs src/services/geoMath.test.mjs src/services/liveRouteTrail.test.mjs src/services/roadPolyline.test.mjs src/services/livePipeline.test.mjs src/services/phoneTrackerQueue.test.mjs src/services/playbackHistory.test.mjs",
     "test:state": "node --import ./src/services/registerTestModuleHooks.mjs --experimental-strip-types --test src/store/store.test.mjs src/services/queryCache.test.mjs src/services/httpQuery.test.mjs"
   },
   "dependencies": {
