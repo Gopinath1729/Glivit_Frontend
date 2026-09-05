@@ -27,13 +27,19 @@ import { openSse, type SseConnection } from './sseClient';
  * The token is read at connect time through a provider instead, so a rotation
  * costs nothing and the next reconnect picks up the current one.
  *
- * <h3>Two frame types</h3>
- * `POSITION` is a new validated GPS fix and goes through the client's GPS
- * validation. `ROAD_MATCH` is the road answer for one `positionId` that has
- * already been delivered, and deliberately does NOT: it repeats that fix's
- * timestamp, so the duplicate-GPS rule correctly refuses it, and refusing it is
- * how the backend's road geometry used to be thrown away on arrival. The two
- * are dispatched to separate listeners here so neither rule has to be relaxed.
+ * <h3>Frame types</h3>
+ * `POSITION` is one fully resolved fix: the validated GPS coordinate, the road
+ * match for it, the display coordinate to draw, and the road geometry since the
+ * previous display position. A current backend sends exactly one of these per
+ * GPS sample and nothing else, so the raw coordinate is never drawn and then
+ * corrected.
+ *
+ * `ROAD_MATCH` is the second half of the older two-frame protocol - the road
+ * answer for a `positionId` already delivered. It is still parsed and dispatched
+ * so this app keeps working against an older backend; a current one never sends
+ * it. It deliberately does NOT go through GPS validation: it repeats the fix's
+ * timestamp, so the duplicate rule would correctly refuse it and the geometry
+ * would be lost.
  *
  * <h3>Reconnect contract</h3>
  * Reconnection is exponential with jitter (in {@link openSse}), and the server
@@ -57,12 +63,42 @@ export type LivePositionEvent = {
    * Null for a backend that predates the field.
    */
   positionId: number | null;
-  /** Validated GPS coordinate exactly as reported. */
+  /**
+   * Validated GPS coordinate exactly as reported. Diagnostics only.
+   *
+   * Nothing on a map may be drawn from this. It is here so a trace can show
+   * where the device claimed to be next to where the vehicle was drawn.
+   */
   latitude: number;
   longitude: number;
-  /** Where the backend road matcher placed it, when it could. */
+  /** Explicit aliases of the two above, as the backend now names them. */
+  rawLatitude: number;
+  rawLongitude: number;
+  /** Where the backend road matcher placed THIS fix, when it could. */
   matchedLatitude: number | null;
   matchedLongitude: number | null;
+  /**
+   * The ONE coordinate this client draws.
+   *
+   * Resolved by the backend before the frame was sent: validation, then road
+   * matching, then this. It is the matched road position when the fix was
+   * solved and the previous valid road position while a new match was still
+   * being computed - so the marker never has to be drawn at the raw coordinate
+   * and corrected a moment later.
+   *
+   * Null for a backend that predates the field, in which case the two-frame
+   * POSITION/ROAD_MATCH path below still applies.
+   */
+  displayLatitude: number | null;
+  displayLongitude: number | null;
+  /**
+   * The heading to draw, 0-360.
+   *
+   * The validated direction of travel, refined by the matched road only when
+   * this fix was actually solved, and already rate-limited by the backend so
+   * the model turns rather than snapping.
+   */
+  displayBearing: number | null;
   /** Orientation of the matched road, 0-360, or null when unmatched. */
   roadBearing: number | null;
   /** Matching confidence in [0,1], or null when this fix was not matched. */
@@ -314,8 +350,13 @@ export function parseLivePositionEvent(value: unknown): LivePositionEvent | null
     positionId: positionId != null && Number.isSafeInteger(positionId) ? positionId : null,
     latitude,
     longitude,
+    rawLatitude: finiteNumber(value.rawLatitude) ?? latitude,
+    rawLongitude: finiteNumber(value.rawLongitude) ?? longitude,
     matchedLatitude: finiteNumber(value.matchedLatitude),
     matchedLongitude: finiteNumber(value.matchedLongitude),
+    displayLatitude: finiteNumber(value.displayLatitude),
+    displayLongitude: finiteNumber(value.displayLongitude),
+    displayBearing: finiteNumber(value.displayBearing),
     roadBearing: finiteNumber(value.roadBearing),
     matchConfidence: finiteNumber(value.matchConfidence),
     matchedSource: matchedSourceOf(value.matchedSource),

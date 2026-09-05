@@ -48,10 +48,13 @@ function windowFor(deviceId: number): GpsRollingWindow {
  * the difference between a marker going stale and a marker disappearing.
  *
  * <h3>What is drawn</h3>
- * The backend's road-matched coordinate, when it matched the fix. There is no
- * client-side snapping: matching a coordinate on its own puts adjacent fixes on
- * different parallel roads, which is what made stationary markers twitch between
- * carriageways.
+ * The backend's display coordinate, and only that. It is the road-matched
+ * position for the fix when the fix was matched, and the previous valid road
+ * position while a new match was still being solved - resolved on the server
+ * before the frame was sent, so a marker is never drawn at the raw coordinate
+ * and corrected a moment later. There is no client-side snapping: matching a
+ * coordinate on its own puts adjacent fixes on different parallel roads, which
+ * is what made stationary markers twitch between carriageways.
  */
 
 export type FleetTarget = {
@@ -257,9 +260,16 @@ export function useFleetLivePositions(seed: DeviceSummary[], enabled = true): Fl
       }
       dispatch(livePositionReceived(event));
 
-      const matched = validation.isMatched;
-      const latitude = validation.matched.latitude;
-      const longitude = validation.matched.longitude;
+      // The backend's display coordinate when it sent one, which it now always
+      // does: it is the single place that decides where a vehicle is drawn, and
+      // it decided before this frame was sent. `validation.matched` is the older
+      // two-frame path, kept for an older backend.
+      const authoritative = usable(event.displayLatitude, event.displayLongitude)
+        ? { latitude: event.displayLatitude as number, longitude: event.displayLongitude as number }
+        : null;
+      const matched = authoritative ? event.matchedSource !== 'NONE' : validation.isMatched;
+      const latitude = authoritative ? authoritative.latitude : validation.matched.latitude;
+      const longitude = authoritative ? authoritative.longitude : validation.matched.longitude;
       const state = event.state ?? previous?.state ?? 'NO_DATA';
       const rawLatitude = validation.held && previous ? previous.rawLatitude : event.latitude;
       const rawLongitude = validation.held && previous ? previous.rawLongitude : event.longitude;
@@ -290,7 +300,14 @@ export function useFleetLivePositions(seed: DeviceSummary[], enabled = true): Fl
         // disagree, so the same vehicle faced different ways on the fleet map
         // and the tracking screen at the same instant. One fix, one bearing,
         // taken from the stage that measured it.
-        heading: validation.course,
+        // The heading the backend resolved for this fix, which is the validated
+        // direction of travel refined by the matched road and already
+        // rate-limited so the model turns rather than snapping. Falling back to
+        // the local one keeps an older backend working.
+        heading:
+          event.displayBearing != null && Number.isFinite(event.displayBearing)
+            ? event.displayBearing
+            : validation.course,
         state,
         moving: MOVING_STATES.has(state),
         updatedAt: Date.now(),

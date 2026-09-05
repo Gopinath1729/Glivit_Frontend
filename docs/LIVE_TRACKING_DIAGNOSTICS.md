@@ -114,9 +114,37 @@ Both halves use the same stage names, so one device id follows a fix end to end.
 [gps:stored]  device=7 positionId=… lat=… lng=… gpsTime=… serverTime=… tripKm=…
 [gps:matched] device=7 raw=(…) matched=(…) offsetM=… roadBearing=… confidence=…
               matched=… held=… geometryVertices=…
+[gps:live]    device=7 positionId=… raw=(…) matched=(…) previousDisplay=(…)
+              display=(…) rawToMatchedDistanceM=… previousToDisplayDistanceM=…
+              matchSource=SOLVED|HELD|NONE matchStatus=… heldAgeMs=…
+              matchConfidence=… geometryVertices=… gpsTime=… gpsToServerMs=…
+              processingLatencyMs=… decision=…
 [gps:stream]  device=7 broadcast lat=… lng=… gpsTime=… geometryVertices=…
 [gps:stream]  device=7 suppressed reason=OUT_OF_ORDER|STALE_TIMESTAMP|SUPERSEDED_BY_NEWER_FIX
 ```
+
+`[gps:live]` is the line to read first. It is one line per GPS sample carrying
+the whole decision, so no correlation is needed: where the device said it was,
+where the matcher put it, where the marker was drawn, and the real distances
+between all three.
+
+* `rawToMatchedDistanceM` is measured from the CURRENT validated fix to the
+  drawn coordinate. On a held fix it is the distance the marker is *behind* the
+  vehicle — the number that used to read `0.0` for every hold because the held
+  coordinate was passed as both the raw and the matched one.
+* `matchSource=HELD` with a growing `rawToMatchedDistanceM` and `heldAgeMs`
+  means matching is failing repeatedly. It is now self-limiting: past
+  `app.map-matching.held-max-distance-meters` (40 m) or
+  `held-max-age-ms` (10 s) while moving, the hold is released — look for
+  `live-match hold released … reason=HELD_OFF_ROAD|HELD_EXPIRED|HELD_TOO_FAR`
+  at INFO — and the vehicle follows its real GPS with `matchSource=NONE`.
+* `decision` names why this coordinate was chosen: `SOLVED`, a matcher
+  rejection (`DISCONTINUOUS_ROAD`, `MATCH_INVENTS_TRAVEL`, `POOR_ACCURACY`,
+  `UNTRUSTWORTHY`, `ENGINE_NO_ANSWER`, …), or `DISPLAY_JUMP_REFUSED` when the
+  drawn step itself was refused.
+* `gpsToServerMs` is negative when the phone's GPS clock leads the server's,
+  which is normal by one to three seconds and is never a reason to reject a
+  sample.
 
 **App** — build with `EXPO_PUBLIC_GPS_DIAGNOSTICS=true`, or call
 `setGpsDiagnostics(true)` at runtime. This is deliberately **not** gated on
@@ -154,7 +182,13 @@ real road, which means a release build.
 * **"The route line is missing."** `[gps:render] stage=route` gives the run and
   vertex counts, and `routeSource` on `[gps:matched]` says whether each stretch
   came from road geometry (`matched`) or from the segment between two accepted
-  points (`accepted`).
+  points (`accepted`). On the server, `geometryVertices=0` on `[gps:live]` says
+  the provider returned no road for that stretch, so nothing was appended —
+  which is correct, and never a reason to draw the chord instead.
+* **"The marker is stuck behind me."** `[gps:live] matchSource=HELD` with a
+  large `rawToMatchedDistanceM`. The hold releases itself past the distance and
+  age limits above; if it is not releasing, the fix is being reported with a
+  speed of zero (`observation.speedKmh`), which is what makes it look parked.
 * **"Nothing is being sent at all."** Look for `reason=acquiring:…`. Warm-up is
   working; the receiver has not converged. `samples=n needed=N` is the
   progress, and the `acquiring:` suffix names what keeps resetting the run.

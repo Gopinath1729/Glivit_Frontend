@@ -42,22 +42,24 @@ export type { LivePositionEvent, LiveRoadMatchEvent } from './livePositionStream
  * and the rules are precisely the ones that kept regressing. `livePositions`
  * holds the hooks that drive it.
  *
- * <h3>Two frames, two jobs</h3>
- * The backend publishes a validated fix the instant it commits (`POSITION`,
- * carrying a `positionId` and `matchStatus=PENDING`) and the road answer for
- * that same `positionId` a moment later (`ROAD_MATCH`). This module keeps them
- * apart on purpose:
+ * <h3>One frame per fix</h3>
+ * The backend resolves a fix completely before it publishes it - validation,
+ * then road matching, then the display coordinate - and sends ONE `POSITION`
+ * frame carrying all of it: the raw coordinate, the matched coordinate, the
+ * display coordinate to draw, and the road geometry since the previous display
+ * position. `applyLiveEvent` applies the whole thing in one step, so the marker
+ * is never drawn at the raw coordinate and corrected a moment later.
  *
- * <ul>
- *   <li>A `POSITION` goes through the full GPS validator. It advances the
- *       anchor, the speed, the trip distance and the quality label, and it
- *       records a PENDING entry keyed by its `positionId`.</li>
- *   <li>A `ROAD_MATCH` does NOT go through the GPS validator - it carries no new
- *       reading and repeats a timestamp already seen, so the duplicate rule
- *       would correctly refuse it and the road geometry would be lost exactly as
- *       it used to be. It is matched to its pending entry BY ID, and only then
- *       does it move the marker and extend the route.</li>
- * </ul>
+ * <p>It used to take two frames: a `POSITION` with the raw coordinate and
+ * `matchStatus=PENDING`, then a `ROAD_MATCH` with the road answer for the same
+ * `positionId`. That path is still here, in `applyRoadMatchEvent`, and is
+ * selected automatically when a frame carries no display coordinate - which is
+ * how this app keeps working against an older backend. Against a current one it
+ * never runs.
+ *
+ * <p>Either way a `ROAD_MATCH` never goes through the GPS validator: it carries
+ * no new reading and repeats a timestamp already seen, so the duplicate rule
+ * would correctly refuse it and the road geometry would be lost.
  *
  * <h3>Four positions, kept apart on purpose</h3>
  * <ul>
@@ -631,6 +633,24 @@ export function applyLiveEvent(
     ignition: event.ignition,
   };
 
+  // ONE frame, one authoritative position.
+  //
+  // A current backend resolves the coordinate to draw before it publishes:
+  // validation, then road matching, then the display decision. There is no
+  // second frame to wait for and nothing to correct afterwards, so the whole
+  // fix - marker, heading and route - is applied here in one step.
+  const authoritative = authoritativeDisplayOf(event);
+  if (authoritative) {
+    return applyResolvedFrame(previousState, event, validation, authoritative, {
+      newTrip,
+      expectedIntervalMs,
+      previousPoint,
+      backendTripStartedAt,
+      matchStatus,
+      now,
+    });
+  }
+
   if (validation.held) {
     traceGps('rejected', event.deviceId, {
       ...buildTraceRecord({
@@ -778,6 +798,229 @@ export function applyLiveEvent(
     matchStatus,
     roadMatchPending: pendingMatches.length > 0,
     roadRouteOpen: newTrip ? false : previousState.roadRouteOpen,
+  };
+}
+
+/**
+ * The backend's authoritative display coordinate for this fix, if it sent one.
+ *
+ * Returns null for a backend that predates the field, which is what selects the
+ * older two-frame path below.
+ */
+function authoritativeDisplayOf(
+  event: LivePositionEvent
+): { coordinate: LiveCoordinate; bearing: number | null } | null {
+  const latitude = event.displayLatitude;
+  const longitude = event.displayLongitude;
+  if (
+    latitude == null ||
+    longitude == null ||
+    !Number.isFinite(latitude) ||
+    !Number.isFinite(longitude) ||
+    Math.abs(latitude) > 90 ||
+    Math.abs(longitude) > 180 ||
+    (latitude === 0 && longitude === 0)
+  ) {
+    return null;
+  }
+  const bearing = event.displayBearing;
+  return {
+    coordinate: { latitude, longitude },
+    bearing: bearing != null && Number.isFinite(bearing) ? bearing : null,
+  };
+}
+
+/**
+ * Applies one fully resolved fix: marker, heading and route, in a single step.
+ *
+ * <h3>Why the backend's coordinate wins</h3>
+ * There is exactly one place that decides where a vehicle is drawn, and it is
+ * the backend - because it is the only place that has the road network, the
+ * device's whole recent trace and the previous display position at once. This
+ * function does not re-derive that decision; it renders it, and uses the local
+ * validator only for what is genuinely local: the quality label, the movement
+ * anchor, and whether this frame may be applied at all.
+ *
+ * <h3>What is still local</h3>
+ * A frame the local validator REJECTS never reaches here. The server replays
+ * every vehicle's current position on connect, so a reconnect repeats a
+ * timestamp already seen; applying it would redraw the vehicle at a position it
+ * has already left. That check lives in `applyLiveEvent`, upstream of this.
+ */
+function applyResolvedFrame(
+  previousState: LivePositionsState,
+  event: LivePositionEvent,
+  validation: Extract<ValidatedFix, { accepted: true }>,
+  authoritative: { coordinate: LiveCoordinate; bearing: number | null },
+  context: {
+    newTrip: boolean;
+    expectedIntervalMs: number | null;
+    previousPoint: PreviousAcceptedLivePoint | null;
+    backendTripStartedAt: number | null;
+    matchStatus: MapMatchStatus | null;
+    now: number;
+  }
+): LivePositionsState {
+  const { newTrip, expectedIntervalMs, previousPoint, backendTripStartedAt, matchStatus, now } =
+    context;
+  const display = authoritative.coordinate;
+  const heading = normalizeHeading(authoritative.bearing ?? validation.course);
+  const matchedSource: LiveMatchedSource = event.matchedSource ?? 'NONE';
+
+  const previousDisplay = newTrip ? null : previousState.displayPosition;
+  const previousTimestampMs = newTrip ? null : (previousPoint?.timestampMs ?? null);
+
+  const segment = travelledSegment({
+    matchedGeometry: event.matchedGeometry,
+    matchedSource,
+    previousDisplay,
+    previousTimestampMs,
+    currentDisplay: display,
+    currentTimestampMs: validation.recordedAt,
+    gapBefore: validation.gapBefore,
+    newTrip,
+    expectedIntervalMs,
+    roadRouteOpen: previousState.roadRouteOpen,
+  });
+
+  const baseTrail = newTrip ? [] : previousState.trail;
+  const trail =
+    segment.vertices.length > 0
+      ? appendTrail(baseTrail, segment.vertices, segment.mode, {
+          positionId: event.positionId,
+          timestampMs: validation.recordedAt,
+        })
+      : baseTrail;
+  const baseDiagnosticTrail = newTrip ? [] : previousState.diagnosticTrail;
+  const diagnosticTrail =
+    segment.diagnosticVertices.length > 0
+      ? appendTrail(baseDiagnosticTrail, segment.diagnosticVertices, segment.diagnosticMode, {
+          positionId: event.positionId,
+          timestampMs: validation.recordedAt,
+        })
+      : baseDiagnosticTrail;
+
+  // The polyline the marker travels: the previous drawn position, the road
+  // between, and this fix's display position. Because the route was extended
+  // with exactly these vertices, clipping this polyline at the travelled
+  // distance leaves the line ending precisely at the marker.
+  const travelVertices: LiveCoordinate[] =
+    segment.vertices.length >= 2
+      ? [
+          ...(segment.mode === 'extend' && previousDisplay ? [previousDisplay] : []),
+          ...segment.vertices,
+        ]
+      : [display];
+  const polyline = buildRoadPolyline(travelVertices);
+  const placeImmediately = segment.mode !== 'extend' || polyline.vertices.length < 2;
+  const elapsedSincePreviousMs =
+    previousTimestampMs != null ? validation.recordedAt - previousTimestampMs : null;
+
+  const point: PlaybackTrackPoint = {
+    t: new Date(validation.recordedAt).toISOString(),
+    positionId: event.positionId,
+    lat: display.latitude,
+    lng: display.longitude,
+    rawLat: event.rawLatitude,
+    rawLng: event.rawLongitude,
+    matched: matchedSource !== 'NONE',
+    mapMatched: matchedSource !== 'NONE',
+    accuracyMeters: event.accuracyMeters,
+    speed: validation.speedKmh,
+    speedKmh: validation.speedKmh,
+    distanceKm: event.tripDistanceKm,
+    course: heading,
+    ignition: event.ignition,
+    gpsValid: event.gpsValid,
+    gapBefore: validation.gapBefore,
+  };
+  const points = newTrip ? [point] : [...previousState.points, point];
+
+  const nextAcceptedPoint: PreviousAcceptedLivePoint = {
+    timestampMs: validation.recordedAt,
+    recordedAt: validation.recordedAt,
+    // A held fix keeps the previous RAW anchor. Promoting the drifted reading
+    // would let a parked vehicle walk one drift radius per fix.
+    raw: validation.held && previousPoint ? previousPoint.raw : validation.raw,
+    // The marker HAS moved by the time this returns, so the anchor's drawn
+    // position is this fix's display coordinate - not the previous one, which
+    // is what the two-frame pipeline had to record because the marker was still
+    // waiting on a second frame.
+    display,
+    bearing: heading,
+    course: heading,
+    speedKmh: validation.speedKmh,
+    ignition: event.ignition,
+  };
+
+  traceGps('matched', event.deviceId, {
+    stage: 'resolved_position_applied',
+    positionId: event.positionId,
+    raw: traceCoord(event.rawLatitude, event.rawLongitude),
+    validated: traceCoord(validation.validated.latitude, validation.validated.longitude),
+    matched: traceCoord(event.matchedLatitude, event.matchedLongitude),
+    previousDisplay: previousDisplay
+      ? traceCoord(previousDisplay.latitude, previousDisplay.longitude)
+      : null,
+    display: traceCoord(display.latitude, display.longitude),
+    rawToDisplayMeters: distanceBetween(
+      { latitude: event.rawLatitude, longitude: event.rawLongitude },
+      display
+    ),
+    previousToDisplayMeters: previousDisplay ? distanceBetween(previousDisplay, display) : 0,
+    matchedSource,
+    matchStatus: event.matchStatus,
+    confidence: event.matchConfidence,
+    roadBearing: event.roadBearing,
+    displayBearing: heading,
+    geometryVertices: event.matchedGeometry.length,
+    routeSource: segment.source,
+    routeMode: segment.mode,
+    routeAppendedVertices: segment.vertices.length,
+    breakReason: segment.breakReason,
+    gpsTime: validation.recordedAt,
+    renderLagMs: now - validation.recordedAt,
+  });
+
+  return {
+    ...previousState,
+    connected: true,
+    lastEventAt: validation.recordedAt,
+    lastReceivedAt: now,
+    lastPositionId: event.positionId ?? previousState.lastPositionId,
+    latest: event,
+    previousAcceptedPoint: nextAcceptedPoint,
+    points: points.length > MAX_LIVE_POINTS ? points.slice(points.length - MAX_LIVE_POINTS) : points,
+    trail,
+    diagnosticTrail,
+    tripStartedAt:
+      backendTripStartedAt ?? (newTrip ? validation.recordedAt : previousState.tripStartedAt),
+    rawPosition: { latitude: event.rawLatitude, longitude: event.rawLongitude },
+    validatedPosition: validation.validated,
+    matchedPosition:
+      event.matchedLatitude != null && event.matchedLongitude != null
+        ? { latitude: event.matchedLatitude, longitude: event.matchedLongitude }
+        : previousState.matchedPosition,
+    displayPosition: display,
+    displayHeading: heading,
+    roadSegment: {
+      positionId: event.positionId,
+      polyline,
+      endHeading: heading,
+      placeImmediately,
+      startedAt: now,
+      durationMs: segmentDurationMs(expectedIntervalMs, elapsedSincePreviousMs),
+    },
+    // Nothing is outstanding: this frame WAS the answer.
+    pendingMatches: [],
+    speedKmh: validation.speedKmh,
+    tripDistanceKm: event.tripDistanceKm,
+    quality: validation.quality,
+    rejectedReason: null,
+    matchStatus,
+    roadMatchPending: false,
+    roadRouteOpen:
+      segment.source === 'carried' ? previousState.roadRouteOpen : segment.source === 'matched',
   };
 }
 

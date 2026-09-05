@@ -475,3 +475,163 @@ test('a state-only refresh changes liveness and never the position', () => {
   assert.equal(after.latest.state, 'STOPPED');
   assert.equal(after.rejectedReason, null, 'a status change is not a GPS fault');
 });
+
+
+// --------------------------------------------- one authoritative frame per fix
+
+/**
+ * One POSITION frame as a current backend sends it: the fix is already
+ * validated, matched and resolved to a display coordinate, so there is no
+ * second frame and nothing to correct afterwards.
+ */
+function resolvedFrame({
+  positionId,
+  raw,
+  display,
+  matched = display,
+  geometry = [],
+  source = 'SOLVED',
+  status = 'MATCHED',
+  confidence = 0.92,
+  bearing = 0,
+  atMs,
+  speedKmh = 40,
+}) {
+  return {
+    ...positionFrame({ positionId, coordinate: raw, atMs, speedKmh }),
+    rawLatitude: raw.latitude,
+    rawLongitude: raw.longitude,
+    matchedLatitude: matched ? matched.latitude : null,
+    matchedLongitude: matched ? matched.longitude : null,
+    displayLatitude: display.latitude,
+    displayLongitude: display.longitude,
+    displayBearing: bearing,
+    roadBearing: bearing,
+    matchConfidence: matched ? confidence : null,
+    matchedSource: source,
+    matchedGeometry: geometry.map((vertex) => [vertex.latitude, vertex.longitude]),
+    matchStatus: status,
+  };
+}
+
+test('a resolved frame draws the display coordinate, never the raw one', () => {
+  const state = applyLiveEvent(
+    EMPTY_LIVE_STATE,
+    resolvedFrame({
+      positionId: 201,
+      raw: at(0, 0),
+      display: at(0, 8),
+      atMs: T0,
+    }),
+    T0
+  );
+
+  assert.deepEqual(state.displayPosition, at(0, 8), 'the marker is on the road');
+  assert.deepEqual(state.rawPosition, at(0, 0), 'the raw fix is kept for diagnostics');
+  assert.equal(state.pendingMatches.length, 0, 'nothing is outstanding');
+  assert.equal(state.roadMatchPending, false);
+  assert.equal(state.matchStatus, 'MATCHED');
+});
+
+test('a moving vehicle is never drawn at a raw coordinate, on any frame', () => {
+  const frames = [
+    resolvedFrame({ positionId: 301, raw: at(0, 0), display: at(0, 8), atMs: T0 }),
+    resolvedFrame({
+      positionId: 302,
+      raw: at(20, 0),
+      display: at(20, 8),
+      geometry: [at(0, 8), at(20, 8)],
+      atMs: T0 + 1_000,
+    }),
+    resolvedFrame({
+      positionId: 303,
+      raw: at(40, 0),
+      display: at(40, 8),
+      geometry: [at(20, 8), at(40, 8)],
+      atMs: T0 + 2_000,
+    }),
+  ];
+
+  let state = EMPTY_LIVE_STATE;
+  for (const frame of frames) {
+    state = applyLiveEvent(state, frame, Date.parse(frame.lastGpsTime));
+    assert.equal(
+      state.displayPosition.longitude,
+      frame.displayLatitude === null ? null : frame.displayLongitude,
+      'the drawn position is this frame’s display coordinate'
+    );
+    assert.notEqual(
+      state.displayPosition.longitude,
+      frame.rawLongitude,
+      'and never its raw coordinate'
+    );
+  }
+
+  const vertices = state.trail.reduce((total, run) => total + run.vertices.length, 0);
+  assert.ok(vertices >= 2, 'the route was extended from the road geometry');
+});
+
+test('a HELD frame keeps the marker on its road and appends no route', () => {
+  let state = applyLiveEvent(
+    EMPTY_LIVE_STATE,
+    resolvedFrame({
+      positionId: 401,
+      raw: at(0, 0),
+      display: at(0, 8),
+      geometry: [],
+      atMs: T0,
+    }),
+    T0
+  );
+  const drawn = state.displayPosition;
+  const verticesBefore = state.trail.reduce((total, run) => total + run.vertices.length, 0);
+
+  // The backend could not solve this fix, so it kept the previous road position
+  // and said so. It reports no matched coordinate for THIS fix.
+  state = applyLiveEvent(
+    state,
+    resolvedFrame({
+      positionId: 402,
+      raw: at(12, 0),
+      display: at(0, 8),
+      matched: null,
+      source: 'HELD',
+      atMs: T0 + 1_000,
+    }),
+    T0 + 1_000
+  );
+
+  assert.deepEqual(state.displayPosition, drawn, 'the vehicle stays on its road');
+  assert.equal(
+    state.trail.reduce((total, run) => total + run.vertices.length, 0),
+    verticesBefore,
+    'no road was travelled, so none is invented'
+  );
+});
+
+test('the road geometry between two display positions is what the route draws', () => {
+  let state = applyLiveEvent(
+    EMPTY_LIVE_STATE,
+    resolvedFrame({ positionId: 501, raw: at(0, 0), display: at(0, 0), atMs: T0 }),
+    T0
+  );
+  state = applyLiveEvent(
+    state,
+    resolvedFrame({
+      positionId: 502,
+      raw: at(30, 30),
+      display: at(30, 30),
+      // An L around a corner, which is what a road does and a chord does not.
+      geometry: [at(0, 0), at(30, 0), at(30, 30)],
+      atMs: T0 + 2_000,
+    }),
+    T0 + 2_000
+  );
+
+  const drawn = state.trail.flatMap((run) => run.vertices);
+  assert.ok(
+    drawn.some((vertex) => Math.abs(vertex.latitude - at(30, 0).latitude) < 1e-9
+      && Math.abs(vertex.longitude - at(30, 0).longitude) < 1e-9),
+    'the corner vertex is on the drawn route, so the line follows the road'
+  );
+});
