@@ -17,7 +17,7 @@
  *     lies between its ends.
  */
 
-import { coordinateOf, type LatLng } from '@/src/services/gpsPipeline';
+import { coordinateOf, GPS_LIMITS, type LatLng } from '@/src/services/gpsPipeline';
 import { buildPlaybackTrack } from '@/src/services/playbackEngine';
 import type {
   MapMatchStatus,
@@ -299,15 +299,83 @@ function metresBetween(
 }
 
 /** Nearest vertex at or after `fromIndex`, so assignments stay monotonic. */
+/**
+ * Metres of road a fix may sit ahead of the previous fix's vertex.
+ *
+ * A vehicle cannot have driven further than the pipeline's one speed ceiling
+ * allows in the time between two fixes, so that is the bound. The floor stops a
+ * one-second cadence from pinning the search to a single vertex, and a fix on
+ * the far side of a coverage gap earns a proportionally huge budget - which is
+ * correct, because after a real silence it genuinely could be anywhere on the run.
+ */
+const MIN_SNAP_ADVANCE_METERS = 60;
+/** How far into a run's own geometry that run's FIRST fix may sit. */
+const RUN_START_SNAP_WINDOW_METERS = 150;
+
+function snapAdvanceBudgetMeters(
+  previousIso: string | undefined,
+  currentIso: string
+): number {
+  if (previousIso == null) return RUN_START_SNAP_WINDOW_METERS;
+  const from = Date.parse(previousIso);
+  const to = Date.parse(currentIso);
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) {
+    return MIN_SNAP_ADVANCE_METERS;
+  }
+  return Math.max(
+    MIN_SNAP_ADVANCE_METERS,
+    ((to - from) / 1000) * (GPS_LIMITS.maxSpeedKph / 3.6)
+  );
+}
+
+/**
+ * The road vertex a fix sits on, searched forward from the previous fix's vertex.
+ *
+ * <h3>Why the scan is bounded</h3>
+ * This used to scan to the END of the run and keep the globally nearest vertex.
+ * On a CLOSED LOOP - a delivery round that returns to where it started - the
+ * tail vertices are back at the start, metres from the first fix. A second fix
+ * taken while the vehicle was still parked was therefore nearer to the end of
+ * the loop than to its own neighbourhood, so it snapped there; `searchFrom`
+ * jumped with it and pinned every later fix to the tail.
+ *
+ * The visible result was the whole reported bug at its worst: the marker raced
+ * the entire 2.5 km of road in the few seconds between those first two fixes,
+ * then sat frozen at the finish for the remaining eight minutes, while the
+ * distance readout - which reads the backend's measured travel and so was never
+ * fooled - stayed at 0.00 km throughout.
+ *
+ * Bounding the scan by how far the vehicle could actually have driven since the
+ * previous fix makes that snap impossible without rejecting any real movement:
+ * the budget is computed from {@link GPS_LIMITS.maxSpeedKph}, which no vehicle
+ * on this network exceeds.
+ */
 function nearestVertexIndex(
   coordinates: readonly Coordinate[],
   latitude: number,
   longitude: number,
-  fromIndex: number
+  fromIndex: number,
+  maxAdvanceMeters: number
 ): number {
-  let bestIndex = Math.min(Math.max(fromIndex, 0), coordinates.length - 1);
+  const start = Math.min(Math.max(fromIndex, 0), coordinates.length - 1);
+  let bestIndex = start;
   let bestDistance = Number.POSITIVE_INFINITY;
-  for (let index = bestIndex; index < coordinates.length; index += 1) {
+  let advancedMeters = 0;
+  for (let index = start; index < coordinates.length; index += 1) {
+    if (index > start) {
+      const previous = coordinates[index - 1];
+      const current = coordinates[index];
+      advancedMeters += metresBetween(
+        previous.latitude,
+        previous.longitude,
+        current.latitude,
+        current.longitude
+      );
+      // The budget is a TRAVEL bound, so it is spent in metres of road rather
+      // than in vertices: a dense curve and a long straight have to reach the
+      // same distance before the scan stops.
+      if (advancedMeters > maxAdvanceMeters) break;
+    }
     const vertex = coordinates[index];
     const distance = metresBetween(latitude, longitude, vertex.latitude, vertex.longitude);
     if (distance < bestDistance) {
@@ -388,7 +456,10 @@ export function buildRoadFollowingPoints(
         run.coordinates,
         coordinate.latitude,
         coordinate.longitude,
-        searchFrom
+        searchFrom,
+        // The first fix of a run has no predecessor inside this geometry, so it
+        // gets a plain window rather than a travel budget.
+        snapAdvanceBudgetMeters(index === from ? undefined : points[index - 1]?.t, point.t)
       );
       vertexIndexFor.push(vertexIndex);
       searchFrom = vertexIndex;

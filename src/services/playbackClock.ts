@@ -1,42 +1,73 @@
 /**
- * Converts a recorded GPS duration into a usable wall-clock playback duration.
+ * The playback clock: the recorded timeline advanced against the wall clock.
  *
- * The old implementation forced every route into 30 seconds. Its first fix
- * still compressed the recorded clock by 30x, so even the UI's slow 0.5x mode
- * moved at 15x real time. On an ordinary city trip that makes the marker skip
- * whole junctions between frames and makes a correctly matched road look like
- * a bad route.
+ * A speed chip is a literal multiple of real time. `1x` means one recorded
+ * second per wall-clock second, so the marker crosses the map at exactly the
+ * speed the vehicle drove and the km/h readout under it is the truth about the
+ * marker as well as about the recording. `2x` is twice that, `0.5x` is half.
  *
- * Standard playback now advances four recorded seconds per wall-clock second.
- * The speed chips remain useful (0.5x = a relaxed 2x recorded clock, 4x = a
- * quick 16x scan), while the normal setting leaves enough frames for curves,
- * stops and bearing changes to be visible. Very short and multi-day ranges are
- * still bounded, but the bounds are intentionally much less aggressive.
+ * <h3>Why the compression was removed</h3>
+ * This module used to squeeze the recorded timeline BEFORE the chip was applied
+ * — four recorded seconds per wall second, then clamped into a wall-clock
+ * duration between two and sixty minutes. Because the clamps are what actually
+ * decided the rate on most trips, the factor depended on how long the trip
+ * happened to be, and one chip therefore meant a different speed on every trip:
+ *
+ *   - an 8-minute city trip: `0.5x` ran at 2x real time;
+ *   - a 90-second errand: the two-minute floor made `0.5x` run at 0.375x;
+ *   - a week-long range: the sixty-minute ceiling made `1x` run at 168x, so the
+ *     marker jumped whole junctions between frames.
+ *
+ * That is the whole of "playback goes fast and the timer is wrong": the vehicle
+ * outran its own speed readout, and the elapsed clock advanced several recorded
+ * minutes per wall-clock minute. Nothing scales the timeline now. The chip is
+ * the entire rate, so the elapsed readout and the wall clock agree at `1x` and
+ * stay in a stated ratio at every other chip.
  */
-export const PLAYBACK_TIME_COMPRESSION = 4;
-export const MIN_PLAYBACK_WALL_MS = 2 * 60_000;
-export const MAX_PLAYBACK_WALL_MS = 60 * 60_000;
 
-export function playbackWallDurationMs(recordedDurationMs: number): number {
-  if (!Number.isFinite(recordedDurationMs) || recordedDurationMs <= 0) {
-    return MIN_PLAYBACK_WALL_MS;
-  }
-  return Math.min(
-    MAX_PLAYBACK_WALL_MS,
-    Math.max(MIN_PLAYBACK_WALL_MS, recordedDurationMs / PLAYBACK_TIME_COMPRESSION)
-  );
+/** Recorded milliseconds advanced per wall-clock millisecond at the `1x` chip. */
+export const PLAYBACK_RATE_AT_1X = 1;
+
+/** Wall-clock milliseconds a recording of this length takes to play at `speed`. */
+export function playbackWallDurationMs(recordedDurationMs: number, speed = 1): number {
+  if (!Number.isFinite(recordedDurationMs) || recordedDurationMs <= 0) return 0;
+  const rate = normalizedSpeed(speed);
+  return recordedDurationMs / (PLAYBACK_RATE_AT_1X * rate);
 }
 
-/** Recorded milliseconds advanced for one wall-clock frame. */
+/**
+ * A speed chip reduced to a usable multiplier.
+ *
+ * A non-finite or non-positive speed would either freeze the playhead or drive
+ * it backwards past the clamp in {@link advancePlaybackElapsed}, so it falls
+ * back to real time rather than to a stalled screen.
+ */
+function normalizedSpeed(speed: number): number {
+  return Number.isFinite(speed) && speed > 0 ? speed : 1;
+}
+
+/**
+ * The playhead moved forward by a stretch of wall-clock time.
+ *
+ * Deliberately expressed against an ANCHOR rather than as a per-frame
+ * accumulation: pass the elapsed value and the wall-clock milliseconds since it
+ * was taken, and the result is exact no matter how many frames were dropped in
+ * between. Summing clamped frame deltas instead loses every millisecond a slow
+ * frame overran by, which on this screen — it re-renders a map and re-clips a
+ * polyline per frame — silently ran playback behind real time.
+ */
 export function advancePlaybackElapsed(
   elapsedMs: number,
-  frameDeltaMs: number,
+  wallDeltaMs: number,
   recordedDurationMs: number,
   speed: number
 ): number {
-  const duration = Math.max(0, recordedDurationMs);
-  if (duration === 0) return 0;
-  const wallDuration = playbackWallDurationMs(duration);
-  const rate = duration / wallDuration;
-  return Math.min(duration, Math.max(0, elapsedMs) + Math.max(0, frameDeltaMs) * rate * speed);
+  // `Math.max(0, NaN)` is NaN, so a non-finite duration has to be refused
+  // explicitly. It used not to be, and the NaN propagated into the progress
+  // fraction, out to the scrubber's `width` and on to the marker's coordinate.
+  if (!Number.isFinite(recordedDurationMs) || recordedDurationMs <= 0) return 0;
+  const duration = recordedDurationMs;
+  const from = Math.min(duration, Math.max(0, elapsedMs));
+  const delta = Math.max(0, wallDeltaMs) * PLAYBACK_RATE_AT_1X * normalizedSpeed(speed);
+  return Math.min(duration, from + delta);
 }

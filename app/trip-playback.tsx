@@ -62,7 +62,42 @@ import {
   todayStr,
 } from '@/src/services/localDates';
 
+/**
+ * Playback speed chips, as literal multiples of real time.
+ *
+ * `1x` is the recording's own clock: the marker takes as long to drive the
+ * route as the vehicle did, so it moves at the km/h shown beside it. See
+ * `playbackClock.ts` for why nothing compresses the timeline before these apply.
+ */
 const SPEEDS = [0.5, 1, 2, 4] as const;
+/**
+ * How often the playhead is published to React (~25/s).
+ *
+ * The clock itself runs per frame; this only throttles the re-render, because
+ * publishing drives the map, the travelled polyline and the readouts.
+ */
+const UI_PUBLISH_INTERVAL_MS = 40;
+
+/**
+ * A position on the recorded timeline as a clock readout.
+ *
+ * The Elapsed stat used to be built from a floating-point count of minutes:
+ * `Math.floor(m)` minutes and `Math.floor((m % 1) * 60)` seconds. Past an hour
+ * that printed "83:20" for one hour twenty-three, and the seconds drifted
+ * against the minutes because both were floors of the same float. Formatting
+ * from whole milliseconds keeps the two halves consistent and lets an hour roll
+ * over.
+ */
+function formatClock(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor((Number.isFinite(ms) ? ms : 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const paddedSeconds = String(seconds).padStart(2, '0');
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, '0')}:${paddedSeconds}`
+    : `${minutes}:${paddedSeconds}`;
+}
 const ROUTE_BLUE = '#1473E6';
 const ROUTE_BLUE_AURA = 'rgba(45, 174, 255, 0.30)';
 /**
@@ -298,6 +333,18 @@ export default function TripPlaybackScreen() {
   const [ui, setUi] = useState(0); // throttled progress for UI (0..1)
 
   const progressRef = useRef(0);
+  /**
+   * Where the playhead was, and the wall-clock instant it was there.
+   *
+   * Playback is measured from this anchor rather than accumulated frame by
+   * frame. A dropped or overlong frame then costs nothing: the next frame still
+   * computes the elapsed value the wall clock says it should be at. It is
+   * cleared (and re-taken) whenever the playhead is moved by something other
+   * than time — a seek, a restart, a pause, the app leaving the foreground — and
+   * re-taken automatically when the speed chip changes, so a chip change resumes
+   * from the current position instead of re-scaling the time already played.
+   */
+  const clockAnchorRef = useRef<{ wallMs: number; elapsedMs: number; speed: number } | null>(null);
   const playingRef = useRef(playing);
   const speedRef = useRef<number>(speed);
   const trackWidth = useRef(0);
@@ -332,18 +379,28 @@ export default function TripPlaybackScreen() {
    */
   useEffect(() => {
     progressRef.current = 0;
+    clockAnchorRef.current = null;
     setUi(0);
     setPlaying(false);
   }, [hasTrack, activeFromDate, activeToDate]);
 
-  // Real trip duration (for the clock readout) and event tick fractions.
+  /**
+   * The single recorded duration every part of this screen divides by.
+   *
+   * `ui` is a fraction of it, {@link sampleAt} is indexed by it and the Elapsed
+   * readout is measured against it. The clock readout used to divide by its own
+   * separately-floored number instead, so on a degenerate track it reported a
+   * time the marker was not standing at.
+   */
+  const playbackDurationMs = Math.max(1, track.totalDurationMs);
+
+  // Absolute recorded window, so event ticks land on the same timeline the
+  // scrubber and the playhead share.
   const timing = useMemo(() => {
-    if (points.length < 2) return { start: 0, end: 1, durationMin: 0 };
+    if (points.length < 2) return { start: 0, end: 1 };
     const firstPointTime = points[0]?.t ? new Date(points[0].t).getTime() : 0;
     const start = Number.isFinite(firstPointTime) && firstPointTime > 0 ? firstPointTime : Date.now();
-    const duration = Math.max(1000, track.totalDurationMs || (points.length * 2000));
-    const end = start + duration;
-    return { start, end, durationMin: Math.max(0, (end - start) / 60000) };
+    return { start, end: start + Math.max(1, track.totalDurationMs) };
   }, [points, track.totalDurationMs]);
 
   const eventTicks = useMemo(() => {
@@ -367,7 +424,11 @@ export default function TripPlaybackScreen() {
     let raf: number;
     let cancelled = false;
     let lastUi = 0;
-    let last = Date.now();
+    let lastPublished = -1;
+    // A re-run means the thing the anchor was measured against changed - a new
+    // recording, a new duration, the app returning to the foreground - so the
+    // stored elapsed value no longer refers to this timeline and is dropped.
+    clockAnchorRef.current = null;
     const tick = () => {
       // Re-scheduling FIRST and cancelling on the way out is what guarantees a
       // single loop: the effect owns exactly one handle, and a re-run (speed,
@@ -377,24 +438,42 @@ export default function TripPlaybackScreen() {
       if (cancelled || !screenMountedRef.current) return;
       raf = requestAnimationFrame(tick);
       const now = Date.now();
-      const frameDeltaMs = Math.min(50, now - last);
-      last = now;
       if (appActive && playingRef.current && points.length >= 2) {
-        const durationMs = Math.max(1, track.totalDurationMs);
+        // Re-anchor when there is no anchor (play, seek, restart, foreground)
+        // or when the chip changed, so the new rate applies from here on rather
+        // than retroactively to time already played.
+        const anchor =
+          clockAnchorRef.current && clockAnchorRef.current.speed === speedRef.current
+            ? clockAnchorRef.current
+            : (clockAnchorRef.current = {
+                wallMs: now,
+                elapsedMs: progressRef.current * playbackDurationMs,
+                speed: speedRef.current,
+              });
         const nextElapsedMs = advancePlaybackElapsed(
-          progressRef.current * durationMs,
-          frameDeltaMs,
-          durationMs,
-          speedRef.current
+          anchor.elapsedMs,
+          now - anchor.wallMs,
+          playbackDurationMs,
+          anchor.speed
         );
-        progressRef.current = nextElapsedMs / durationMs;
+        progressRef.current = nextElapsedMs / playbackDurationMs;
         if (progressRef.current >= 1) {
           progressRef.current = 1;
+          clockAnchorRef.current = null;
           setPlaying(false);
         }
+      } else {
+        // Paused, backgrounded or trackless: the next frame that plays takes a
+        // fresh anchor, so a pause never lets wall-clock time accumulate into
+        // the playhead.
+        clockAnchorRef.current = null;
       }
-      if (now - lastUi > 40) {
+      // Only publish a position that actually moved. `setUi` re-renders the map,
+      // which re-clips the travelled polyline, and it used to run 25 times a
+      // second while paused for a value that could not have changed.
+      if (now - lastUi > UI_PUBLISH_INTERVAL_MS && progressRef.current !== lastPublished) {
         lastUi = now;
+        lastPublished = progressRef.current;
         setUi(progressRef.current);
       }
     };
@@ -403,7 +482,7 @@ export default function TripPlaybackScreen() {
       cancelled = true;
       cancelAnimationFrame(raf);
     };
-  }, [appActive, points.length, track.totalDurationMs]);
+  }, [appActive, playbackDurationMs, points.length]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
@@ -415,6 +494,10 @@ export default function TripPlaybackScreen() {
   const seek = (frac: number) => {
     const clamped = Math.max(0, Math.min(1, frac));
     progressRef.current = clamped;
+    // The anchor describes a playhead that is no longer where it was, so it is
+    // dropped: keeping it would snap the marker straight back to the scrubbed-
+    // from position on the very next frame.
+    clockAnchorRef.current = null;
     setUi(clamped);
   };
 
@@ -468,6 +551,7 @@ export default function TripPlaybackScreen() {
     setActiveToDate(draftToDate);
     setShowFilterModal(false);
     progressRef.current = 0;
+    clockAnchorRef.current = null;
     setUi(0);
   }, [draftFromDate, draftToDate, haptic, isInvalidRange]);
 
@@ -479,6 +563,7 @@ export default function TripPlaybackScreen() {
     setActiveToDate(today);
     setShowFilterModal(false);
     progressRef.current = 0;
+    clockAnchorRef.current = null;
     setUi(0);
   }, [haptic, today]);
 
@@ -507,10 +592,23 @@ export default function TripPlaybackScreen() {
     return <Center onBack={goBack} text="No vehicle selected." />;
   }
 
-  const currentSample = hasTrack ? sampleAt(track, ui * track.totalDurationMs) : null;
+  const currentSample = hasTrack ? sampleAt(track, ui * playbackDurationMs) : null;
   const curSpeed = Math.round(currentSample?.speed ?? 0);
-  const elapsedMin = hasTrack ? timing.durationMin * ui : 0;
+  const elapsedMs = hasTrack ? ui * playbackDurationMs : 0;
   const coveredDistanceKm = currentSample?.distanceKm ?? 0;
+  /**
+   * Share of the ROUTE covered, not of the timeline.
+   *
+   * This stat sits between the elapsed clock and the distance readout, and it
+   * used to be the timeline position — which is how "39%" came to sit next to
+   * "0.7 km" on a 2.5 km trip. Both numbers were right about different things,
+   * and together they read as a broken readout. The timeline's own position is
+   * already drawn, continuously, by the scrubber directly below.
+   */
+  const coveredPercent =
+    hasTrack && track.totalDistanceKm > 0
+      ? Math.min(100, Math.round((coveredDistanceKm / track.totalDistanceKm) * 100))
+      : 0;
   // Totals belong to the backend's validated GPS sequence. Measuring the
   // rendered road geometry or the simplified client track inflates distance
   // and can shift durations around stops.
@@ -708,8 +806,8 @@ export default function TripPlaybackScreen() {
             <Text style={styles.speedUnit}>km/h</Text>
           </View>
           <View style={styles.statPair}>
-            <Stat label="Elapsed" value={`${Math.floor(elapsedMin)}:${String(Math.floor((elapsedMin % 1) * 60)).padStart(2, '0')}`} />
-            <Stat label="Covered" value={`${Math.round(ui * 100)}%`} />
+            <Stat label={hasTrack ? `of ${formatClock(playbackDurationMs)}` : 'Elapsed'} value={formatClock(elapsedMs)} />
+            <Stat label="Covered" value={`${coveredPercent}%`} />
             <Stat label="Distance" value={`${coveredDistanceKm.toFixed(1)} km`} />
           </View>
         </View>

@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   buildPlaybackTrack,
+  haversineKm,
   routeSegments,
   sampleAt,
   travelledRouteSegments,
@@ -278,5 +279,81 @@ test('a stationary cluster does not become route geometry', () => {
     Math.round(track.totalDistanceKm * 1000),
     0,
     'a parked phone must never accumulate travelled distance'
+  );
+});
+
+test('a closed loop does not teleport the marker to the finish on the second fix', () => {
+  // THIRU's route, reduced: a rectangular loop that ends where it began, with
+  // the trip starting while the vehicle is still parked and drifting by metres.
+  //
+  // `nearestVertexIndex` used to scan to the end of the run and keep the
+  // globally nearest vertex. On a loop the tail vertices sit back at the start,
+  // so the second parked fix was nearer to the END of the loop than to its own
+  // neighbourhood: it snapped there, the monotonic `searchFrom` followed, and
+  // every later fix pinned to the tail. Playback then raced the whole loop in
+  // the seconds between the first two fixes and froze at the finish for the
+  // rest of the trip - while the distance readout, which reads the backend's
+  // measured travel, correctly stayed at zero the whole time.
+  const side = 0.004;
+  const corners = [
+    [BASE_LAT, BASE_LNG],
+    [BASE_LAT + side, BASE_LNG],
+    [BASE_LAT + side, BASE_LNG + side],
+    [BASE_LAT, BASE_LNG + side],
+    // Closes a few metres from where it opened, as matched road geometry does:
+    // the two carriageway vertices are near each other but never identical.
+    [BASE_LAT - 0.00003, BASE_LNG],
+  ];
+  const path = [];
+  for (let edge = 0; edge < corners.length - 1; edge += 1) {
+    const [fromLat, fromLng] = corners[edge];
+    const [toLat, toLng] = corners[edge + 1];
+    for (let step = 0; step < 25; step += 1) {
+      const fraction = step / 25;
+      path.push([
+        fromLat + (toLat - fromLat) * fraction,
+        fromLng + (toLng - fromLng) * fraction,
+      ]);
+    }
+  }
+  path.push(corners[corners.length - 1]);
+
+  // Fixes: two taken while parked at the start, then one per corner.
+  const fixes = [
+    point(0, { lat: BASE_LAT, lng: BASE_LNG, speed: 3 }),
+    // Still parked, drifted three metres - which puts it NEARER the loop's
+    // closing vertex than its opening one.
+    point(1, { lat: BASE_LAT - 0.00004, lng: BASE_LNG, speed: 4 }),
+    point(2, { lat: BASE_LAT + side, lng: BASE_LNG }),
+    point(3, { lat: BASE_LAT + side, lng: BASE_LNG + side }),
+    point(4, { lat: BASE_LAT, lng: BASE_LNG + side }),
+    point(5, { lat: BASE_LAT, lng: BASE_LNG }),
+  ];
+
+  const { track } = openPlayback({
+    points: fixes,
+    matchStatus: 'MATCHED',
+    matchConfidence: 0.9,
+    route: [{ path, matched: true, confidence: 0.9, fromIndex: 0, toIndex: fixes.length - 1 }],
+  });
+
+  // One recorded interval after the start the vehicle is still parked, so the
+  // marker must still be at the start - not most of a lap away.
+  const oneStepIn = sampleAt(track, track.totalDurationMs / (fixes.length - 1));
+  const strayedMeters =
+    haversineKm(BASE_LAT, BASE_LNG, oneStepIn.latitude, oneStepIn.longitude) * 1000;
+  assert.ok(
+    strayedMeters < 120,
+    `the parked second fix put the marker ${Math.round(strayedMeters)} m away`
+  );
+
+  // And the loop still replays as a loop: the marker has to actually reach the
+  // far corner rather than being pinned to the tail from the second fix on.
+  const midway = sampleAt(track, track.totalDurationMs / 2);
+  const reachedFarCorner =
+    haversineKm(BASE_LAT + side, BASE_LNG + side, midway.latitude, midway.longitude) * 1000;
+  assert.ok(
+    reachedFarCorner < 400,
+    `midway through the loop the marker was ${Math.round(reachedFarCorner)} m from the far corner`
   );
 });

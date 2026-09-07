@@ -3,44 +3,74 @@ import test from 'node:test';
 
 import {
   advancePlaybackElapsed,
-  MAX_PLAYBACK_WALL_MS,
-  MIN_PLAYBACK_WALL_MS,
+  PLAYBACK_RATE_AT_1X,
   playbackWallDurationMs,
 } from './playbackClock.ts';
 
-test('short routes never flash by in less than two minutes', () => {
-  // Anything under eight recorded minutes compresses below the floor, so the
-  // floor is what it gets. A ninety-second errand played back in twenty-two
-  // seconds is unreadable, which is the whole reason the floor exists.
-  assert.equal(playbackWallDurationMs(90_000), MIN_PLAYBACK_WALL_MS);
-  assert.equal(playbackWallDurationMs(8 * 60_000), MIN_PLAYBACK_WALL_MS);
+test('1x is real time: the marker takes as long as the vehicle did', () => {
+  assert.equal(PLAYBACK_RATE_AT_1X, 1);
+  const recorded = (8 * 60 + 1) * 1_000; // the THIRU trip: 2.5 km in 8m 01s
+  assert.equal(playbackWallDurationMs(recorded, 1), recorded);
+  assert.equal(advancePlaybackElapsed(0, 1_000, recorded, 1), 1_000);
 });
 
-test('a route long enough to clear the floor keeps its own proportional timing', () => {
-  // Ten recorded minutes is past the floor: 4x compression, not the clamp.
-  assert.equal(playbackWallDurationMs(10 * 60_000), 150_000);
+test('a chip is a literal multiple of real time', () => {
+  const recorded = 60 * 60_000;
+  assert.equal(advancePlaybackElapsed(0, 1_000, recorded, 0.5), 500);
+  assert.equal(advancePlaybackElapsed(0, 1_000, recorded, 2), 2_000);
+  assert.equal(advancePlaybackElapsed(0, 1_000, recorded, 4), 4_000);
+  assert.equal(playbackWallDurationMs(recorded, 2), 30 * 60_000);
+  assert.equal(playbackWallDurationMs(recorded, 4), 15 * 60_000);
 });
 
-test('ordinary routes retain proportional recorded timing', () => {
-  assert.equal(playbackWallDurationMs(60 * 60_000), 15 * 60_000);
+test('the chip means the same thing however long the recording is', () => {
+  // The old clock's two-minute floor and sixty-minute ceiling made the rate a
+  // function of trip length: 0.5x ran at 2x real time on an eight-minute trip
+  // and at 84x on a week-long range. One wall second is now one recorded second
+  // at 1x on every one of them.
+  for (const recorded of [90_000, 8 * 60_000, 60 * 60_000, 48 * 60 * 60_000]) {
+    assert.equal(advancePlaybackElapsed(0, 1_000, recorded, 1), 1_000);
+    assert.equal(playbackWallDurationMs(recorded, 1), recorded);
+  }
 });
 
-test('very long ranges stay bounded', () => {
-  assert.equal(playbackWallDurationMs(48 * 60 * 60_000), MAX_PLAYBACK_WALL_MS);
+test('the slow chip is genuinely slower than real time', () => {
+  // The reported bug in one line: the screenshot sat on 0.5x while the vehicle
+  // crossed the map at 2x, because compression was applied before the chip.
+  const recorded = (8 * 60 + 1) * 1_000;
+  assert.equal(advancePlaybackElapsed(0, 10_000, recorded, 0.5), 5_000);
 });
 
-test('frame advancement is monotonic, speed-aware, and capped', () => {
-  const duration = 60 * 60_000;
-  const first = advancePlaybackElapsed(0, 1_000, duration, 1);
-  const faster = advancePlaybackElapsed(0, 1_000, duration, 2);
-  assert.equal(first, 4_000, 'normal playback advances four recorded seconds per wall second');
-  assert.equal(faster, first * 2);
-  assert.equal(advancePlaybackElapsed(duration - 1, 1_000, duration, 8), duration);
+test('the playhead is anchored, so a dropped frame costs no time', () => {
+  const recorded = 10 * 60_000;
+  // One 900 ms stall resolves to exactly the elapsed value the wall clock says,
+  // where summing 50 ms-clamped frame deltas would have lost 850 ms of it.
+  assert.equal(advancePlaybackElapsed(0, 900, recorded, 1), 900);
+  // Anchored advancement equals the same span taken in one step.
+  const inOneStep = advancePlaybackElapsed(0, 3_000, recorded, 2);
+  const viaAnchor = advancePlaybackElapsed(
+    advancePlaybackElapsed(0, 1_000, recorded, 2),
+    2_000,
+    recorded,
+    2
+  );
+  assert.equal(viaAnchor, inOneStep);
 });
 
-test('the device trip no longer races even in the slow mode', () => {
-  const recorded = (32 * 60 + 37) * 1_000;
-  const afterTenSeconds = advancePlaybackElapsed(0, 10_000, recorded, 0.5);
-  assert.equal(afterTenSeconds, 20_000);
-  assert.equal(playbackWallDurationMs(recorded), recorded / 4);
+test('the playhead is monotonic and never runs past the recording', () => {
+  const recorded = 60 * 60_000;
+  assert.equal(advancePlaybackElapsed(recorded - 1, 1_000, recorded, 4), recorded);
+  assert.equal(advancePlaybackElapsed(recorded + 5_000, 1_000, recorded, 1), recorded);
+  assert.equal(advancePlaybackElapsed(-5_000, 0, recorded, 1), 0);
+  assert.equal(advancePlaybackElapsed(1_000, -500, recorded, 1), 1_000);
+});
+
+test('a degenerate duration or speed cannot stall or reverse playback', () => {
+  assert.equal(advancePlaybackElapsed(0, 1_000, 0, 1), 0);
+  assert.equal(advancePlaybackElapsed(0, 1_000, Number.NaN, 1), 0);
+  assert.equal(playbackWallDurationMs(0, 1), 0);
+  assert.equal(playbackWallDurationMs(Number.NaN, 1), 0);
+  // A missing or nonsensical chip falls back to real time rather than freezing.
+  assert.equal(advancePlaybackElapsed(0, 1_000, 60_000, 0), 1_000);
+  assert.equal(advancePlaybackElapsed(0, 1_000, 60_000, Number.NaN), 1_000);
 });
