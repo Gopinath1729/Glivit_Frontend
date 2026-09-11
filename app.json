@@ -19,6 +19,7 @@
     "android": {
       "package": "com.vehiclemoment.tracker",
       "versionCode": 1,
+      "softwareKeyboardLayoutMode": "resize",
       "adaptiveIcon": {
         "backgroundColor": "#0B161E",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -40,8 +41,8 @@
       [
         "expo-splash-screen",
         {
-          "image": "./assets/images/splash-icon.png",
-          "imageWidth": 145,
+          "image": "./assets/images/glivt-wordmark-cropped.png",
+          "imageWidth": 230,
           "resizeMode": "contain",
           "backgroundColor": "#0B161E",
           "dark": {

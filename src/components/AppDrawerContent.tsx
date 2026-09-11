@@ -18,8 +18,6 @@ type DrawerRoute =
   | '/geofences'
   | '/reports'
   | '/management'
-  | '/users'
-  | '/manage-tenants'
   | '/settings';
 
 type DrawerLink = {
@@ -32,15 +30,12 @@ type DrawerLink = {
 
 const LINKS: DrawerLink[] = [
   { label: 'Live Map', icon: 'map-marker-radius-outline', route: '/map', permission: P.VIEW_ALL_VEHICLES },
-  { label: 'All Vehicles', icon: 'car', route: '/vehicles', permission: P.VIEW_ALL_VEHICLES },
+  { label: 'Vehicles', icon: 'car', route: '/vehicles', permission: P.VIEW_ALL_VEHICLES },
   { label: 'Geofences', icon: 'vector-polygon', route: '/geofences', permission: P.MANAGE_GEOFENCES, module: 'geofences' },
   { label: 'Reports', icon: 'file-chart-outline', route: '/reports', permission: P.VIEW_REPORTS, module: 'reports' },
-  { label: 'Management', icon: 'shield-account-outline', route: '/management', permission: P.MANAGE_DEVICES },
-];
-
-const ADMIN_LINKS: DrawerLink[] = [
-  { label: 'User Management', icon: 'account-group-outline', route: '/users', permission: P.MANAGE_USERS },
-  { label: 'Tenant Management', icon: 'office-building-cog-outline', route: '/manage-tenants', permission: P.MANAGE_TENANTS },
+  // Devices moved onto the Vehicles screen, so this entry is gated on what it
+  // actually still contains: member management.
+  { label: 'Management', icon: 'shield-account-outline', route: '/management', permission: P.MANAGE_USERS },
 ];
 
 function HeaderBackground() {
@@ -51,8 +46,8 @@ function HeaderBackground() {
       <Svg height="100%" preserveAspectRatio="none" viewBox="0 0 300 200" width="100%">
         <Defs>
           <LinearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
-            <Stop offset="0%" stopColor="#0B8043" stopOpacity={0.35} />
-            <Stop offset="100%" stopColor="#066935" stopOpacity={0.35} />
+            <Stop offset="0%" stopColor="#1B66C9" stopOpacity={0.35} />
+            <Stop offset="100%" stopColor="#174EA6" stopOpacity={0.35} />
           </LinearGradient>
         </Defs>
         <Rect fill="url(#bgGrad)" height="200" width="300" x="0" y="0" />
@@ -93,14 +88,12 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
   const canReports = useHasPermission(P.VIEW_REPORTS);
   const canManageDevices = useHasPermission(P.MANAGE_DEVICES);
   const canManageUsers = useHasPermission(P.MANAGE_USERS) || isAdmin;
-  const canManageTenants = useHasPermission(P.MANAGE_TENANTS) || isSuperAdmin;
   const permissionMap: Record<string, boolean> = { [P.VIEW_ALL_VEHICLES]: canViewAll };
   permissionMap[P.VIEW_LIVE_LOCATION] = canLive;
   permissionMap[P.MANAGE_GEOFENCES] = canGeofence;
   permissionMap[P.VIEW_REPORTS] = canReports;
   permissionMap[P.MANAGE_DEVICES] = canManageDevices;
   permissionMap[P.MANAGE_USERS] = canManageUsers;
-  permissionMap[P.MANAGE_TENANTS] = canManageTenants;
   const enabledModules = new Set((tenant?.enabledModules ?? []).map((m) => m.toLowerCase()));
 
   const activeRouteName = props.state.routeNames[props.state.index];
@@ -126,8 +119,6 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
   const companySublabel = activeCompanyName ?? user?.companyName ?? tenant?.name ?? 'Fleet management';
   const tenantCodeLabel = activeTenantCode ?? companyCode ?? '—';
   const roleLabel = formatRole(user?.role) || 'Admin';
-
-  const adminVisible = visible(ADMIN_LINKS);
 
   return (
     <View style={styles.root}>
@@ -182,21 +173,6 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
           />
         ))}
 
-        {adminVisible.length > 0 ? (
-          <>
-            <View style={styles.divider} />
-            <Text style={styles.sectionHeading}>ADMINISTRATION</Text>
-            {adminVisible.map((link) => (
-              <DrawerRow
-                active={activeRouteName === routeKey(link.route)}
-                icon={link.icon}
-                key={link.route}
-                label={link.label}
-                onPress={() => go(link.route)}
-              />
-            ))}
-          </>
-        ) : null}
       </ScrollView>
     </View>
   );
@@ -390,7 +366,7 @@ const makeStyles = (c: ThemeColors) =>
     },
     rowActive: {
       backgroundColor: c.accentSoft,
-      borderColor: 'rgba(34, 197, 94, 0.3)',
+      borderColor: 'rgba(26, 115, 232, 0.3)',
     },
     rowLabel: {
       flex: 1,

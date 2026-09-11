@@ -3,6 +3,10 @@ import { useCallback, useEffect, useMemo, useRef, useState, type MutableRefObjec
 import { normalizeHeading } from '@/src/services/geoMath';
 import { GpsRollingWindow } from '@/src/services/gpsPipeline';
 import { traceCoord, traceGps } from '@/src/services/gpsDiagnostics';
+import {
+  isHeldMatchedSource,
+  type LiveMatchedSource,
+} from '@/src/services/liveRouteTrail';
 import { useAppDispatch, useAppSelector } from '@/src/store/hooks';
 import { liveVehiclesSeeded, livePositionReceived } from '@/src/store/liveVehiclesState';
 import type { DeviceSummary } from '@/src/types/api';
@@ -67,6 +71,10 @@ export type FleetTarget = {
   rawLongitude: number;
   /** True when latitude/longitude came from the road matcher. */
   matched: boolean;
+  /** Road vertices for this accepted fix only, in backend [lat, lng] order. */
+  matchedGeometry: [number, number][];
+  /** Whether this fix has a fresh road solution, a carried point, or no match. */
+  matchedSource: LiveMatchedSource | null;
   /**
    * Identity of the fix this target came from.
    *
@@ -105,6 +113,13 @@ export type FleetLive = {
 };
 
 const MOVING_STATES = new Set(['RUNNING', 'MOVING']);
+/**
+ * How long accepted frames are allowed to pile up before React is invalidated.
+ *
+ * Positions are written to the target map immediately regardless; this only
+ * decides how often the screens that read them re-render.
+ */
+const RENDER_COALESCE_MS = 200;
 /** Below this the vehicle is parked and its coordinate is held, not followed. */
 
 function usable(latitude: number | null | undefined, longitude: number | null | undefined): boolean {
@@ -143,6 +158,8 @@ function seedTarget(device: DeviceSummary): FleetTarget | null {
     rawLatitude: latitude,
     rawLongitude: longitude,
     matched: false,
+    matchedGeometry: [],
+    matchedSource: null,
     // A seeded target has no live fix behind it yet, so no road answer may be
     // applied to it. The first POSITION frame supplies the identity.
     positionId: null,
@@ -164,12 +181,50 @@ export function useFleetLivePositions(seed: DeviceSummary[], enabled = true): Fl
   const targetsRef = useRef<Map<number, FleetTarget>>(new Map());
   const [vehicleCount, setVehicleCount] = useState(0);
 
+  /**
+   * Coalesced render invalidation.
+   *
+   * Every accepted frame used to call `setVehicleCount` directly, so a fleet of
+   * N vehicles reporting once a second re-rendered the whole Live Map N times a
+   * second - and that screen recomputes its located set, its live set, its
+   * status counts and its entire marker payload on every render. With a few
+   * dozen trackers the JS thread never came back up for air, which is the whole
+   * of "the live map lags and hangs".
+   *
+   * The targets themselves are still written the instant a frame lands - the
+   * map's animation loop reads the ref directly and so stays perfectly current.
+   * Only the React invalidation is batched, at a rate no eye can tell apart
+   * from per-frame, and one that no longer scales with fleet size.
+   */
+  const bumpPendingRef = useRef(false);
+  const bumpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const bumpVersion = useCallback(() => {
+    if (bumpPendingRef.current) return;
+    bumpPendingRef.current = true;
+    bumpTimerRef.current = setTimeout(() => {
+      bumpPendingRef.current = false;
+      bumpTimerRef.current = null;
+      setVehicleCount((count) => count + 1);
+    }, RENDER_COALESCE_MS);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (bumpTimerRef.current) clearTimeout(bumpTimerRef.current);
+      bumpPendingRef.current = false;
+    },
+    []
+  );
+
   // A tenant switch clears the marker map itself, not just the subscription. The
   // animation loop reads this ref directly, so leaving the previous tenant's
   // targets in place would keep their vehicles on the map until the new list
   // arrived. This is the ONLY thing in this hook that removes a target.
   useEffect(() => {
     targetsRef.current.clear();
+    if (bumpTimerRef.current) clearTimeout(bumpTimerRef.current);
+    bumpTimerRef.current = null;
+    bumpPendingRef.current = false;
     setVehicleCount(0);
   }, [tenantEpoch]);
 
@@ -222,7 +277,7 @@ export function useFleetLivePositions(seed: DeviceSummary[], enabled = true): Fl
         if (previous && event.state) {
           previous.state = event.state;
           previous.moving = MOVING_STATES.has(event.state);
-          setVehicleCount((count) => count + 1);
+          bumpVersion();
         }
         dispatch(livePositionReceived(event));
         return;
@@ -267,18 +322,40 @@ export function useFleetLivePositions(seed: DeviceSummary[], enabled = true): Fl
       const authoritative = usable(event.displayLatitude, event.displayLongitude)
         ? { latitude: event.displayLatitude as number, longitude: event.displayLongitude as number }
         : null;
+      const retained = isHeldMatchedSource(event.matchedSource);
+      const stationaryHeld = event.matchedSource === 'HELD_STATIONARY';
       const matched = authoritative ? event.matchedSource !== 'NONE' : validation.isMatched;
-      const latitude = authoritative ? authoritative.latitude : validation.matched.latitude;
-      const longitude = authoritative ? authoritative.longitude : validation.matched.longitude;
-      const state = event.state ?? previous?.state ?? 'NO_DATA';
-      const rawLatitude = validation.held && previous ? previous.rawLatitude : event.latitude;
-      const rawLongitude = validation.held && previous ? previous.rawLongitude : event.longitude;
+      // Defense in depth: a retained source is a command to keep the prior
+      // pixels, not merely a hint about matching confidence. This prevents an
+      // old or partially-deployed backend from moving a frozen marker with a
+      // mismatched display field.
+      const latitude = retained && previous
+        ? previous.latitude
+        : authoritative
+          ? authoritative.latitude
+          : validation.matched.latitude;
+      const longitude = retained && previous
+        ? previous.longitude
+        : authoritative
+          ? authoritative.longitude
+          : validation.matched.longitude;
+      const state = stationaryHeld
+        ? event.state === 'IDLE' ? 'IDLE' : 'STOPPED'
+        : event.state ?? previous?.state ?? 'NO_DATA';
+      const rawLatitude = (validation.held || retained) && previous
+        ? previous.rawLatitude
+        : event.latitude;
+      const rawLongitude = (validation.held || retained) && previous
+        ? previous.rawLongitude
+        : event.longitude;
 
-      windowFor(event.deviceId).push(
-        { latitude: rawLatitude, longitude: rawLongitude },
-        validation.recordedAt,
-        validation.speedKmh
-      );
+      if (!stationaryHeld) {
+        windowFor(event.deviceId).push(
+          { latitude: rawLatitude, longitude: rawLongitude },
+          validation.recordedAt,
+          validation.speedKmh
+        );
+      }
 
       map.set(event.deviceId, {
         deviceId: event.deviceId,
@@ -287,8 +364,12 @@ export function useFleetLivePositions(seed: DeviceSummary[], enabled = true): Fl
         rawLatitude,
         rawLongitude,
         matched,
+        matchedGeometry: retained ? [] : event.matchedGeometry,
+        matchedSource: event.matchedSource,
         positionId: event.positionId,
-        speedKmh: Number.isFinite(event.speedKmh) ? event.speedKmh : previous?.speedKmh ?? 0,
+        speedKmh: stationaryHeld
+          ? 0
+          : Number.isFinite(event.speedKmh) ? event.speedKmh : previous?.speedKmh ?? 0,
         accuracyMeters: event.accuracyMeters,
         ignition: event.ignition,
         gpsValid: event.gpsValid,
@@ -305,11 +386,13 @@ export function useFleetLivePositions(seed: DeviceSummary[], enabled = true): Fl
         // rate-limited so the model turns rather than snapping. Falling back to
         // the local one keeps an older backend working.
         heading:
-          event.displayBearing != null && Number.isFinite(event.displayBearing)
+          retained && previous
+            ? previous.heading
+            : event.displayBearing != null && Number.isFinite(event.displayBearing)
             ? event.displayBearing
             : validation.course,
         state,
-        moving: MOVING_STATES.has(state),
+        moving: stationaryHeld ? false : MOVING_STATES.has(state),
         updatedAt: Date.now(),
         sourceTime: validation.recordedAt,
       });
@@ -323,9 +406,9 @@ export function useFleetLivePositions(seed: DeviceSummary[], enabled = true): Fl
         connectionState: event.connectionState,
       });
 
-      setVehicleCount((count) => count + 1);
+      bumpVersion();
     },
-    [dispatch]
+    [bumpVersion, dispatch]
   );
 
   /**
@@ -351,6 +434,8 @@ export function useFleetLivePositions(seed: DeviceSummary[], enabled = true): Fl
     target.latitude = event.matchedLatitude as number;
     target.longitude = event.matchedLongitude as number;
     target.matched = true;
+    target.matchedGeometry = event.matchedGeometry;
+    target.matchedSource = event.matchedSource;
     target.updatedAt = Date.now();
     traceGps('matched', event.deviceId, {
       stage: 'fleet_road_match',
@@ -359,8 +444,8 @@ export function useFleetLivePositions(seed: DeviceSummary[], enabled = true): Fl
       raw: traceCoord(target.rawLatitude, target.rawLongitude),
       matchStatus: event.matchStatus,
     });
-    setVehicleCount((count) => count + 1);
-  }, []);
+    bumpVersion();
+  }, [bumpVersion]);
 
   const stream = useLivePositionStream(onPosition, onRoadMatch, enabled);
 

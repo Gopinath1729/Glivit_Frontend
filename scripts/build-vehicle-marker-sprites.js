@@ -12,11 +12,6 @@
  * car. Handing the marker a finished PNG through `image` skips rasterisation
  * completely, so the vehicle always shows in full.
  *
- * The status colour therefore has to be baked in. Every state gets a halo of
- * its own colour hugging the car's silhouette -- an outline rather than a
- * badge, so it stays correct at any heading once the marker rotates with the
- * map.
- *
  * Effects work on a scalar alpha mask rather than on RGBA pixels: blurring
  * straight-alpha colour bleeds the untouched RGB of transparent pixels, which
  * is what fringes a coloured glow. Run with:
@@ -31,45 +26,34 @@ const SRC = path.join(ROOT, 'assets/markers/car-marker-photorealistic-v4-map-tri
 const OUT_DIR = path.join(ROOT, 'assets/markers/vehicle');
 
 /**
- * Mirrors CENTRALIZED_STATUS_COLORS in src/theme/tokens.ts, so a marker and the
- * legend dot for the same state are the same colour.
- *
- * The three offline states are all slate, and at marker size their haloes are
- * hard to tell apart from each other or from the car's own paint. They get the
- * vehicle itself drained of colour as well -- a greyed-out car reads as "not
- * reporting" at a glance, which no ring around a full-colour car does.
+ * Offline states drain colour from the vehicle itself. Status rings, dots and
+ * coloured silhouette haloes are intentionally absent so the road remains the
+ * visual focus and the marker never resembles a second location badge.
  */
-const STATE_COLORS = {
-  running: { color: '#22C55E', muted: false },
-  idle: { color: '#F59E0B', muted: false },
-  stopped: { color: '#EF4444', muted: false },
-  inactive: { color: '#94A3B8', muted: true },
-  no_data: { color: '#475569', muted: true },
-  expired: { color: '#334155', muted: true },
+const STATES = {
+  running: { muted: false },
+  idle: { muted: false },
+  stopped: { muted: false },
+  inactive: { muted: true },
+  no_data: { muted: true },
+  expired: { muted: true },
 };
 
 /**
  * Density-independent geometry, in dp. `canvas` has to clear the car's diagonal
- * plus the halo so a rotated sprite never clips its own edge; `car` is the
+ * plus its contact shadow so a rotated sprite never clips its own edge; `car` is the
  * drawn height of the vehicle itself.
  */
 const VARIANTS = {
-  normal: { canvas: 60, car: 44, ring: 0 },
-  selected: { canvas: 74, car: 54, ring: 2.5 },
+  normal: { canvas: 60, car: 44 },
+  // Selection is expressed by the larger vehicle itself. Circular rings and
+  // badges obscure the road and can look like a second location marker.
+  selected: { canvas: 74, car: 54 },
 };
 
 const SCALES = [1, 2, 3];
 const CAR_ASPECT = 115 / 262;
 const SHADOW_RGB = [10, 18, 30];
-
-function hexToRgb(hex) {
-  const v = hex.replace('#', '');
-  return [
-    parseInt(v.slice(0, 2), 16),
-    parseInt(v.slice(2, 4), 16),
-    parseInt(v.slice(4, 6), 16),
-  ];
-}
 
 /** Drains colour and brightness from a sprite, marking a vehicle as offline. */
 function desaturate(img, amount, brightness) {
@@ -97,34 +81,6 @@ function maskFrom(img, size, ox, oy) {
     }
   }
   return mask;
-}
-
-/** Separable max filter -- grows the silhouette by `r` pixels in every direction. */
-function dilate(mask, size, r) {
-  if (r <= 0) return mask;
-  const pass = new Float32Array(size * size);
-  const out = new Float32Array(size * size);
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      let m = 0;
-      for (let k = Math.max(0, x - r); k <= Math.min(size - 1, x + r); k += 1) {
-        const v = mask[y * size + k];
-        if (v > m) m = v;
-      }
-      pass[y * size + x] = m;
-    }
-  }
-  for (let x = 0; x < size; x += 1) {
-    for (let y = 0; y < size; y += 1) {
-      let m = 0;
-      for (let k = Math.max(0, y - r); k <= Math.min(size - 1, y + r); k += 1) {
-        const v = pass[k * size + x];
-        if (v > m) m = v;
-      }
-      out[y * size + x] = m;
-    }
-  }
-  return out;
 }
 
 /** Separable box blur, run twice so the falloff is smooth rather than linear. */
@@ -192,32 +148,12 @@ function paintMask(img, mask, rgb, opacity) {
   }
 }
 
-/** Antialiased ring plus a faint disc, marking the selected vehicle. */
-function drawRing(img, size, radius, thickness, rgb) {
-  const { data } = img.bitmap;
-  const c = size / 2;
-  const half = thickness / 2;
-  for (let y = 0; y < size; y += 1) {
-    for (let x = 0; x < size; x += 1) {
-      const d = Math.hypot(x + 0.5 - c, y + 0.5 - c);
-      const idx = (y * size + x) * 4;
-      if (d < radius - half) {
-        blend(data, idx, rgb, 0.1);
-        continue;
-      }
-      const alpha = Math.max(0, Math.min(1, half + 0.5 - Math.abs(d - radius)));
-      if (alpha > 0) blend(data, idx, rgb, alpha * 0.95);
-    }
-  }
-}
-
 async function build() {
   const source = await Jimp.read(SRC);
   fs.mkdirSync(OUT_DIR, { recursive: true });
   let count = 0;
 
-  for (const [state, { color, muted }] of Object.entries(STATE_COLORS)) {
-    const rgb = hexToRgb(color);
+  for (const [state, { muted }] of Object.entries(STATES)) {
     for (const [variant, layout] of Object.entries(VARIANTS)) {
       for (const scale of SCALES) {
         const size = Math.round(layout.canvas * scale);
@@ -235,19 +171,6 @@ async function build() {
         // is what lifts a flat top-down render off the map tiles.
         const drop = Math.max(1, Math.round(1.6 * scale));
         paintMask(canvas, blurMask(shiftMask(body, size, drop), size, drop), SHADOW_RGB, 0.4);
-
-        // Status halo: the silhouette grown by a fixed ring of pixels, then
-        // softened. Dilating before blurring keeps the colour tight to the car
-        // instead of fading out from under it.
-        // A slate halo has far less contrast against the map than green or red
-        // does, so the offline states get a wider, fully opaque one.
-        const grow = Math.max(1, Math.round((muted ? 2.1 : 1.7) * scale));
-        const soften = Math.max(1, Math.round(1.5 * scale));
-        paintMask(canvas, blurMask(dilate(body, size, grow), size, soften), rgb, muted ? 1 : 0.86);
-
-        if (layout.ring > 0) {
-          drawRing(canvas, size, size / 2 - layout.ring * scale - 1, layout.ring * scale, rgb);
-        }
 
         canvas.composite(car, carX, carY);
 

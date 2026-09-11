@@ -1,4 +1,8 @@
-import type { PlaybackTrackPoint } from '@/src/types/api';
+import type {
+  PlaybackSegmentType,
+  PlaybackTimelineSegment,
+  PlaybackTrackPoint,
+} from '@/src/types/api';
 
 import { bearingDeg, haversineKm, lerpAngle, normalizeHeading } from '@/src/services/geoMath';
 import { GPS_LIMITS } from '@/src/services/gpsPipeline';
@@ -685,5 +689,52 @@ export function sampleAt(track: PlaybackTrack, elapsedMs: number): PlaybackSampl
     completedPointCount: atEnd ? n : i + 1,
     atEnd,
   };
+}
+
+/** Activity represented by an elapsed point on the backend's truthful clock. */
+export function playbackActivityAt(
+  track: PlaybackTrack,
+  timeline: readonly PlaybackTimelineSegment[],
+  elapsedMs: number
+): PlaybackSegmentType | null {
+  const startMs = Date.parse(track.points[0]?.t ?? '');
+  if (!Number.isFinite(startMs) || timeline.length === 0) return null;
+  const instant = startMs + Math.min(Math.max(elapsedMs, 0), track.totalDurationMs);
+  for (let index = 0; index < timeline.length; index += 1) {
+    const segment = timeline[index];
+    const from = Date.parse(segment.from);
+    const to = Date.parse(segment.to);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) continue;
+    const finalSegment = index === timeline.length - 1;
+    if (instant >= from && (instant < to || (finalSegment && instant <= to))) {
+      return segment.type;
+    }
+  }
+  return null;
+}
+
+/**
+ * Whether playback knows where the vehicle is at this moment.
+ *
+ * A STOP is a known position: the vehicle is exactly where it was last seen,
+ * and hiding it there was wrong. Playback compresses long stops rather than
+ * sitting through them (see `playbackSchedule`), and the whole point of the
+ * hold it does instead is that you can SEE the vehicle standing at the place it
+ * stopped while the card names how long it stayed. A vanished marker reads as
+ * lost signal, which is the one thing a stop is not.
+ *
+ * A telemetry outage is the opposite and still hides the marker: nothing was
+ * recorded, so there is no position to stand at, and drawing one would be
+ * inventing a location and then teleporting it across the gap.
+ */
+export function isPlaybackVehicleVisible(
+  track: PlaybackTrack,
+  timeline: readonly PlaybackTimelineSegment[],
+  elapsedMs: number,
+  sample: PlaybackSample | null = sampleAt(track, elapsedMs)
+): boolean {
+  const activity = playbackActivityAt(track, timeline, elapsedMs);
+  if (activity != null) return activity !== 'NO_DATA';
+  return Boolean(sample && sample.gpsValid && sample.speed >= STATIONARY_SPEED_KPH);
 }
 

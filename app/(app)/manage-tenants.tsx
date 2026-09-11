@@ -2,7 +2,6 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import React from 'react';
 import {
-  Alert,
   FlatList,
   Pressable,
   RefreshControl,
@@ -15,9 +14,11 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { TenantFormModal } from '@/src/components/TenantFormModal';
 import { ManagementCreateButton } from '@/src/components/ui/ManagementPrimitives';
+import { CompactSearchBar } from '@/src/components/ui/CompactSearchBar';
+import { ListPagination } from '@/src/components/ui/ListPagination';
+import { useAppDialog } from '@/src/components/ui/useAppDialog';
 import { EmptyView, ErrorRetryView, LoadingView } from '@/src/components/ui/StateViews';
 import { apiErrorMessage } from '@/src/services/apiError';
-import { useGetUsersQuery } from '@/src/services/operationsApi';
 import { switchActiveTenant } from '@/src/services/tenantSwitch';
 import {
   useCreateTenantMutation,
@@ -40,7 +41,13 @@ import type { TenantCreateRequest, TenantSummary, TenantUpdateRequest } from '@/
  * Manage Tenants screen.
  * Lists available tenants, allows switching active tenant, creating and editing tenants.
  */
+const TENANT_PAGE_SIZE = 10;
+
 export default function ManageTenantsScreen() {
+  return <TenantManagementPanel />;
+}
+
+export function TenantManagementPanel({ embedded = false }: { embedded?: boolean }) {
   const router = useRouter();
   const dispatch = useAppDispatch();
   const { colors: c } = useTheme();
@@ -53,35 +60,30 @@ export default function ManageTenantsScreen() {
   const [formMode, setFormMode] = React.useState<'create' | 'edit' | null>(null);
   const [editing, setEditing] = React.useState<TenantSummary | null>(null);
 
-  const tenants = useGetTenantsQuery({ size: 100 });
+  const [searchInput, setSearchInput] = React.useState('');
+  const [search, setSearch] = React.useState('');
+  const [page, setPage] = React.useState(0);
+  const { confirm, dialogElement, notify } = useAppDialog();
+
+  React.useEffect(() => {
+    const handle = setTimeout(() => {
+      setSearch(searchInput.trim());
+      setPage(0);
+    }, 300);
+    return () => clearTimeout(handle);
+  }, [searchInput]);
+
+  const tenants = useGetTenantsQuery(
+    { page, search: search || undefined, size: TENANT_PAGE_SIZE },
+    { skip: !canManage }
+  );
   const [createTenant, createState] = useCreateTenantMutation();
   const [updateTenant, updateState] = useUpdateTenantMutation();
   const [deleteTenant] = useDeleteTenantMutation();
   const [triggerSwitch] = useSwitchTenantMutation();
-  const adminCandidatesQuery = useGetUsersQuery(
-    { page: 0, size: 100 },
-    { skip: !canManage || formMode !== 'create' }
-  );
-  const adminAssignmentsQuery = useGetTenantsQuery(
-    { page: 0, size: 100 },
-    { skip: !canManage || formMode !== 'create' }
-  );
-
   const rows = tenants.data?.content ?? [];
-  const adminCandidates = React.useMemo(() => {
-    const assignedEmails = new Set(
-      (adminAssignmentsQuery.data?.content ?? [])
-        .map((tenant) => tenant.adminEmail?.trim().toLowerCase())
-        .filter((email): email is string => Boolean(email))
-    );
-    return (adminCandidatesQuery.data?.content ?? []).filter(
-      (member) =>
-        member.status === 'ACTIVE' &&
-        Boolean(member.mobile?.trim()) &&
-        Boolean(member.email?.trim() || member.username?.includes('@')) &&
-        !assignedEmails.has((member.email ?? member.username).trim().toLowerCase())
-    );
-  }, [adminAssignmentsQuery.data?.content, adminCandidatesQuery.data?.content]);
+  const totalTenants = tenants.data?.totalElements ?? rows.length;
+  const totalTenantPages = tenants.data?.totalPages ?? 1;
   const switching = switchState.status === 'switching';
 
   const performSwitch = React.useCallback(
@@ -97,40 +99,38 @@ export default function ManageTenantsScreen() {
       });
 
       if (!outcome.ok) {
-        Alert.alert(
-          'Switch Failed',
-          outcome.message || 'Unable to switch tenant. Please check your credentials.'
-        );
+        notify({
+          message: outcome.message || 'Unable to switch tenant. Please check your credentials.',
+          title: 'Switch failed',
+          tone: 'danger',
+        });
         return;
       }
     },
-    [dispatch, router, triggerSwitch]
+    [dispatch, notify, router, triggerSwitch]
   );
 
   const onConfirmSwitch = React.useCallback(
     (tenant: TenantSummary) => {
       if (tenant.current) return;
       if (tenant.status !== 'ACTIVE') {
-        Alert.alert('Tenant Unavailable', 'Only active tenants can be switched into.');
+        notify({
+          message: 'Only active tenants can be switched into.',
+          title: 'Tenant unavailable',
+          tone: 'info',
+        });
         return;
       }
 
-      Alert.alert(
-        'Switch Company',
-        `Switch active organization to ${tenant.name}? Your current map view will update.`,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Switch',
-            style: 'default',
-            onPress: () => {
-              void performSwitch(tenant);
-            },
-          },
-        ]
-      );
+      confirm({
+        confirmLabel: 'Switch',
+        message: `Switch active organization to ${tenant.name}? Your current map view will update.`,
+        onConfirm: () => performSwitch(tenant),
+        title: 'Switch organization?',
+        tone: 'info',
+      });
     },
-    [performSwitch]
+    [confirm, notify, performSwitch]
   );
 
   const onCreate = async (body: TenantCreateRequest) => {
@@ -138,9 +138,17 @@ export default function ManageTenantsScreen() {
       await createTenant(body).unwrap();
       setFormMode(null);
       setEditing(null);
-      Alert.alert('Tenant Created', `${body.name} has been set up.`);
+      notify({
+        message: `${body.name} is ready and its administrator activation code was emailed.`,
+        title: 'Tenant created',
+        tone: 'success',
+      });
     } catch (error) {
-      Alert.alert('Creation Failed', apiErrorMessage(error, 'Tenant could not be created.'));
+      notify({
+        message: apiErrorMessage(error, 'Tenant could not be created.'),
+        title: 'Tenant not created',
+        tone: 'danger',
+      });
     }
   };
 
@@ -149,39 +157,51 @@ export default function ManageTenantsScreen() {
       await updateTenant({ id, body }).unwrap();
       setFormMode(null);
       setEditing(null);
-      Alert.alert('Tenant Updated', 'The changes have been saved.');
+      notify({
+        message: 'The changes have been saved.',
+        title: 'Tenant updated',
+        tone: 'success',
+      });
     } catch (error) {
-      Alert.alert('Update Failed', apiErrorMessage(error, 'Tenant could not be updated.'));
+      notify({
+        message: apiErrorMessage(error, 'Tenant could not be updated.'),
+        title: 'Tenant not updated',
+        tone: 'danger',
+      });
     }
   };
 
   const onDelete = (tenant: TenantSummary) => {
     if (!tenant.canDelete) {
-      Alert.alert(
-        'Tenant cannot be deleted',
-        tenant.deleteBlockedReason || 'Switch away from this tenant before deleting it.'
-      );
+      notify({
+        message: tenant.deleteBlockedReason || 'Switch away from this tenant before deleting it.',
+        title: 'Tenant cannot be deleted',
+        tone: 'info',
+      });
       return;
     }
-    Alert.alert(
-      'Delete Tenant',
-      `Permanently delete ${tenant.name}? All tracking data and member assignments will be removed.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await deleteTenant({ id: tenant.id, confirmTenantId: tenant.tenantId }).unwrap();
-              Alert.alert('Tenant Deleted', `${tenant.name} was removed.`);
-            } catch (error) {
-              Alert.alert('Delete Failed', apiErrorMessage(error, 'Tenant could not be deleted.'));
-            }
-          },
-        },
-      ]
-    );
+    confirm({
+      confirmLabel: 'Delete',
+      message: `Permanently delete ${tenant.name}? All tracking data and member assignments will be removed.`,
+      onConfirm: async () => {
+        try {
+          await deleteTenant({ id: tenant.id, confirmTenantId: tenant.tenantId }).unwrap();
+          notify({
+            message: `${tenant.name} was removed.`,
+            title: 'Tenant deleted',
+            tone: 'success',
+          });
+        } catch (error) {
+          notify({
+            message: apiErrorMessage(error, 'Tenant could not be deleted.'),
+            title: 'Tenant not deleted',
+            tone: 'danger',
+          });
+        }
+      },
+      title: 'Delete tenant?',
+      tone: 'danger',
+    });
   };
 
   const openDetails = (tenant: TenantSummary) => {
@@ -190,6 +210,20 @@ export default function ManageTenantsScreen() {
       params: { tenantId: String(tenant.id) },
     });
   };
+
+  if (!canManage) {
+    return (
+      <View style={styles.screen}>
+        <View style={styles.denied}>
+          <EmptyView
+            icon="shield-lock-outline"
+            message="Organization controls are reserved for the platform Super Admin."
+            title="Super Admin access required"
+          />
+        </View>
+      </View>
+    );
+  }
 
   if (tenants.isLoading && !tenants.data) {
     return <LoadingView label="Loading tenants…" />;
@@ -206,24 +240,34 @@ export default function ManageTenantsScreen() {
 
   return (
     <View style={styles.screen}>
-      <View style={styles.toolbar}>
+      <View style={[styles.toolbar, embedded && styles.toolbarEmbedded]}>
         <View style={styles.toolbarTop}>
-          <View>
-            <Text style={styles.heading}>Tenant Management</Text>
-            <Text style={styles.subheading}>{rows.length} registered organizations</Text>
+          <View style={styles.headingWrap}>
+            <Text style={styles.heading}>{embedded ? 'Organizations' : 'Tenant Management'}</Text>
+            <Text style={styles.subheading}>
+              {totalTenants} registered organization{totalTenants === 1 ? '' : 's'}
+            </Text>
           </View>
-          {canManage ? (
-            <ManagementCreateButton
-              accessibilityLabel="Create tenant"
-              disabled={switching}
-              onPress={() => {
-                setEditing(null);
-                setFormMode('create');
-              }}
-            />
-          ) : null}
         </View>
 
+        <View style={styles.searchRow}>
+          <View style={styles.searchField}>
+            <CompactSearchBar
+              loading={tenants.isFetching && searchInput.trim() === search}
+              onChangeText={setSearchInput}
+              placeholder="Search organizations"
+              value={searchInput}
+            />
+          </View>
+          <ManagementCreateButton
+            accessibilityLabel="Create tenant"
+            disabled={switching}
+            onPress={() => {
+              setEditing(null);
+              setFormMode('create');
+            }}
+          />
+        </View>
       </View>
 
       <FlatList
@@ -236,8 +280,22 @@ export default function ManageTenantsScreen() {
         ListEmptyComponent={
           <EmptyView
             icon="office-building-outline"
-            message="Add your first tenant to get started"
-            title="No tenants yet"
+            message={
+              search
+                ? `Nothing matches "${search}". Try a different name or code.`
+                : 'Add your first tenant to get started'
+            }
+            title={search ? 'No matching organizations' : 'No tenants yet'}
+          />
+        }
+        ListFooterComponent={
+          <ListPagination
+            itemLabel="organizations"
+            onPageChange={setPage}
+            page={page}
+            pageSize={TENANT_PAGE_SIZE}
+            totalItems={totalTenants}
+            totalPages={totalTenantPages}
           />
         }
         refreshControl={
@@ -264,9 +322,6 @@ export default function ManageTenantsScreen() {
       />
 
       <TenantFormModal
-        adminCandidates={adminCandidates}
-        adminCandidatesError={adminCandidatesQuery.error ? apiErrorMessage(adminCandidatesQuery.error) : undefined}
-        adminCandidatesLoading={adminCandidatesQuery.isLoading}
         existingTenants={rows}
         mode={formMode ?? 'create'}
         onClose={() => {
@@ -279,6 +334,8 @@ export default function ManageTenantsScreen() {
         tenant={editing}
         visible={formMode !== null}
       />
+
+      {dialogElement}
     </View>
   );
 }
@@ -475,6 +532,10 @@ function formatDate(value?: string | null): string {
 const makeStyles = (c: ThemeColors) =>
   StyleSheet.create({
     screen: { backgroundColor: c.pageBackground, flex: 1 },
+    headingWrap: { flex: 1, minWidth: 0 },
+    searchRow: { alignItems: 'center', flexDirection: 'row', gap: 8 },
+    searchField: { flex: 1, minWidth: 0 },
+    denied: { flex: 1, justifyContent: 'center' },
     toolbar: {
       backgroundColor: c.surface,
       borderBottomColor: c.border,
@@ -482,6 +543,7 @@ const makeStyles = (c: ThemeColors) =>
       gap: spacing.sm,
       padding: spacing.md,
     },
+    toolbarEmbedded: { paddingTop: spacing.sm },
     toolbarTop: {
       alignItems: 'center',
       flexDirection: 'row',

@@ -141,7 +141,7 @@ export function MapLayersBottomSheet({
                       </View>
                     ) : active ? (
                       <View style={styles.checkBadge}>
-                        <MaterialCommunityIcons color={c.primaryGreen} name="check-circle" size={18} />
+                        <MaterialCommunityIcons color={c.accent} name="check-circle" size={18} />
                       </View>
                     ) : null}
                   </View>
@@ -224,7 +224,7 @@ const makeStyles = (c: ThemeColors) =>
       width: '100%',
     },
     cardPreviewActive: {
-      borderColor: c.primaryGreen,
+      borderColor: c.accent,
       borderWidth: 2,
     },
     previewImage: {
@@ -245,7 +245,7 @@ const makeStyles = (c: ThemeColors) =>
       textAlign: 'center',
     },
     cardLabelActive: {
-      color: c.primaryGreen,
+      color: c.accent,
       fontWeight: '700',
     },
   });

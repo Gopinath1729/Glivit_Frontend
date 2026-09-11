@@ -1,13 +1,17 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { HeaderHeightContext } from '@react-navigation/elements';
-import { useNavigation, useRouter } from 'expo-router';
+import { useIsFocused } from '@react-navigation/native';
+import * as Linking from 'expo-linking';
+import { useRouter } from 'expo-router';
 import React, { memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Animated,
+  ActivityIndicator,
   type LayoutChangeEvent,
   Platform,
   Pressable,
+  Share,
   StyleSheet,
   Text,
   useWindowDimensions,
@@ -20,14 +24,25 @@ import {
   type FleetWebMapHandle,
   type WebMapGeofence,
   type WebMapMarker,
+  type WebMapNavigationOverlay,
 } from '@/src/components/FleetWebMap';
+import {
+  DirectionsPanel,
+  type DirectionsLocation,
+  type DirectionsPanelStatus,
+} from '@/src/components/DirectionsPanel';
 import { LiveVehicleMapMarker } from '@/src/components/LiveVehicleMapMarker';
+import { NavigationDrivePanel } from '@/src/components/NavigationDrivePanel';
+import { planRoute } from '@/src/services/routePlanner';
+import {
+  NavigationVehiclePicker,
+  type NavigationVehicleOption,
+} from '@/src/components/NavigationVehiclePicker';
 import { VEHICLE_SPRITE_SIZE_SELECTED } from '@/src/components/vehicleMarkerSprites';
 import MapView, { Circle } from '@/src/components/maps/NativeMap';
-import { MapLayersBottomSheet } from '@/src/components/MapLayersBottomSheet';
+import { env } from '@/src/config/env';
 import {
   DEFAULT_MAP_PREFERENCES,
-  loadMapPreferences,
   type MapPreferences,
 } from '@/src/services/mapPreferencesStorage';
 import { useGetAllDevicesQuery, useGetDevicesQuery } from '@/src/services/devicesApi';
@@ -36,17 +51,64 @@ import { useMobileGpsReadiness } from '@/src/services/mobileGpsStatus';
 import { useGetGeofencesQuery } from '@/src/services/operationsApi';
 import { dedupeByVehicle } from '@/src/services/vehicleIdentity';
 import { useFleetLivePositions } from '@/src/services/fleetLivePositions';
-import { getMapStyleInfo, type MapStyleVariant } from '@/src/services/mapStyle';
+import {
+  getMapStyleInfo,
+  PREMIUM_FLEET_MAP_PALETTE,
+} from '@/src/services/mapStyle';
+import { haversineKm } from '@/src/services/geoMath';
+import { safeMatchedGeometry } from '@/src/services/liveRouteTrail';
+import {
+  type NavigationRoute,
+  type SharedTripRequest,
+  useCancelSharedTripMutation,
+  useCompleteSharedTripMutation,
+  useCreateSharedTripMutation,
+  useStartSharedTripMutation,
+  useUpdateSharedTripMutation,
+} from '@/src/services/navigationApi';
+import {
+  createDestinationPassTracker,
+  DESTINATION_PROXIMITY_METERS,
+  observeDestinationPass,
+  projectPositionOnRoute,
+  routeLengthMeters,
+  splitRouteAtProjection,
+  type DestinationPassTracker,
+  type RouteCoordinate,
+} from '@/src/services/navigationProgress';
+import { formatRouteMetrics } from '@/src/services/navigationMetrics';
 import { normalizeHeading } from '@/src/services/vehicleMarkerAssets';
+import { vehicleBodyType } from '@/src/services/vehicleCategory';
 import type { DeviceSummary } from '@/src/types/api';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { hexToRgba, radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
 
+const NAVIGATION_DEVIATION_METERS = 65;
+const NAVIGATION_DEVIATION_SAMPLES = 3;
+const NAVIGATION_ARRIVAL_SAMPLES = 3;
+const NAVIGATION_MAX_ACCURACY_METERS = 50;
+const NAVIGATION_MAX_FIX_AGE_MS = 5 * 60 * 1000;
+const NAVIGATION_REROUTE_RETRY_MS = 2_000;
+
+type RerouteReason = 'off-route' | 'destination-passed';
+
+type NavigationEndpoints = {
+  from: DirectionsLocation;
+  to: DirectionsLocation;
+};
+
 export default function AllVehiclesMapScreen() {
   const router = useRouter();
-  const navigation = useNavigation();
   const insets = useSafeAreaInsets();
-  const { colors: c, stateColors, isDark, autoFollowVehicle } = useTheme();
+  /**
+   * The fleet map is a TAB, so it stays mounted while the operator is on
+   * Vehicles, in a trip playback, or anywhere else. Its document is kept warm
+   * for an instant return, but it stops being fed - otherwise it went on
+   * animating live positions, and running its own camera, underneath whatever
+   * screen was actually on top.
+   */
+  const isFocused = useIsFocused();
+  const { colors: c, stateColors, autoFollowVehicle } = useTheme();
   const styles = useMemo(() => makeStyles(c), [c]);
 
   // The header is transparent and floats over the map, so overlays have to
@@ -67,6 +129,50 @@ export default function AllVehiclesMapScreen() {
   const webMapRef = useRef<FleetWebMapHandle>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [activeLocateId, setActiveLocateId] = useState<number | null>(null);
+  const [showDirections, setShowDirections] = useState(false);
+  const [directionsRoute, setDirectionsRoute] = useState<NavigationRoute | null>(null);
+  const [directionsRoutes, setDirectionsRoutes] = useState<NavigationRoute[]>([]);
+  const [selectedRouteIndex, setSelectedRouteIndex] = useState(0);
+  const [directionsResetKey, setDirectionsResetKey] = useState(0);
+  const [navigationEndpoints, setNavigationEndpoints] = useState<NavigationEndpoints | null>(null);
+  const [navigationStatus, setNavigationStatus] = useState<DirectionsPanelStatus>('preview');
+  const [navigationVehicleId, setNavigationVehicleId] = useState<number | null>(null);
+  const [vehiclePickerOpen, setVehiclePickerOpen] = useState(false);
+  const [navigationRouteId, setNavigationRouteId] = useState('');
+  const [remainingPlannedRoute, setRemainingPlannedRoute] = useState<RouteCoordinate[]>([]);
+  const [completedNavigationRoutes, setCompletedNavigationRoutes] = useState<RouteCoordinate[][]>([]);
+  const [remainingDistanceMeters, setRemainingDistanceMeters] = useState<number | null>(null);
+  const [remainingDurationSeconds, setRemainingDurationSeconds] = useState<number | null>(null);
+  const [navigationFollow, setNavigationFollow] = useState(false);
+  const [navigationMessage, setNavigationMessage] = useState('');
+  const [rerouteReason, setRerouteReason] = useState<RerouteReason | null>(null);
+  const [createSharedTrip, createSharedTripRequest] = useCreateSharedTripMutation();
+  const [updateSharedTrip] = useUpdateSharedTripMutation();
+  const [startSharedTrip] = useStartSharedTripMutation();
+  const [completeSharedTrip] = useCompleteSharedTripMutation();
+  const [cancelSharedTrip] = useCancelSharedTripMutation();
+  const [sharedTripToken, setSharedTripToken] = useState<string | null>(null);
+  const sharedTripTokenRef = useRef<string | null>(null);
+  const updateSharedTripToken = useCallback((token: string | null) => {
+    sharedTripTokenRef.current = token;
+    setSharedTripToken(token);
+  }, []);
+  const activePlannedRouteRef = useRef<RouteCoordinate[]>([]);
+  const progressMetersRef = useRef(0);
+  const offRouteSamplesRef = useRef(0);
+  const arrivalSamplesRef = useRef(0);
+  const lastNavigationFixTimeRef = useRef(0);
+  const lastCompletedPositionIdRef = useRef<number | null>(null);
+  const completedRouteTailRef = useRef<RouteCoordinate | null>(null);
+  const completedRouteOpenRef = useRef(false);
+  const rerouteInFlightRef = useRef(false);
+  const reroutePendingReasonRef = useRef<RerouteReason | null>(null);
+  const rerouteGenerationRef = useRef(0);
+  const lastRerouteAttemptAtRef = useRef(0);
+  const destinationPassTrackerRef = useRef<DestinationPassTracker>(
+    createDestinationPassTracker()
+  );
+  const activeRouteDistanceRef = useRef(0);
 
   const { data, isFetching, refetch } = useGetAllDevicesQuery();
   const listQuery = useGetDevicesQuery({ page: 0, size: 100 });
@@ -176,10 +282,13 @@ export default function AllVehiclesMapScreen() {
 
   useEffect(() => {
     if (selectedId != null && !located.some((device) => device.id === selectedId)) {
+      // The owner-scoped mobile GPS source may not have a roster snapshot yet.
+      // Keep its follow identity stable until its validated SSE target arrives.
+      if (navigationStatus === 'navigating' && navigationVehicleId === selectedId) return;
       setSelectedId(null);
       setActiveLocateId(null);
     }
-  }, [located, selectedId]);
+  }, [located, navigationStatus, navigationVehicleId, selectedId]);
 
   const selectedLive = useMemo(
     () => liveDevices.find((d) => d.id === selectedId) ?? null,
@@ -190,6 +299,641 @@ export default function AllVehiclesMapScreen() {
     () => liveDevices.find((device) => device.id === activeLocateId) ?? null,
     [activeLocateId, liveDevices]
   );
+
+  const revokeSharedTrip = useCallback(async () => {
+    const token = sharedTripTokenRef.current;
+    updateSharedTripToken(null);
+    if (!token) return;
+    await cancelSharedTrip(token).unwrap().catch(() => undefined);
+  }, [cancelSharedTrip, updateSharedTripToken]);
+
+  const applyPreviewRoute = useCallback(
+    (route: NavigationRoute, index: number, endpoints: NavigationEndpoints) => {
+      const coordinates = navigationRouteCoordinates(route);
+      if (coordinates.length < 2) return false;
+
+      activePlannedRouteRef.current = coordinates;
+      progressMetersRef.current = 0;
+      offRouteSamplesRef.current = 0;
+      arrivalSamplesRef.current = 0;
+      destinationPassTrackerRef.current = createDestinationPassTracker();
+      rerouteGenerationRef.current += 1;
+      rerouteInFlightRef.current = false;
+      reroutePendingReasonRef.current = null;
+      lastRerouteAttemptAtRef.current = 0;
+      activeRouteDistanceRef.current = routeLengthMeters(coordinates);
+      completedRouteTailRef.current = null;
+      completedRouteOpenRef.current = false;
+      setDirectionsRoute(route);
+      setSelectedRouteIndex(index);
+      setNavigationEndpoints(endpoints);
+      setNavigationStatus('preview');
+      setNavigationVehicleId(null);
+      setNavigationFollow(false);
+      setNavigationMessage('');
+      setRerouteReason(null);
+      setCompletedNavigationRoutes([]);
+      setRemainingPlannedRoute(coordinates);
+      setRemainingDistanceMeters(route.distanceMeters);
+      setRemainingDurationSeconds(route.durationSeconds);
+      setNavigationRouteId(
+        `${Date.now()}-${index}-${endpoints.from.latitude.toFixed(5)}-${endpoints.to.latitude.toFixed(5)}`
+      );
+      // The complete route should remain visible while it is being reviewed.
+      setActiveLocateId(null);
+      return true;
+    },
+    []
+  );
+
+  const handleRoutesCalculated = useCallback(
+    (routes: NavigationRoute[], from: DirectionsLocation, to: DirectionsLocation) => {
+      const validRoutes = routes
+        .filter((route) => navigationRouteCoordinates(route).length >= 2)
+        .slice(0, 3);
+      if (validRoutes.length === 0) return;
+      setDirectionsRoutes(validRoutes);
+      applyPreviewRoute(validRoutes[0], 0, { from, to });
+    },
+    [applyPreviewRoute]
+  );
+
+  const selectDirectionsRoute = useCallback(
+    (index: number) => {
+      const route = directionsRoutes[index];
+      if (!route || !navigationEndpoints || index === selectedRouteIndex) return;
+      if (!applyPreviewRoute(route, index, navigationEndpoints)) return;
+      const deviceId = navigationVehicleId ?? readiness.deviceId;
+      if (sharedTripToken && deviceId != null) {
+        void updateSharedTrip({
+          token: sharedTripToken,
+          body: sharedTripRequestOf(
+            deviceId, route, navigationEndpoints.to, navigationStatus === 'navigating'
+          ),
+        }).unwrap().catch(() => {
+          updateSharedTripToken(null);
+          setNavigationMessage('Route selected. Share again to create a fresh live link.');
+        });
+      }
+    },
+    [
+      applyPreviewRoute,
+      directionsRoutes,
+      navigationEndpoints,
+      navigationStatus,
+      navigationVehicleId,
+      readiness.deviceId,
+      selectedRouteIndex,
+      sharedTripToken,
+      updateSharedTripToken,
+      updateSharedTrip,
+    ]
+  );
+
+  const clearPreviewRoute = useCallback(() => {
+    activePlannedRouteRef.current = [];
+    progressMetersRef.current = 0;
+    offRouteSamplesRef.current = 0;
+    arrivalSamplesRef.current = 0;
+    destinationPassTrackerRef.current = createDestinationPassTracker();
+    rerouteGenerationRef.current += 1;
+    rerouteInFlightRef.current = false;
+    reroutePendingReasonRef.current = null;
+    lastRerouteAttemptAtRef.current = 0;
+    lastNavigationFixTimeRef.current = 0;
+    lastCompletedPositionIdRef.current = null;
+    completedRouteTailRef.current = null;
+    completedRouteOpenRef.current = false;
+    setDirectionsRoute(null);
+    setDirectionsRoutes([]);
+    setSelectedRouteIndex(0);
+    setNavigationEndpoints(null);
+    setNavigationStatus('preview');
+    setNavigationVehicleId(null);
+    setNavigationFollow(false);
+    setNavigationRouteId('');
+    setRemainingPlannedRoute([]);
+    setCompletedNavigationRoutes([]);
+    setRemainingDistanceMeters(null);
+    setRemainingDurationSeconds(null);
+    setNavigationMessage('');
+    setRerouteReason(null);
+    void revokeSharedTrip();
+  }, [revokeSharedTrip]);
+
+  const planAnotherRoute = useCallback(() => {
+    activePlannedRouteRef.current = [];
+    progressMetersRef.current = 0;
+    offRouteSamplesRef.current = 0;
+    arrivalSamplesRef.current = 0;
+    destinationPassTrackerRef.current = createDestinationPassTracker();
+    rerouteGenerationRef.current += 1;
+    rerouteInFlightRef.current = false;
+    reroutePendingReasonRef.current = null;
+    lastRerouteAttemptAtRef.current = 0;
+    lastNavigationFixTimeRef.current = 0;
+    lastCompletedPositionIdRef.current = null;
+    completedRouteTailRef.current = null;
+    completedRouteOpenRef.current = false;
+    setNavigationStatus('preview');
+    setNavigationVehicleId(null);
+    setNavigationFollow(false);
+    setDirectionsRoute(null);
+    setDirectionsRoutes([]);
+    setSelectedRouteIndex(0);
+    setNavigationEndpoints(null);
+    setNavigationRouteId('');
+    setRemainingPlannedRoute([]);
+    setCompletedNavigationRoutes([]);
+    setRemainingDistanceMeters(null);
+    setRemainingDurationSeconds(null);
+    setNavigationMessage('');
+    setRerouteReason(null);
+    updateSharedTripToken(null);
+  }, [updateSharedTripToken]);
+
+  const startNavigation = useCallback((chosenDeviceId: number | null) => {
+    if (!directionsRoute || !navigationEndpoints) return;
+    const deviceId = chosenDeviceId ?? readiness.deviceId;
+    const target = deviceId == null ? undefined : targetsRef.current.get(deviceId);
+    // Do not reinterpret the snapshot already on screen as a newly travelled
+    // navigation segment. Progress begins with the next accepted SSE fix.
+    lastNavigationFixTimeRef.current = target?.sourceTime ?? 0;
+    lastCompletedPositionIdRef.current = target?.positionId ?? null;
+    completedRouteTailRef.current = null;
+    completedRouteOpenRef.current = false;
+    offRouteSamplesRef.current = 0;
+    arrivalSamplesRef.current = 0;
+    destinationPassTrackerRef.current = createDestinationPassTracker();
+    rerouteGenerationRef.current += 1;
+    rerouteInFlightRef.current = false;
+    reroutePendingReasonRef.current = null;
+    lastRerouteAttemptAtRef.current = 0;
+    progressMetersRef.current = 0;
+    setCompletedNavigationRoutes([]);
+    setRemainingPlannedRoute(activePlannedRouteRef.current);
+    setRemainingDistanceMeters(directionsRoute.distanceMeters);
+    setRemainingDurationSeconds(directionsRoute.durationSeconds);
+    setNavigationVehicleId(deviceId);
+    setNavigationStatus('navigating');
+    setNavigationFollow(true);
+    setRerouteReason(null);
+    setShowDirections(false);
+    if (deviceId != null) {
+      setSelectedId(deviceId);
+      setActiveLocateId(deviceId);
+    }
+    setNavigationMessage(
+      readiness.locationDisabled
+        ? 'Navigation is ready. Enable GPS to receive live position updates.'
+        : deviceId == null
+          ? 'Navigation is ready. Waiting for the registered mobile GPS stream.'
+          : target && target.sourceTime > 0 && Date.now() - target.sourceTime <= NAVIGATION_MAX_FIX_AGE_MS
+        ? 'Following validated live GPS'
+        : 'Waiting for a fresh validated GPS update'
+    );
+    if (sharedTripToken) {
+      void startSharedTrip(sharedTripToken).unwrap().catch(() => {
+        updateSharedTripToken(null);
+        setNavigationMessage('Navigation started. Share again to create a fresh live link.');
+      });
+    }
+  }, [
+    directionsRoute,
+    navigationEndpoints,
+    readiness.deviceId,
+    readiness.locationDisabled,
+    sharedTripToken,
+    startSharedTrip,
+    targetsRef,
+    updateSharedTripToken,
+  ]);
+
+  /**
+   * The fleet, ordered by how close each vehicle is to the route's start.
+   *
+   * Whoever is nearest the pick-up is nearly always the answer, so the list
+   * opens on it rather than on whatever order the roster happened to arrive in.
+   */
+  const navigationVehicleOptions = useMemo<NavigationVehicleOption[]>(() => {
+    const start = navigationEndpoints?.from;
+    return liveDevices
+      .map((device) => ({
+        ...device,
+        metresFromStart: start
+          ? haversineKm(start.latitude, start.longitude, device.latitude, device.longitude) * 1000
+          : -1,
+      }))
+      .sort((a, b) => {
+        if (a.id === readiness.deviceId) return -1;
+        if (b.id === readiness.deviceId) return 1;
+        return a.metresFromStart - b.metresFromStart;
+      });
+  }, [liveDevices, navigationEndpoints?.from, readiness.deviceId]);
+
+  const confirmVehicleAndStart = useCallback(
+    (deviceId: number) => {
+      setVehiclePickerOpen(false);
+      startNavigation(deviceId);
+    },
+    [startNavigation]
+  );
+
+  /**
+   * Start asks who is driving first.
+   *
+   * With exactly one candidate there is no question to ask, so it is not asked.
+   */
+  const requestNavigationStart = useCallback(() => {
+    if (navigationVehicleOptions.length === 1) {
+      startNavigation(navigationVehicleOptions[0].id);
+      return;
+    }
+    if (navigationVehicleOptions.length === 0) {
+      startNavigation(null);
+      return;
+    }
+    setVehiclePickerOpen(true);
+  }, [navigationVehicleOptions, startNavigation]);
+
+  // MobileGpsTrackingGate may finish its owner-scoped bootstrap just after the
+  // route is started. Bind that device as soon as it becomes available; the
+  // user never has to choose a fleet marker and no other tenant/device can be
+  // substituted as the navigation source.
+  useEffect(() => {
+    if (
+      navigationStatus !== 'navigating' ||
+      navigationVehicleId != null ||
+      readiness.deviceId == null
+    ) {
+      return;
+    }
+    const deviceId = readiness.deviceId;
+    const target = targetsRef.current.get(deviceId);
+    lastNavigationFixTimeRef.current = target?.sourceTime ?? 0;
+    lastCompletedPositionIdRef.current = target?.positionId ?? null;
+    setNavigationVehicleId(deviceId);
+    setSelectedId(deviceId);
+    setActiveLocateId(deviceId);
+    setNavigationMessage(
+      readiness.locationDisabled
+        ? 'Navigation is ready. Enable GPS to receive live position updates.'
+        : 'Waiting for a fresh validated GPS update'
+    );
+  }, [
+    navigationStatus,
+    navigationVehicleId,
+    readiness.deviceId,
+    readiness.locationDisabled,
+    targetsRef,
+  ]);
+
+  const rerouteFromPosition = useCallback(
+    async (latitude: number, longitude: number, reason: RerouteReason) => {
+      if (!navigationEndpoints || rerouteInFlightRef.current) return;
+      const requestGeneration = ++rerouteGenerationRef.current;
+      const destination = navigationEndpoints.to;
+      rerouteInFlightRef.current = true;
+      reroutePendingReasonRef.current = reason;
+      lastRerouteAttemptAtRef.current = Date.now();
+      setRerouteReason(reason);
+      setNavigationMessage(
+        reason === 'destination-passed'
+          ? 'Destination passed. Rerouting…'
+          : 'Route deviation confirmed. Rerouting…'
+      );
+
+      // Remove the previous plan before requesting its replacement. A stale
+      // route and stale ETA must not remain visible during a pending reroute.
+      activePlannedRouteRef.current = [];
+      activeRouteDistanceRef.current = 0;
+      progressMetersRef.current = 0;
+      offRouteSamplesRef.current = 0;
+      arrivalSamplesRef.current = 0;
+      setDirectionsRoutes([]);
+      setRemainingPlannedRoute([]);
+      setRemainingDistanceMeters(null);
+      setRemainingDurationSeconds(null);
+      setNavigationRouteId(`${Date.now()}-rerouting-${requestGeneration}`);
+
+      try {
+        // Rerouting uses the same on-device planner as the original route.
+        // Leaving this on the old keyed service would have meant a wrong turn
+        // silently falling back to the provider the rest of the screen no
+        // longer uses - and failing wherever that provider is unavailable.
+        const planned = await planRoute({
+          from: { latitude, longitude },
+          to: { latitude: destination.latitude, longitude: destination.longitude },
+        });
+        const nextRoute = {
+          distanceMeters: planned.distanceMeters,
+          durationSeconds: planned.durationSeconds,
+          coordinates: planned.coordinates,
+        };
+        const coordinates = navigationRouteCoordinates(nextRoute);
+        if (coordinates.length < 2) throw new Error('No route geometry');
+        if (requestGeneration !== rerouteGenerationRef.current) return;
+
+        // Replace, never append, the remaining provider route. The completed
+        // journey remains composed exclusively of accepted road-match runs.
+        activePlannedRouteRef.current = coordinates;
+        progressMetersRef.current = 0;
+        activeRouteDistanceRef.current = routeLengthMeters(coordinates);
+        reroutePendingReasonRef.current = null;
+        setDirectionsRoute(nextRoute);
+        setDirectionsRoutes([nextRoute]);
+        setSelectedRouteIndex(0);
+        setNavigationEndpoints((current) =>
+          current
+            ? {
+                ...current,
+                from: {
+                  ...current.from,
+                  id: `live-position-${requestGeneration}`,
+                  name: 'Latest vehicle position',
+                  formatted: 'Latest vehicle position',
+                  latitude,
+                  longitude,
+                  source: 'device',
+                },
+              }
+            : current
+        );
+        setRemainingPlannedRoute(coordinates);
+        setRemainingDistanceMeters(nextRoute.distanceMeters);
+        setRemainingDurationSeconds(nextRoute.durationSeconds);
+        setNavigationRouteId(`${Date.now()}-reroute-${requestGeneration}`);
+        setRerouteReason(null);
+        setNavigationMessage('Route updated from the latest validated vehicle location');
+        if (sharedTripToken && navigationVehicleId != null) {
+          void updateSharedTrip({
+            token: sharedTripToken,
+            body: sharedTripRequestOf(
+              navigationVehicleId, nextRoute, destination, true
+            ),
+          }).unwrap().catch(() => {
+            updateSharedTripToken(null);
+            setNavigationMessage('Route updated. Share again to create a fresh live link.');
+          });
+        }
+      } catch {
+        if (requestGeneration !== rerouteGenerationRef.current) return;
+        // Keep the stale route removed. The next trusted fix retries from its
+        // newer coordinate while retaining the original destination.
+        setNavigationMessage('Unable to reroute yet. Retrying from the latest validated position.');
+      } finally {
+        if (requestGeneration === rerouteGenerationRef.current) {
+          offRouteSamplesRef.current = 0;
+          rerouteInFlightRef.current = false;
+        }
+      }
+    },
+    [
+      navigationEndpoints,
+      navigationVehicleId,
+      sharedTripToken,
+      updateSharedTripToken,
+      updateSharedTrip,
+    ]
+  );
+
+  useEffect(() => {
+    if (
+      navigationStatus !== 'navigating' ||
+      navigationVehicleId == null ||
+      !navigationEndpoints ||
+      !directionsRoute
+    ) {
+      return;
+    }
+    const target = targetsRef.current.get(navigationVehicleId);
+    if (!target) return;
+
+    const trustedTarget =
+      target.gpsValid &&
+      target.sourceTime > 0 &&
+      Date.now() - target.sourceTime <= NAVIGATION_MAX_FIX_AGE_MS &&
+      (target.accuracyMeters == null ||
+        (Number.isFinite(target.accuracyMeters) &&
+          target.accuracyMeters <= NAVIGATION_MAX_ACCURACY_METERS)) &&
+      Number.isFinite(target.latitude) &&
+      Number.isFinite(target.longitude) &&
+      Math.abs(target.latitude) <= 90 &&
+      Math.abs(target.longitude) <= 180 &&
+      !(target.latitude === 0 && target.longitude === 0);
+
+    // Preserve only real backend road geometry as the completed journey. This
+    // sits before the timestamp guard because an older backend may enrich an
+    // already-seen POSITION with a ROAD_MATCH frame carrying the same GPS time.
+    if (
+      trustedTarget &&
+      target.positionId != null &&
+      target.positionId !== lastCompletedPositionIdRef.current
+    ) {
+      const previousTail = completedRouteOpenRef.current
+        ? completedRouteTailRef.current
+        : null;
+      const geometry = safeMatchedGeometry(
+        target.matchedGeometry,
+        previousTail
+          ? { latitude: previousTail[1], longitude: previousTail[0] }
+          : null,
+        { latitude: target.latitude, longitude: target.longitude },
+        previousTail == null
+      ).map(
+        ({ latitude, longitude }) => [longitude, latitude] as RouteCoordinate
+      );
+      if (geometry.length >= 2) {
+        // Mark the fix complete only once its road geometry is present. An
+        // older two-stage backend may first publish POSITION with no geometry,
+        // then enrich that same positionId with ROAD_MATCH.
+        lastCompletedPositionIdRef.current = target.positionId;
+        const startNewRun = previousTail == null;
+        completedRouteTailRef.current = geometry[geometry.length - 1];
+        completedRouteOpenRef.current = true;
+        setCompletedNavigationRoutes((runs) =>
+          appendCompletedRouteRun(runs, geometry, startNewRun)
+        );
+      } else if (target.matchedSource != null) {
+        // No accepted road answer for this physical stretch. Close the run so
+        // a later match cannot draw a chord across the unobserved gap. A null
+        // source is the legacy two-stage backend's still-pending POSITION and
+        // stays open until its ROAD_MATCH enrichment arrives.
+        completedRouteOpenRef.current = false;
+      }
+    }
+
+    if (target.sourceTime <= lastNavigationFixTimeRef.current) return;
+    lastNavigationFixTimeRef.current = target.sourceTime;
+
+    // This is intentionally stricter than merely having numbers. The fleet
+    // stream already rejected duplicates, out-of-order packets, impossible
+    // jumps and stationary drift; navigation additionally refuses stale or
+    // poor-accuracy targets before they can affect progress or arrival.
+    if (!trustedTarget) {
+      setNavigationMessage('Ignored an untrusted GPS update; holding the last valid position');
+      return;
+    }
+
+    const pendingReroute = reroutePendingReasonRef.current;
+    if (pendingReroute) {
+      if (
+        !rerouteInFlightRef.current &&
+        Date.now() - lastRerouteAttemptAtRef.current >= NAVIGATION_REROUTE_RETRY_MS
+      ) {
+        void rerouteFromPosition(target.latitude, target.longitude, pendingReroute);
+      }
+      return;
+    }
+
+    setNavigationMessage('Following validated live GPS');
+
+    const destinationDistance =
+      haversineKm(
+        target.latitude,
+        target.longitude,
+        navigationEndpoints.to.latitude,
+        navigationEndpoints.to.longitude
+      ) * 1000;
+
+    const vehicleIsMoving = target.moving || target.speedKmh >= 2.5;
+    const destinationObservation = observeDestinationPass(
+      destinationPassTrackerRef.current,
+      destinationDistance,
+      vehicleIsMoving
+    );
+    destinationPassTrackerRef.current = destinationObservation.tracker;
+    if (destinationObservation.passed) {
+      arrivalSamplesRef.current = 0;
+      void rerouteFromPosition(
+        target.latitude,
+        target.longitude,
+        'destination-passed'
+      );
+      return;
+    }
+
+    if (
+      destinationDistance <= DESTINATION_PROXIMITY_METERS &&
+      !vehicleIsMoving
+    ) {
+      arrivalSamplesRef.current += 1;
+      if (arrivalSamplesRef.current >= NAVIGATION_ARRIVAL_SAMPLES) {
+        setNavigationStatus('arrived');
+        setNavigationFollow(false);
+        setRemainingPlannedRoute([]);
+        setRemainingDistanceMeters(0);
+        setRemainingDurationSeconds(0);
+        setNavigationMessage('Destination reached with confirmed live GPS samples');
+        setShowDirections(true);
+        if (sharedTripToken) {
+          void completeSharedTrip(sharedTripToken).unwrap().catch(() => undefined);
+        }
+        return;
+      }
+    } else {
+      arrivalSamplesRef.current = 0;
+    }
+
+    const projection = projectPositionOnRoute(
+      activePlannedRouteRef.current,
+      { latitude: target.latitude, longitude: target.longitude },
+      progressMetersRef.current
+    );
+    if (!projection) return;
+    if (projection.distanceToRouteMeters > NAVIGATION_DEVIATION_METERS) {
+      offRouteSamplesRef.current += 1;
+      setNavigationMessage(
+        `Checking route deviation (${offRouteSamplesRef.current}/${NAVIGATION_DEVIATION_SAMPLES})`
+      );
+      if (offRouteSamplesRef.current >= NAVIGATION_DEVIATION_SAMPLES) {
+        void rerouteFromPosition(target.latitude, target.longitude, 'off-route');
+      }
+      return;
+    }
+
+    offRouteSamplesRef.current = 0;
+    progressMetersRef.current = Math.max(progressMetersRef.current, projection.alongRouteMeters);
+    const split = splitRouteAtProjection(activePlannedRouteRef.current, projection);
+    const remainingGeometryMeters = routeLengthMeters(split.remaining);
+    const totalGeometryMeters = Math.max(1, activeRouteDistanceRef.current);
+    const remainingFraction = Math.min(1, remainingGeometryMeters / totalGeometryMeters);
+    setRemainingPlannedRoute(split.remaining);
+    // Both values remain projections of the selected Geoapify route object.
+    // Geometry determines progress only; it never invents an ETA or replaces
+    // the provider's routed road distance/duration.
+    setRemainingDistanceMeters(directionsRoute.distanceMeters * remainingFraction);
+    setRemainingDurationSeconds(directionsRoute.durationSeconds * remainingFraction);
+  }, [
+    directionsRoute,
+    navigationEndpoints,
+    navigationStatus,
+    navigationVehicleId,
+    completeSharedTrip,
+    rerouteFromPosition,
+    sharedTripToken,
+    targetsRef,
+    vehicleCount,
+  ]);
+
+  const navigationOverlay = useMemo<WebMapNavigationOverlay | null>(() => {
+    if (!directionsRoute || !navigationEndpoints || !navigationRouteId) return null;
+    return {
+      routeId: navigationRouteId,
+      fitRoute: navigationStatus === 'preview',
+      completedRoutes: navigationStatus === 'arrived' ? completedNavigationRoutes : [],
+      remainingRoute: remainingPlannedRoute,
+      alternativeRoutes:
+        navigationStatus === 'preview'
+          ? directionsRoutes
+              .map((route, index) => ({
+                index,
+                coordinates: navigationRouteCoordinates(route),
+              }))
+              .filter((route) => route.index !== selectedRouteIndex)
+              .map((route, alternativeIndex) => ({
+                ...route,
+                color: [
+                  PREMIUM_FLEET_MAP_PALETTE.alternativeRouteGray,
+                  PREMIUM_FLEET_MAP_PALETTE.alternativeRouteBlue,
+                  PREMIUM_FLEET_MAP_PALETTE.alternativeRouteSlate,
+                ][alternativeIndex] ?? PREMIUM_FLEET_MAP_PALETTE.alternativeRouteGray,
+              }))
+          : [],
+      routeLabels:
+        navigationStatus === 'preview'
+          ? directionsRoutes.flatMap((route, index) => {
+              const coordinates = navigationRouteCoordinates(route);
+              const point = coordinates[Math.floor(coordinates.length / 2)];
+              if (!point) return [];
+              return [{
+                index,
+                lng: point[0],
+                lat: point[1],
+                label: formatRouteMetrics(route.distanceMeters, route.durationSeconds),
+                selected: index === selectedRouteIndex,
+              }];
+            })
+          : [],
+      start: {
+        lat: navigationEndpoints.from.latitude,
+        lng: navigationEndpoints.from.longitude,
+      },
+      destination: {
+        lat: navigationEndpoints.to.latitude,
+        lng: navigationEndpoints.to.longitude,
+      },
+    };
+  }, [
+    completedNavigationRoutes,
+    directionsRoute,
+    directionsRoutes,
+    navigationEndpoints,
+    navigationRouteId,
+    navigationStatus,
+    remainingPlannedRoute,
+    selectedRouteIndex,
+  ]);
 
   useEffect(() => {
     if (autoFollowVehicle && activeLocatedVehicle && mapRef.current) {
@@ -203,9 +947,15 @@ export default function AllVehiclesMapScreen() {
     }
   }, [activeLocatedVehicle, autoFollowVehicle]);
 
+  useEffect(() => {
+    if (navigationStatus === 'navigating' && navigationFollow) {
+      webMapRef.current?.recenterNavigation();
+    }
+  }, [navigationFollow, navigationStatus]);
+
   const webMarkers = useMemo<WebMapMarker[]>(
-    () =>
-      liveDevices.map((d) => {
+    () => {
+      const markers = liveDevices.map((d) => {
         const resolved = resolveDeviceRecordState(d, readiness);
         return {
           id: d.id,
@@ -213,35 +963,55 @@ export default function AllVehiclesMapScreen() {
           lng: d.longitude,
           color: stateColors[resolved.state] ?? stateColors.NO_DATA ?? '#475569',
           heading: d.course,
-          category: d.category,
+          category: vehicleBodyType(d.category),
           label: d.name,
           moving: resolved.state === 'RUNNING' && (d.speed ?? 0) > 0,
+          speedKph: d.speed ?? 0,
+          sourceTime: d.lastUpdate ? Date.parse(d.lastUpdate) : 0,
         };
-      }),
-    [liveDevices, readiness, stateColors]
+      });
+      if (
+        navigationStatus === 'navigating' &&
+        navigationVehicleId != null &&
+        !markers.some((marker) => Number(marker.id) === navigationVehicleId)
+      ) {
+        const target = targetsRef.current.get(navigationVehicleId);
+        if (target) {
+          // This is the backend's validated/map-matched display coordinate from
+          // SSE. It is never projected onto the planned route in the client.
+          markers.push({
+            id: navigationVehicleId,
+            lat: target.latitude,
+            lng: target.longitude,
+            color: stateColors[target.state] ?? stateColors.NO_DATA ?? '#475569',
+            heading: target.heading,
+            category: vehicleBodyType(
+              rawDevices.find((device) => device.id === navigationVehicleId)?.category
+            ),
+            label: 'My current location',
+            moving: target.moving,
+            speedKph: target.speedKmh,
+            sourceTime: target.sourceTime,
+          });
+        }
+      }
+      return markers;
+    },
+    [
+      liveDevices,
+      navigationStatus,
+      navigationVehicleId,
+      rawDevices,
+      readiness,
+      stateColors,
+      targetsRef,
+    ]
   );
 
-  const [showLayersSheet, setShowLayersSheet] = useState(false);
-  const [mapPreferences, setMapPreferences] = useState<MapPreferences>(DEFAULT_MAP_PREFERENCES);
-
-  useEffect(() => {
-    const sub = navigation.addListener('focus', () => {
-      void loadMapPreferences().then((prefs) => {
-        setMapPreferences(prefs);
-      });
-    });
-    return sub;
-  }, [navigation]);
-
-  const activeStyleKey: MapStyleVariant =
-    mapPreferences.mapType === 'satellite'
-      ? 'satellite'
-      : isDark
-        ? 'dark'
-        : 'street';
-  const mapStyleInfo = getMapStyleInfo(activeStyleKey);
-  // Geoapify is the fleet map provider on every platform. This keeps Android,
-  // iOS and web on the same tiles and removes the Google-provider dependency.
+  const mapPreferences: MapPreferences = DEFAULT_MAP_PREFERENCES;
+  // One light OpenFreeMap/MapLibre scene on every platform. There is no map
+  // type state to drift between screens or cover the map with another picker.
+  const mapStyleInfo = getMapStyleInfo('street');
   const useNativeMap = false;
 
   const [manualRefreshing, setManualRefreshing] = useState(false);
@@ -256,9 +1026,86 @@ export default function AllVehiclesMapScreen() {
     }
   }, [refetch, listQuery]);
 
-  const toggleLayers = useCallback(() => {
-    setShowLayersSheet(true);
-  }, []);
+  const toggleDirections = useCallback(() => {
+    setShowDirections((visible) => !visible);
+    if (navigationStatus === 'preview') setActiveLocateId(null);
+  }, [navigationStatus]);
+
+  const handleMapInteraction = useCallback(() => {
+    if (navigationStatus === 'navigating') setNavigationFollow(false);
+  }, [navigationStatus]);
+
+  const recenterNavigation = useCallback(() => {
+    if (navigationStatus !== 'navigating' || navigationVehicleId == null) return;
+    setSelectedId(navigationVehicleId);
+    setActiveLocateId(navigationVehicleId);
+    setNavigationFollow(true);
+  }, [navigationStatus, navigationVehicleId]);
+
+  const shareNavigation = useCallback(async () => {
+    const deviceId = navigationVehicleId ?? readiness.deviceId;
+    if (!directionsRoute || !navigationEndpoints || deviceId == null) {
+      Alert.alert(
+        'Live location unavailable',
+        'A registered mobile GPS tracker is needed to share this live trip.'
+      );
+      return;
+    }
+    try {
+      let token = sharedTripToken;
+      if (!token) {
+        const created = await createSharedTrip(
+          sharedTripRequestOf(
+            deviceId,
+            directionsRoute,
+            navigationEndpoints.to,
+            navigationStatus === 'navigating'
+          )
+        ).unwrap();
+        token = created.token;
+        updateSharedTripToken(token);
+      }
+      const url = sharedTripUrl(token);
+      await Share.share({
+        title: 'Glivt live trip',
+        message: `Follow this live Glivt trip: ${url}`,
+        ...(Platform.OS === 'ios' ? { url } : {}),
+      });
+    } catch {
+      Alert.alert('Unable to share', 'A secure live-trip link could not be created. Try again.');
+    }
+  }, [
+    createSharedTrip,
+    directionsRoute,
+    navigationEndpoints,
+    navigationStatus,
+    navigationVehicleId,
+    readiness.deviceId,
+    sharedTripToken,
+    updateSharedTripToken,
+  ]);
+
+  const confirmCancelNavigation = useCallback(() => {
+    Alert.alert(
+      navigationStatus === 'navigating' ? 'Cancel current trip?' : 'Clear directions?',
+      navigationStatus === 'navigating'
+        ? 'Only navigation will stop. Live GPS and fleet tracking will keep running.'
+        : 'The route preview and its locations will be removed.',
+      [
+        { text: 'Keep trip', style: 'cancel' },
+        {
+          text: navigationStatus === 'navigating' ? 'Cancel trip' : 'Clear',
+          style: 'destructive',
+          onPress: () => {
+            clearPreviewRoute();
+            setDirectionsResetKey((key) => key + 1);
+            setShowDirections(false);
+            setActiveLocateId(null);
+          },
+        },
+      ]
+    );
+  }, [clearPreviewRoute, navigationStatus]);
 
   const focusNative = useCallback((device: DeviceSummary) => {
     if (device?.latitude == null || device?.longitude == null) return;
@@ -271,6 +1118,10 @@ export default function AllVehiclesMapScreen() {
   }, []);
 
   const locateMe = useCallback(() => {
+    if (navigationStatus === 'navigating' && navigationVehicleId != null) {
+      recenterNavigation();
+      return;
+    }
     if (!selectedLive) {
       Alert.alert('Select a vehicle', 'Tap a vehicle marker first, then use Locate Me.');
       return;
@@ -284,9 +1135,10 @@ export default function AllVehiclesMapScreen() {
     } else {
       webMapRef.current?.focusMarker(selectedLive.id);
     }
-  }, [focusNative, selectedLive, useNativeMap]);
+  }, [focusNative, navigationStatus, navigationVehicleId, recenterNavigation, selectedLive, useNativeMap]);
 
   const fitAll = useCallback(() => {
+    if (navigationStatus === 'navigating') setNavigationFollow(false);
     setActiveLocateId(null);
     if (useNativeMap) {
       if (located.length === 0) return;
@@ -308,7 +1160,7 @@ export default function AllVehiclesMapScreen() {
     } else {
       webMapRef.current?.fitAll();
     }
-  }, [useNativeMap, located, overlayTop, legendHeight]);
+  }, [useNativeMap, located, navigationStatus, overlayTop, legendHeight]);
 
   const selectById = useCallback(
     (id: string | number) => {
@@ -320,25 +1172,68 @@ export default function AllVehiclesMapScreen() {
       const numericId = Number(targetId);
       if (!Number.isSafeInteger(numericId)) return;
 
+      if (navigationStatus === 'navigating' && navigationVehicleId != null) {
+        if (numericId !== navigationVehicleId) {
+          Alert.alert(
+            'Navigation is active',
+            'Finish the current live navigation before selecting a different vehicle.'
+          );
+        } else {
+          recenterNavigation();
+        }
+        return;
+      }
+
       // First tap selects exactly one vehicle for Locate Me. Repeating the tap
-      // preserves the existing route to vehicle details.
+      // opens Live Tracking for it — the details page it used to open was a
+      // slower copy of what this map already shows, and is gone.
       if (selectedIdRef.current === numericId) {
-        router.push({ pathname: '/device-profile', params: { id: String(numericId) } });
+        const vehicle = rawDevices.find((device) => device.id === numericId);
+        router.push({
+          pathname: '/live-track',
+          params: {
+            deviceId: String(numericId),
+            name: vehicle?.vehicleName || vehicle?.name || `Vehicle ${numericId}`,
+            subtitle: vehicle?.address ?? '',
+            category: vehicle?.category ?? '',
+          },
+        });
         return;
       }
 
       setActiveLocateId(null);
       setSelectedId(numericId);
     },
-    [located, rawDevices, router]
+    [located, navigationStatus, navigationVehicleId, rawDevices, recenterNavigation, router]
   );
 
   const clearSelection = useCallback(() => {
+    if (navigationStatus === 'navigating') return;
     setActiveLocateId(null);
     setSelectedId(null);
-  }, []);
+  }, [navigationStatus]);
   const handleVisibleIdsChange = useCallback((visibleIds: string[]) => { }, []);
-
+  const controlsTop =
+    located.length > 0 && legendHeight > 0
+      ? overlayTop + legendHeight + spacing.sm
+      : overlayTop;
+  /**
+   * What this screen draws over its own map.
+   *
+   * The follow camera frames the selected vehicle inside what is left, so
+   * "Locate me" can never park it behind the header, the fleet legend or the
+   * tab bar - and "Fit all" fits the fleet into the visible strip rather than
+   * into the container.
+   */
+  const mapViewportPadding = useMemo(
+    () => ({
+      top: controlsTop,
+      bottom: insets.bottom + (directionsRoute ? 168 : 82),
+      left: spacing.md,
+      right: spacing.md,
+    }),
+    [controlsTop, directionsRoute, insets.bottom]
+  );
   return (
     <SafeAreaView edges={['bottom']} style={styles.screen}>
       {useNativeMap ? (
@@ -358,17 +1253,39 @@ export default function AllVehiclesMapScreen() {
       ) : (
         <FleetWebMap
           ref={webMapRef}
+          cameraMode={navigationStatus === 'navigating' ? 'chase' : 'follow'}
           geofences={mapGeofences}
           mapStyle={mapStyleInfo.webStyle}
+          premiumVectorTheme
           markers={webMarkers}
+          navigation={navigationOverlay}
           onClearSelection={clearSelection}
+          onInteraction={handleMapInteraction}
+          onSelectNavigationRoute={selectDirectionsRoute}
           onSelect={selectById}
           onVisibleIdsChange={handleVisibleIdsChange}
-          followSelected={autoFollowVehicle && activeLocateId != null && activeLocateId === selectedId}
+          followSelected={
+            navigationStatus === 'navigating'
+              ? navigationFollow && navigationVehicleId != null && navigationVehicleId === selectedId
+              : navigationOverlay == null &&
+                autoFollowVehicle &&
+                activeLocateId != null &&
+                activeLocateId === selectedId
+          }
           selectedId={selectedId}
           style={StyleSheet.absoluteFillObject}
+          viewportPadding={mapViewportPadding}
+          active={isFocused}
         />
       )}
+
+      <NavigationVehiclePicker
+        onCancel={() => setVehiclePickerOpen(false)}
+        onSelect={confirmVehicleAndStart}
+        ownDeviceId={readiness.deviceId}
+        vehicles={navigationVehicleOptions}
+        visible={vehiclePickerOpen}
+      />
 
       <View pointerEvents="none" style={styles.mapVignette} />
 
@@ -390,6 +1307,40 @@ export default function AllVehiclesMapScreen() {
         </View>
       ) : null}
 
+      <DirectionsPanel
+        bottom={insets.bottom + (directionsRoute ? 158 : 72)}
+        navigationMessage={navigationMessage}
+        onClose={() => setShowDirections(false)}
+        onRoutesCalculated={handleRoutesCalculated}
+        onRouteCleared={clearPreviewRoute}
+        onSelectRoute={selectDirectionsRoute}
+        onPlanAnotherRoute={planAnotherRoute}
+        remainingDistanceMeters={remainingDistanceMeters}
+        remainingDurationSeconds={remainingDurationSeconds}
+        resetKey={directionsResetKey}
+        route={directionsRoute}
+        routeOptions={directionsRoutes}
+        selectedRouteIndex={selectedRouteIndex}
+        status={navigationStatus}
+        visible={showDirections}
+      />
+
+      {directionsRoute ? (
+        <NavigationDrivePanel
+          bottom={insets.bottom + 72}
+          canStart={Boolean(navigationEndpoints)}
+          onCancel={confirmCancelNavigation}
+          onShare={shareNavigation}
+          onStart={requestNavigationStart}
+          remainingDistanceMeters={remainingDistanceMeters}
+          remainingDurationSeconds={remainingDurationSeconds}
+          rerouting={rerouteReason != null}
+          route={directionsRoute}
+          sharing={createSharedTripRequest.isLoading}
+          status={navigationStatus}
+        />
+      ) : null}
+
       {/* One slab of icon buttons rather than five labelled pills down the
           edge: same actions, a fraction of the map covered. The rail stacks
           under the legend rather than beside it, so neither has to be clipped
@@ -397,7 +1348,7 @@ export default function AllVehiclesMapScreen() {
       <View
         style={[
           styles.railRight,
-          { top: located.length > 0 && legendHeight > 0 ? overlayTop + legendHeight + spacing.sm : overlayTop },
+          { top: controlsTop },
         ]}>
         <RailButton
           icon="refresh"
@@ -410,8 +1361,39 @@ export default function AllVehiclesMapScreen() {
         <View style={styles.railDivider} />
         <RailButton icon="fit-to-page-outline" label="Fit all" onPress={fitAll} />
         <View style={styles.railDivider} />
-        <RailButton icon="layers-outline" label="Layers" onPress={toggleLayers} />
+        <RailButton icon="directions" label="Directions" onPress={toggleDirections} />
       </View>
+
+      {navigationStatus === 'navigating' && !navigationFollow ? (
+        <Pressable
+          accessibilityLabel="Recenter live navigation"
+          accessibilityRole="button"
+          onPress={recenterNavigation}
+          style={({ pressed }) => [
+            styles.recenterButton,
+            { bottom: insets.bottom + (directionsRoute ? 158 : 72) },
+            pressed && styles.railButtonPressed,
+          ]}>
+          <MaterialCommunityIcons color={c.textPrimary} name="navigation-variant" size={19} />
+          <Text style={styles.recenterText}>Recenter</Text>
+        </Pressable>
+      ) : null}
+
+      {rerouteReason ? (
+        <View
+          pointerEvents="none"
+          style={[
+            styles.reroutePill,
+            { bottom: insets.bottom + (directionsRoute ? 158 : 72) },
+          ]}>
+          <ActivityIndicator color={c.textPrimary} size="small" />
+          <Text style={styles.rerouteText}>
+            {rerouteReason === 'destination-passed'
+              ? 'Destination passed. Rerouting…'
+              : 'Rerouting from latest position…'}
+          </Text>
+        </View>
+      ) : null}
 
       {located.length === 0 && !isFetching && !listQuery.isFetching ? (
         <View pointerEvents="none" style={styles.emptyOverlayContainer}>
@@ -425,14 +1407,75 @@ export default function AllVehiclesMapScreen() {
         </View>
       ) : null}
 
-      <MapLayersBottomSheet
-        visible={showLayersSheet}
-        onClose={() => setShowLayersSheet(false)}
-        preferences={mapPreferences}
-        onChangePreferences={setMapPreferences}
-      />
     </SafeAreaView>
   );
+}
+
+function appendCompletedRouteRun(
+  runs: RouteCoordinate[][],
+  geometry: RouteCoordinate[],
+  startNewRun: boolean
+): RouteCoordinate[][] {
+  if (geometry.length < 2) return runs;
+  const lastRun = runs[runs.length - 1];
+  const last = lastRun?.[lastRun.length - 1];
+  const first = geometry[0];
+  if (!last || startNewRun) return [...runs, geometry];
+  const joinsExisting = haversineKm(last[1], last[0], first[1], first[0]) * 1000 <= 12;
+  if (!joinsExisting) return [...runs, geometry];
+  const joined = [...lastRun];
+  for (const point of geometry) {
+    const tail = joined[joined.length - 1];
+    if (!tail || tail[0] !== point[0] || tail[1] !== point[1]) joined.push(point);
+  }
+  return [...runs.slice(0, -1), joined];
+}
+
+function navigationRouteCoordinates(route: NavigationRoute): RouteCoordinate[] {
+  const coordinates: RouteCoordinate[] = [];
+  for (const point of route.coordinates) {
+    if (
+      !Number.isFinite(point.latitude) ||
+      !Number.isFinite(point.longitude) ||
+      Math.abs(point.latitude) > 90 ||
+      Math.abs(point.longitude) > 180 ||
+      (point.latitude === 0 && point.longitude === 0)
+    ) {
+      // Never bridge across an invalid provider vertex with a straight line.
+      return [];
+    }
+    const coordinate: RouteCoordinate = [point.longitude, point.latitude];
+    const previous = coordinates[coordinates.length - 1];
+    if (previous && previous[0] === coordinate[0] && previous[1] === coordinate[1]) {
+      continue;
+    }
+    coordinates.push(coordinate);
+  }
+  return coordinates;
+}
+
+function sharedTripRequestOf(
+  deviceId: number,
+  route: NavigationRoute,
+  destination: DirectionsLocation,
+  active: boolean
+): SharedTripRequest {
+  return {
+    deviceId,
+    destinationName: destination.formatted || destination.name,
+    destinationLatitude: destination.latitude,
+    destinationLongitude: destination.longitude,
+    distanceMeters: route.distanceMeters,
+    durationSeconds: route.durationSeconds,
+    coordinates: route.coordinates,
+    active,
+  };
+}
+
+function sharedTripUrl(token: string): string {
+  const query = `token=${encodeURIComponent(token)}`;
+  if (env.shareBaseUrl) return `${env.shareBaseUrl}/shared-trip?${query}`;
+  return Linking.createURL('/shared-trip', { queryParams: { token } });
 }
 
 type LocatedDevice = DeviceSummary & { latitude: number; longitude: number };
@@ -686,9 +1729,9 @@ function NativeFleetMap({
           <Circle
             key={`geofence-${zone.id}`}
             center={{ latitude: zone.lat, longitude: zone.lng }}
-            fillColor={hexToRgba(zone.color ?? '#27D34D', 0.14)}
+            fillColor={hexToRgba(zone.color ?? '#1A73E8', 0.14)}
             radius={zone.radius}
-            strokeColor={zone.color ?? '#27D34D'}
+            strokeColor={zone.color ?? '#1A73E8'}
             strokeWidth={2}
           />
         ))}
@@ -818,7 +1861,7 @@ const popupStyles = StyleSheet.create({
     width: POPUP_W,
     zIndex: 20,
   },
-  popupSelected: { borderColor: 'rgba(43, 230, 158, 0.9)', borderWidth: 1.5 },
+  popupSelected: { borderColor: 'rgba(138, 180, 248, 0.9)', borderWidth: 1.5 },
   title: { color: '#FFFFFF', fontSize: 12, fontWeight: '900', letterSpacing: 0.2 },
   row: { alignItems: 'center', flexDirection: 'row', gap: 5, marginTop: 2 },
   dot: { borderRadius: 4, height: 7, width: 7 },
@@ -911,6 +1954,47 @@ const makeStyles = (c: ThemeColors) =>
     railButton: { alignItems: 'center', height: 44, justifyContent: 'center', width: 44 },
     railButtonPressed: { backgroundColor: c.surfaceAlt },
     railDivider: { alignSelf: 'stretch', backgroundColor: c.divider, height: StyleSheet.hairlineWidth },
+    recenterButton: {
+      alignItems: 'center',
+      backgroundColor: c.cardBackground,
+      borderColor: c.border,
+      borderRadius: radius.pill,
+      borderWidth: StyleSheet.hairlineWidth,
+      elevation: 6,
+      flexDirection: 'row',
+      gap: 6,
+      height: 42,
+      justifyContent: 'center',
+      paddingHorizontal: 15,
+      position: 'absolute',
+      right: 12,
+      shadowColor: c.shadowColor,
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.18,
+      shadowRadius: 9,
+      zIndex: 24,
+    },
+    recenterText: { color: c.textPrimary, fontSize: 11, fontWeight: '800' },
+    reroutePill: {
+      alignItems: 'center',
+      alignSelf: 'center',
+      backgroundColor: c.cardBackground,
+      borderColor: c.border,
+      borderRadius: radius.pill,
+      borderWidth: StyleSheet.hairlineWidth,
+      flexDirection: 'row',
+      gap: 7,
+      left: 12,
+      paddingHorizontal: 13,
+      paddingVertical: 10,
+      position: 'absolute',
+      shadowColor: c.shadowColor,
+      shadowOffset: { width: 0, height: 3 },
+      shadowOpacity: 0.15,
+      shadowRadius: 8,
+      zIndex: 23,
+    },
+    rerouteText: { color: c.textPrimary, fontSize: 10.5, fontWeight: '800' },
     statusStrip: {
       alignSelf: 'center',
       backgroundColor: c.cardBackground,

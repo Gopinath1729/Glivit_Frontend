@@ -8,7 +8,6 @@ import {
   Alert,
   FlatList,
   Linking,
-  Modal,
   Platform,
   Pressable,
   RefreshControl,
@@ -26,7 +25,11 @@ import { EmptyView, ErrorRetryView, LoadingView } from '@/src/components/ui/Stat
 import { TextField } from '@/src/components/ui/TextField';
 import { apiErrorMessage } from '@/src/services/apiError';
 import { GeofencePickerMap } from '@/src/components/maps/GeofencePickerMap';
-import { KeyboardAwareForm, KeyboardBottomSheet } from '@/src/components/ui/KeyboardAwareForm';
+import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
+import { CompactSearchBar } from '@/src/components/ui/CompactSearchBar';
+import { ListPagination } from '@/src/components/ui/ListPagination';
+import { ManagementCreateButton, ManagementModal } from '@/src/components/ui/ManagementPrimitives';
+import { useAppDialog } from '@/src/components/ui/useAppDialog';
 import { useGetAllDevicesQuery } from '@/src/services/devicesApi';
 import { getMapStyleInfo } from '@/src/services/mapStyle';
 import {
@@ -73,7 +76,23 @@ const DEFAULT_FORM: FormValues = {
   assignedDeviceIds: [],
 };
 
+const GEOFENCE_PAGE_SIZE = 10;
+
+/** Horizontal gutter inside the editor, matching ManagementModal's header. */
+const EDITOR_GUTTER = spacing.md + 4;
+
 const RADIUS_PRESETS = [0.1, 0.25, 0.5, 1, 5] as const;
+
+type EditorStep = 'place' | 'vehicles';
+
+const EDITOR_STEPS: {
+  icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
+  id: EditorStep;
+  label: string;
+}[] = [
+  { icon: 'map-marker-radius-outline', id: 'place', label: 'Zone' },
+  { icon: 'car-multiple', id: 'vehicles', label: 'Vehicles' },
+];
 const SEARCH_PLACES = [
   { name: 'Bengaluru Palace', latitude: 12.9985, longitude: 77.5921 },
   { name: 'MG Road, Bengaluru', latitude: 12.9756, longitude: 77.6068 },
@@ -118,8 +137,30 @@ export default function GeofencesScreen() {
   // handling here — adding a top inset too would double-pad the screen.
   const insets = useSafeAreaInsets();
   const styles = React.useMemo(() => makeStyles(c), [c]);
-  const { data, isLoading, isFetching, isError, error, refetch } = useGetGeofencesQuery({ size: 50 });
-  const { data: devicesData } = useGetAllDevicesQuery();
+  const [listSearchInput, setListSearchInput] = React.useState('');
+  const [listSearch, setListSearch] = React.useState('');
+  const [listPage, setListPage] = React.useState(0);
+
+  // Debounced so a typed query is one request, not one per keystroke.
+  React.useEffect(() => {
+    const handle = setTimeout(() => {
+      setListSearch(listSearchInput.trim());
+      setListPage(0);
+    }, 300);
+    return () => clearTimeout(handle);
+  }, [listSearchInput]);
+
+  const { data, isLoading, isFetching, isError, error, refetch } = useGetGeofencesQuery({
+    page: listPage,
+    search: listSearch || undefined,
+    size: GEOFENCE_PAGE_SIZE,
+  });
+  // Re-validated on mount for the same reason Reports is: this feeds the
+  // vehicle picker in the editor, and a cache entry filled before a vehicle
+  // existed makes that picker claim the fleet is empty.
+  const { data: devicesData } = useGetAllDevicesQuery(undefined, {
+    refetchOnMountOrArgChange: true,
+  });
   const allDevices = React.useMemo(() => (Array.isArray(devicesData) ? devicesData : []), [devicesData]);
   const devicesMap = React.useMemo(() => new Map(allDevices.map((d) => [d.id, d])), [allDevices]);
   const [createGeofence, { isLoading: isCreating }] = useCreateGeofenceMutation();
@@ -135,8 +176,12 @@ export default function GeofencesScreen() {
   const [isSearchingOnline, setIsSearchingOnline] = React.useState(false);
   const [searchError, setSearchError] = React.useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = React.useState(false);
+  const [editorStep, setEditorStep] = React.useState<EditorStep>('place');
+  const { confirm, dialogElement, notify } = useAppDialog();
   const reverseGeocodeRequestRef = React.useRef(0);
   const geofences = React.useMemo(() => (Array.isArray(data?.content) ? data.content : []), [data]);
+  const totalGeofences = data?.totalElements ?? geofences.length;
+  const totalGeofencePages = data?.totalPages ?? 1;
 
   const {
     clearErrors,
@@ -233,6 +278,7 @@ export default function GeofencesScreen() {
     setSearchText('');
     setSelectedPlace(null);
     setSaveSuccess(false);
+    setEditorStep('place');
     setEditorTarget('new');
   }, [reset]);
 
@@ -253,6 +299,7 @@ export default function GeofencesScreen() {
       setSearchText(geofence.name);
       setSelectedPlace({ name: geofence.name, latitude: latVal, longitude: lngVal });
       setSaveSuccess(false);
+      setEditorStep('place');
       setEditorTarget(geofence);
     },
     [reset]
@@ -333,6 +380,21 @@ export default function GeofencesScreen() {
       return true;
     }).slice(0, 6);
   }, [geofences, onlineSuggestions, searchText]);
+
+  const watchedAssignments = watch('assignedDeviceIds');
+  const assignedCount = Array.isArray(watchedAssignments) ? watchedAssignments.length : 0;
+
+  /**
+   * The dropdown is open only while the query is genuinely unresolved.
+   *
+   * Once a place has been chosen and the picked coordinate has snapped to it,
+   * the list has nothing left to offer and would just cover the map.
+   */
+  const placeIsResolved =
+    selectedPlace != null &&
+    Math.abs(selectedPlace.latitude - pickedCoordinate.latitude) < 0.0001 &&
+    Math.abs(selectedPlace.longitude - pickedCoordinate.longitude) < 0.0001;
+  const showSuggestions = !placeIsResolved && searchText.trim().length > 0;
 
   const handlePerformSearch = React.useCallback(async () => {
     const query = searchText.trim();
@@ -530,7 +592,7 @@ export default function GeofencesScreen() {
     }
     const body = {
       name: values.name,
-      color: existing?.color || '#0F9D58',
+      color: existing?.color || '#1A73E8',
       type: 'CIRCLE' as const,
       coordinates: [[Number(values.longitude), Number(values.latitude)]],
       radiusMeters: Number(values.radiusMeters) * 1000,
@@ -555,35 +617,38 @@ export default function GeofencesScreen() {
         reset(DEFAULT_FORM);
       }, 450);
     } catch (err) {
-      Alert.alert('Geofence not saved', apiErrorMessage(err));
+      notify({
+        message: apiErrorMessage(err),
+        title: 'Geofence not saved',
+        tone: 'danger',
+      });
     }
   });
 
   const confirmDelete = React.useCallback(
     (geofence: GeofenceDto) => {
-      Alert.alert(
-        'Delete geofence',
-        `"${geofence.name}" will stop generating enter and exit alerts.`,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Delete',
-            style: 'destructive',
-            onPress: async () => {
-              setDeletingId(geofence.id);
-              try {
-                await deleteGeofence(geofence.id).unwrap();
-              } catch (err) {
-                Alert.alert('Geofence not deleted', apiErrorMessage(err));
-              } finally {
-                setDeletingId(null);
-              }
-            },
-          },
-        ]
-      );
+      confirm({
+        confirmLabel: 'Delete',
+        message: `"${geofence.name}" will stop generating enter and exit alerts.`,
+        onConfirm: async () => {
+          setDeletingId(geofence.id);
+          try {
+            await deleteGeofence(geofence.id).unwrap();
+          } catch (err) {
+            notify({
+              message: apiErrorMessage(err),
+              title: 'Geofence not deleted',
+              tone: 'danger',
+            });
+          } finally {
+            setDeletingId(null);
+          }
+        },
+        title: 'Delete geofence?',
+        tone: 'danger',
+      });
     },
-    [deleteGeofence]
+    [confirm, deleteGeofence, notify]
   );
 
   if (isLoading) return <LoadingView label="Loading geofences..." />;
@@ -609,32 +674,45 @@ export default function GeofencesScreen() {
           />
         }
         ListHeaderComponent={
-          <View style={{ gap: spacing.md }}>
+          <View style={styles.listHeader}>
             <View style={styles.listHeaderRow}>
               <Text style={styles.title}>Geofences</Text>
-              <View style={{ flexDirection: 'row', alignItems: 'center', gap: spacing.md }}>
-                <Text style={styles.countBadge}>
-                  {geofences.length} {geofences.length === 1 ? 'zone' : 'zones'}
-                </Text>
-                <Pressable
-                  accessibilityLabel="Add geofence"
-                  accessibilityRole="button"
-                  onPress={openCreate}
-                  style={({ pressed }) => [
-                    { padding: 4 },
-                    pressed && { opacity: 0.7 },
-                  ]}>
-                  <MaterialCommunityIcons color={c.primary} name="plus-circle" size={24} />
-                </Pressable>
+              <Text style={styles.countBadge}>
+                {totalGeofences} {totalGeofences === 1 ? 'zone' : 'zones'}
+              </Text>
+            </View>
+            <View style={styles.listSearchRow}>
+              <View style={styles.listSearchField}>
+                <CompactSearchBar
+                  loading={isFetching && listSearchInput.trim() === listSearch}
+                  onChangeText={setListSearchInput}
+                  placeholder="Search zones by name"
+                  value={listSearchInput}
+                />
               </View>
+              <ManagementCreateButton accessibilityLabel="Add geofence" onPress={openCreate} />
             </View>
           </View>
+        }
+        ListFooterComponent={
+          <ListPagination
+            itemLabel="zones"
+            onPageChange={setListPage}
+            page={listPage}
+            pageSize={GEOFENCE_PAGE_SIZE}
+            totalItems={totalGeofences}
+            totalPages={totalGeofencePages}
+          />
         }
         ListEmptyComponent={
           <EmptyView
             icon="vector-circle"
-            title="No geofences"
-            message="Tap Add Geofence to create your first alert zone."
+            title={listSearch ? 'No matching zones' : 'No geofences'}
+            message={
+              listSearch
+                ? `Nothing matches "${listSearch}". Try a different name.`
+                : 'Tap + to create your first alert zone.'
+            }
           />
         }
         renderItem={({ item }) => (
@@ -650,34 +728,57 @@ export default function GeofencesScreen() {
         )}
       />
 
-      <Modal
-        animationType="slide"
-        onRequestClose={closeEditor}
-        transparent
+      <ManagementModal
+        eyebrow="GEOFENCE"
+        maxHeightRatio={0.9}
+        onClose={closeEditor}
+        title={editorTarget && editorTarget !== 'new' ? 'Edit Geofence' : 'Create Circle Geofence'}
         visible={editorTarget != null}>
-        <Pressable
-          accessibilityLabel="Close geofence form"
-          accessibilityRole="button"
-          onPress={closeEditor}
-          style={styles.editorBackdrop}
-        />
-        <View style={styles.editorWrap}>
-          <KeyboardBottomSheet
-            maxHeightRatio={0.88}
-            style={[styles.editorSheet, { paddingBottom: insets.bottom + spacing.md }]}>
-            <View style={styles.editorHandle} />
-            {/* The sheet already carries the bottom inset, so the scroller must
-                not add it a second time. */}
-            <KeyboardAwareForm
-              applyBottomInset={false}
-              contentContainerStyle={styles.editorContent}
-              dismissOnTapOutside={false}>
-              <Text style={styles.title}>
-                {editorTarget && editorTarget !== 'new' ? 'Edit Geofence' : 'Create Circle Geofence'}
-              </Text>
-              <Text style={styles.subtitle}>
-                Pick a centre point, then tune the radius for the alert zone.
-              </Text>
+        {/* Two steps rather than one long scroll. Placing a zone and choosing
+            which vehicles it watches are separate decisions, and showing both
+            at once is what made this form taller than the screen. */}
+        <View style={styles.stepRowWrap}>
+          <View style={styles.stepRow}>
+            {EDITOR_STEPS.map((step) => {
+              const active = editorStep === step.id;
+              return (
+                <Pressable
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: active }}
+                  key={step.id}
+                  onPress={() => setEditorStep(step.id)}
+                  style={[styles.stepChip, active && styles.stepChipActive]}>
+                  <MaterialCommunityIcons
+                    color={active ? c.onPrimary : c.textSecondary}
+                    name={step.icon}
+                    size={15}
+                  />
+                  <Text style={[styles.stepChipText, active && styles.stepChipTextActive]}>
+                    {step.label}
+                  </Text>
+                  {step.id === 'vehicles' && assignedCount > 0 ? (
+                    <View style={[styles.stepCount, active && styles.stepCountActive]}>
+                      <Text style={[styles.stepCountText, active && styles.stepCountTextActive]}>
+                        {assignedCount}
+                      </Text>
+                    </View>
+                  ) : null}
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+
+        {/* flexShrink lets the scroller give way to the pinned tabs and footer
+            inside the sheet's capped height; without it the scroller keeps its
+            full content height and pushes Save off the bottom of the card. */}
+        <KeyboardAwareForm
+          applyBottomInset={false}
+          contentContainerStyle={styles.editorContent}
+          dismissOnTapOutside={false}
+          style={styles.editorScroller}>
+          {editorStep === 'place' ? (
+            <>
               <Controller
                 control={control}
                 name="name"
@@ -695,14 +796,17 @@ export default function GeofencesScreen() {
                   />
                 )}
               />
-              <View style={styles.pickerPanel}>
+
+              {/* The suggestion list floats over the map instead of pushing it
+                  down, so the form does not change height as the user types. */}
+              <View style={styles.searchAnchor}>
                 <TextField
                   autoCapitalize="words"
                   label="Search location"
                   leftIcon="magnify"
-                   onChangeText={(text) => {
-                     reverseGeocodeRequestRef.current += 1;
-                     setSearchText(text);
+                  onChangeText={(text) => {
+                    reverseGeocodeRequestRef.current += 1;
+                    setSearchText(text);
                     setSelectedPlace(null);
                     clearErrors(['latitude', 'longitude']);
                   }}
@@ -712,28 +816,8 @@ export default function GeofencesScreen() {
                   returnKeyType="search"
                   value={searchText}
                 />
-                {selectedPlace &&
-                Math.abs(selectedPlace.latitude - pickedCoordinate.latitude) < 0.0001 &&
-                Math.abs(selectedPlace.longitude - pickedCoordinate.longitude) < 0.0001 ? (
-                  <View style={styles.suggestionList}>
-                    <Pressable
-                      accessibilityLabel={`Selected location: ${selectedPlace.name}`}
-                      accessibilityRole="button"
-                      style={styles.locationSuggestion}>
-                      <MaterialCommunityIcons color={c.primary} name="map-marker" size={17} />
-                      <View style={styles.locationSuggestionText}>
-                        <Text numberOfLines={1} style={styles.locationSuggestionName}>
-                          {selectedPlace.name}
-                        </Text>
-                        <Text style={styles.locationSuggestionMeta}>
-                          {selectedPlace.latitude.toFixed(4)}, {selectedPlace.longitude.toFixed(4)}
-                        </Text>
-                      </View>
-                      <MaterialCommunityIcons color={c.primary} name="check" size={16} />
-                    </Pressable>
-                  </View>
-                ) : searchText.trim().length > 0 ? (
-                  <View style={styles.suggestionList}>
+                {showSuggestions ? (
+                  <View style={styles.suggestionOverlay}>
                     {isSearchingOnline ? (
                       <View style={styles.searchStatusRow}>
                         <ActivityIndicator color={c.primary} size="small" />
@@ -749,11 +833,19 @@ export default function GeofencesScreen() {
                           onPress={() => {
                             setSearchText(place.name);
                             clearErrors(['latitude', 'longitude']);
-                            void setPickedCoordinate({ latitude: place.latitude, longitude: place.longitude }, true, false);
+                            void setPickedCoordinate(
+                              { latitude: place.latitude, longitude: place.longitude },
+                              true,
+                              false
+                            );
                             setSelectedPlace(place);
                           }}
                           style={styles.locationSuggestion}>
-                          <MaterialCommunityIcons color={c.primary} name="map-marker-outline" size={17} />
+                          <MaterialCommunityIcons
+                            color={c.primary}
+                            name="map-marker-outline"
+                            size={16}
+                          />
                           <View style={styles.locationSuggestionText}>
                             <Text numberOfLines={1} style={styles.locationSuggestionName}>
                               {place.name}
@@ -762,42 +854,35 @@ export default function GeofencesScreen() {
                               {place.latitude.toFixed(4)}, {place.longitude.toFixed(4)}
                             </Text>
                           </View>
-                          <MaterialCommunityIcons color={c.textMuted} name="chevron-right" size={16} />
                         </Pressable>
                       ))
                     ) : !isSearchingOnline && searchText.trim().length >= 2 ? (
                       <View style={styles.noResultsBox}>
-                        <MaterialCommunityIcons color={c.textMuted} name="map-marker-off-outline" size={18} />
-                        <Text style={styles.noResultsText}>No places found for &quot;{searchText}&quot;</Text>
+                        <MaterialCommunityIcons
+                          color={c.textMuted}
+                          name="map-marker-off-outline"
+                          size={17}
+                        />
+                        <Text style={styles.noResultsText}>
+                          No places found for &quot;{searchText}&quot;
+                        </Text>
                       </View>
                     ) : null}
                     {searchError ? (
                       <View style={styles.searchErrorBox}>
-                        <MaterialCommunityIcons color={c.textMuted} name="cloud-off-outline" size={14} />
+                        <MaterialCommunityIcons
+                          color={c.textMuted}
+                          name="cloud-off-outline"
+                          size={13}
+                        />
                         <Text style={styles.searchErrorText}>{searchError}</Text>
                       </View>
                     ) : null}
                   </View>
                 ) : null}
-                <Pressable
-                  accessibilityLabel="Use current location"
-                  accessibilityRole="button"
-                  disabled={locationLoading}
-                  onPress={() => void handleCurrentLocation()}
-                  style={({ pressed }) => [
-                    styles.currentLocationButton,
-                    pressed && styles.currentLocationPressed,
-                    locationLoading && styles.currentLocationDisabled,
-                  ]}>
-                  {locationLoading ? (
-                    <ActivityIndicator color={c.primary} size="small" />
-                  ) : (
-                    <MaterialCommunityIcons color={c.primary} name="crosshairs-gps" size={19} />
-                  )}
-                  <Text style={styles.currentLocationText}>
-                    {locationLoading ? 'Reading GPS...' : 'Use Current Location'}
-                  </Text>
-                </Pressable>
+              </View>
+
+              <View style={styles.mapFrame}>
                 <GeofencePickerMap
                   coordinate={pickedCoordinate}
                   onChange={(next) => void setPickedCoordinate(next, false)}
@@ -805,10 +890,27 @@ export default function GeofencesScreen() {
                   style={styles.pickerMap}
                   styleUrl={pickerStyleUrl}
                 />
-                <Text style={styles.mapHint}>
-                  Tap the map or drag the pin. The circle updates as radius changes.
-                </Text>
+                <Pressable
+                  accessibilityLabel="Use current location"
+                  accessibilityRole="button"
+                  disabled={locationLoading}
+                  onPress={() => void handleCurrentLocation()}
+                  style={({ pressed }) => [
+                    styles.gpsChip,
+                    pressed && styles.currentLocationPressed,
+                    locationLoading && styles.currentLocationDisabled,
+                  ]}>
+                  {locationLoading ? (
+                    <ActivityIndicator color={c.primary} size="small" />
+                  ) : (
+                    <MaterialCommunityIcons color={c.primary} name="crosshairs-gps" size={16} />
+                  )}
+                  <Text style={styles.gpsChipText}>
+                    {locationLoading ? 'Reading…' : 'My location'}
+                  </Text>
+                </Pressable>
               </View>
+
               <View style={styles.row}>
                 <View style={styles.half}>
                   <Controller
@@ -841,6 +943,7 @@ export default function GeofencesScreen() {
                   />
                 </View>
               </View>
+
               <Controller
                 control={control}
                 name="radiusMeters"
@@ -857,58 +960,68 @@ export default function GeofencesScreen() {
               <View style={styles.radiusPresetRow}>
                 {RADIUS_PRESETS.map((preset) => {
                   const active = Number(watchedRadius) === preset;
-                  const label = `${preset} km`;
                   return (
                     <Pressable
-                      accessibilityLabel={`Set radius ${label}`}
+                      accessibilityLabel={`Set radius ${preset} km`}
                       accessibilityRole="button"
                       accessibilityState={{ selected: active }}
                       key={preset}
-                      onPress={() => setValue('radiusMeters', String(preset), { shouldDirty: true, shouldValidate: true })}
+                      onPress={() =>
+                        setValue('radiusMeters', String(preset), {
+                          shouldDirty: true,
+                          shouldValidate: true,
+                        })
+                      }
                       style={[styles.radiusPreset, active && styles.radiusPresetActive]}>
-                      <Text style={[styles.radiusPresetText, active && styles.radiusPresetTextActive]}>
-                        {label}
+                      <Text
+                        style={[styles.radiusPresetText, active && styles.radiusPresetTextActive]}>
+                        {preset} km
                       </Text>
                     </Pressable>
                   );
                 })}
               </View>
-              <Controller
-                control={control}
-                name="assignedDeviceIds"
-                render={({ field: { onChange, value } }) => (
-                  <VehicleMultiSelect
-                    colors={c}
-                    devices={allDevices}
-                    onChange={onChange}
-                    selectedIds={Array.isArray(value) ? value : []}
-                    styles={styles}
-                  />
-                )}
-              />
-              {saveSuccess ? (
-                <View style={styles.successState}>
-                  <MaterialCommunityIcons color={c.primary} name="check-circle-outline" size={18} />
-                  <Text style={styles.successText}>Geofence saved successfully.</Text>
-                </View>
-              ) : null}
-              <Button
-                disabled={saveSuccess}
-                label={
-                  saveSuccess
-                    ? 'Saved'
-                    : editorTarget && editorTarget !== 'new'
-                      ? 'Save changes'
-                      : 'Save geofence'
-                }
-                loading={isCreating || isUpdating}
-                onPress={onSubmit}
-              />
-              <Button label="Cancel" onPress={closeEditor} variant="ghost" />
-            </KeyboardAwareForm>
-          </KeyboardBottomSheet>
+            </>
+          ) : (
+            <Controller
+              control={control}
+              name="assignedDeviceIds"
+              render={({ field: { onChange, value } }) => (
+                <VehicleMultiSelect
+                  colors={c}
+                  devices={allDevices}
+                  onChange={onChange}
+                  selectedIds={Array.isArray(value) ? value : []}
+                  styles={styles}
+                />
+              )}
+            />
+          )}
+        </KeyboardAwareForm>
+
+        {/* Actions are pinned outside the scroller so Save is always reachable. */}
+        <View style={styles.editorFooter}>
+          <View style={styles.footerButton}>
+            <Button label="Cancel" onPress={closeEditor} variant="ghost" />
+          </View>
+          <View style={styles.footerButton}>
+            <Button
+              disabled={saveSuccess}
+              label={
+                saveSuccess
+                  ? 'Saved'
+                  : editorTarget && editorTarget !== 'new'
+                    ? 'Save changes'
+                    : 'Create'
+              }
+              loading={isCreating || isUpdating}
+              onPress={onSubmit}
+            />
+          </View>
         </View>
-      </Modal>
+      </ManagementModal>
+
+      {dialogElement}
     </View>
   );
 }
@@ -1344,7 +1457,6 @@ const makeStyles = (c: ThemeColors) =>
     screen: { backgroundColor: c.pageBackground, flex: 1 },
     list: { gap: spacing.sm, padding: spacing.md },
     title: { color: c.textPrimary, fontSize: typography.title, fontWeight: '900' },
-    subtitle: { color: c.textSecondary, fontSize: typography.caption, lineHeight: 17 },
     listHeaderRow: {
       alignItems: 'center',
       flexDirection: 'row',
@@ -1363,21 +1475,6 @@ const makeStyles = (c: ThemeColors) =>
     },
     row: { flexDirection: 'row', gap: spacing.sm },
     half: { flex: 1, minWidth: 0 },
-    pickerPanel: {
-      backgroundColor: c.surfaceAlt,
-      borderColor: c.border,
-      borderRadius: radius.md,
-      borderWidth: StyleSheet.hairlineWidth * 2,
-      gap: spacing.sm,
-      padding: spacing.sm,
-    },
-    suggestionList: {
-      backgroundColor: c.surface,
-      borderColor: c.border,
-      borderRadius: radius.sm,
-      borderWidth: StyleSheet.hairlineWidth,
-      overflow: 'hidden',
-    },
     locationSuggestion: {
       alignItems: 'center',
       borderBottomColor: c.border,
@@ -1417,51 +1514,28 @@ const makeStyles = (c: ThemeColors) =>
       paddingVertical: 6,
     },
     searchErrorText: { color: c.textMuted, fontSize: 11 },
-    currentLocationButton: {
-      alignItems: 'center',
-      alignSelf: 'flex-start',
-      backgroundColor: c.surface,
-      borderColor: c.border,
-      borderRadius: radius.pill,
-      borderWidth: StyleSheet.hairlineWidth * 2,
-      flexDirection: 'row',
-      gap: spacing.xs,
-      minHeight: 40,
-      paddingHorizontal: spacing.md,
-    },
     currentLocationPressed: { opacity: 0.82, transform: [{ scale: 0.99 }] },
     currentLocationDisabled: { opacity: 0.72 },
-    currentLocationText: { color: c.primary, fontSize: typography.caption, fontWeight: '900' },
     pickerMap: {
-      height: 230,
+      backgroundColor: c.surfaceAlt,
+      height: 168,
       width: '100%',
     },
-    mapHint: { color: c.textMuted, fontSize: 11, lineHeight: 15 },
-    radiusPresetRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm, marginTop: -spacing.xs },
+    radiusPresetRow: { flexDirection: 'row', gap: 5 },
     radiusPreset: {
       alignItems: 'center',
       backgroundColor: c.surfaceAlt,
       borderColor: c.border,
-      borderRadius: radius.pill,
+      borderRadius: radius.sm,
       borderWidth: StyleSheet.hairlineWidth * 2,
-      minHeight: 36,
-      minWidth: 74,
-      justifyContent: 'center',
-      paddingHorizontal: spacing.md,
+      flex: 1,
+      minWidth: 0,
+      paddingHorizontal: 2,
+      paddingVertical: 7,
     },
     radiusPresetActive: { backgroundColor: c.accentSoft, borderColor: c.primary },
     radiusPresetText: { color: c.textSecondary, fontSize: typography.caption, fontWeight: '900' },
     radiusPresetTextActive: { color: c.primary },
-    successState: {
-      alignItems: 'center',
-      backgroundColor: c.accentSoft,
-      borderRadius: radius.sm,
-      flexDirection: 'row',
-      gap: spacing.xs,
-      paddingHorizontal: spacing.sm,
-      paddingVertical: 8,
-    },
-    successText: { color: c.primary, fontSize: typography.caption, fontWeight: '800' },
     geofenceCard: {
       alignItems: 'center',
       backgroundColor: c.surface,
@@ -1491,46 +1565,98 @@ const makeStyles = (c: ThemeColors) =>
       justifyContent: 'center',
       width: 34,
     },
-    approveButton: { alignSelf: 'flex-start', height: 40, width: 156 },
-    fab: {
-      alignItems: 'center',
-      backgroundColor: c.primary,
-      borderRadius: radius.pill,
-      elevation: 6,
-      flexDirection: 'row',
-      gap: spacing.sm,
-      paddingHorizontal: spacing.lg,
-      paddingVertical: spacing.md,
-      position: 'absolute',
-      right: spacing.md,
-      shadowColor: c.shadowColor,
-      shadowOffset: { width: 0, height: 6 },
-      shadowOpacity: 0.28,
-      shadowRadius: 14,
-    },
-    fabPressed: { opacity: 0.88, transform: [{ scale: 0.98 }] },
-    fabLabel: { color: c.onPrimary, fontSize: typography.label, fontWeight: '900' },
-    editorBackdrop: { ...StyleSheet.absoluteFillObject, backgroundColor: c.overlay },
-    editorWrap: { flex: 1, justifyContent: 'flex-end' },
-    editorSheet: {
-      backgroundColor: c.surface,
-      borderColor: c.border,
-      borderTopLeftRadius: radius.xl,
-      borderTopRightRadius: radius.xl,
-      borderWidth: StyleSheet.hairlineWidth * 2,
-      maxHeight: '88%',
-      paddingHorizontal: spacing.md,
+    /** Matches ManagementModal's header gutter so body and title share a margin. */
+    editorContent: {
+      gap: spacing.sm + 2,
+      paddingBottom: spacing.sm,
+      paddingHorizontal: EDITOR_GUTTER,
       paddingTop: spacing.sm,
     },
-    editorHandle: {
-      alignSelf: 'center',
-      backgroundColor: c.borderStrong,
-      borderRadius: 2,
-      height: 4,
-      marginBottom: spacing.md,
-      width: 44,
+    editorScroller: { flexShrink: 1, minHeight: 0 },
+    listHeader: { gap: spacing.sm, paddingBottom: spacing.xs },
+    listSearchRow: { alignItems: 'center', flexDirection: 'row', gap: spacing.sm },
+    listSearchField: { flex: 1, minWidth: 0 },
+    stepRowWrap: { paddingHorizontal: EDITOR_GUTTER, paddingTop: spacing.sm },
+    stepRow: {
+      backgroundColor: c.surfaceAlt,
+      borderRadius: radius.pill,
+      flexDirection: 'row',
+      gap: 4,
+      marginBottom: spacing.sm,
+      padding: 4,
     },
-    editorContent: { gap: spacing.md, paddingBottom: spacing.md },
+    stepChip: {
+      alignItems: 'center',
+      borderRadius: radius.pill,
+      flex: 1,
+      flexDirection: 'row',
+      gap: 6,
+      justifyContent: 'center',
+      paddingVertical: spacing.xs + 3,
+    },
+    stepChipActive: { backgroundColor: c.primary },
+    stepChipText: { color: c.textSecondary, fontSize: 12.5, fontWeight: '800' },
+    stepChipTextActive: { color: c.onPrimary },
+    stepCount: {
+      alignItems: 'center',
+      backgroundColor: c.surface,
+      borderRadius: radius.pill,
+      justifyContent: 'center',
+      minWidth: 18,
+      paddingHorizontal: 5,
+      paddingVertical: 1,
+    },
+    stepCountActive: { backgroundColor: 'rgba(255,255,255,0.26)' },
+    stepCountText: { color: c.textSecondary, fontSize: 10, fontWeight: '900' },
+    stepCountTextActive: { color: c.onPrimary },
+    searchAnchor: { position: 'relative', zIndex: 20 },
+    suggestionOverlay: {
+      backgroundColor: c.surface,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      borderWidth: StyleSheet.hairlineWidth * 2,
+      elevation: 12,
+      left: 0,
+      overflow: 'hidden',
+      position: 'absolute',
+      right: 0,
+      shadowColor: c.shadowColor,
+      shadowOffset: { width: 0, height: 8 },
+      shadowOpacity: 0.18,
+      shadowRadius: 16,
+      top: '100%',
+      zIndex: 30,
+    },
+    mapFrame: {
+      borderRadius: radius.md,
+      overflow: 'hidden',
+      position: 'relative',
+    },
+    gpsChip: {
+      alignItems: 'center',
+      backgroundColor: c.surface,
+      borderColor: c.border,
+      borderRadius: radius.pill,
+      borderWidth: StyleSheet.hairlineWidth * 2,
+      elevation: 4,
+      flexDirection: 'row',
+      gap: 5,
+      left: spacing.sm,
+      paddingHorizontal: spacing.sm + 2,
+      paddingVertical: spacing.xs + 2,
+      position: 'absolute',
+      top: spacing.sm,
+    },
+    gpsChipText: { color: c.primary, fontSize: 11.5, fontWeight: '800' },
+    editorFooter: {
+      borderTopColor: c.border,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      flexDirection: 'row',
+      paddingHorizontal: EDITOR_GUTTER,
+      gap: spacing.sm,
+      paddingTop: spacing.sm,
+    },
+    footerButton: { flex: 1 },
     vehicleSelectContainer: {
       backgroundColor: c.surfaceAlt,
       borderColor: c.border,
@@ -1681,11 +1807,6 @@ const makeStyles = (c: ThemeColors) =>
     assignedVehiclesRow: {
       gap: 4,
       marginTop: 4,
-    },
-    assignedVehiclesLabel: {
-      color: c.textSecondary,
-      fontSize: 11,
-      fontWeight: '700',
     },
     assignedBadgesWrap: {
       alignItems: 'center',

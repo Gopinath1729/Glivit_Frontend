@@ -1,4 +1,5 @@
 import type { LivePositionEvent } from '@/src/services/livePositionStream';
+import { isHeldMatchedSource } from '@/src/services/liveRouteTrail';
 import type { AnyAction } from '@/src/store/action';
 import { CLEAR_ACTIVE_TENANT, SWITCH_SUCCEEDED } from '@/src/store/tenantState';
 
@@ -143,6 +144,8 @@ function distanceKm(latA: number, lngA: number, latB: number, lngB: number): num
 /** Builds the merged entry for one device from a packet and what we already had. */
 function merge(existing: LiveVehicle | undefined, event: LivePositionEvent): LiveVehicle {
   const rawUsable = usableCoordinate(event.latitude, event.longitude);
+  const retained = isHeldMatchedSource(event.matchedSource);
+  const stationaryHeld = event.matchedSource === 'HELD_STATIONARY';
   const solved =
     rawUsable &&
     usableCoordinate(event.matchedLatitude, event.matchedLongitude) &&
@@ -156,20 +159,23 @@ function merge(existing: LiveVehicle | undefined, event: LivePositionEvent): Liv
       event.matchedLongitude as number
     ) <= 0.06;
   const held =
-    rawUsable &&
-    event.matchedSource === 'HELD' &&
-    existing != null &&
+    retained &&
     usableCoordinate(event.matchedLatitude, event.matchedLongitude) &&
-    distanceKm(
-      existing.latitude,
-      existing.longitude,
-      event.matchedLatitude as number,
-      event.matchedLongitude as number
-    ) <= 0.001;
+    (existing == null ||
+      distanceKm(
+        existing.latitude,
+        existing.longitude,
+        event.matchedLatitude as number,
+        event.matchedLongitude as number
+      ) <= 0.001);
   const matched = solved || held;
 
-  const rawLatitude = rawUsable ? event.latitude : existing?.rawLatitude ?? event.latitude;
-  const rawLongitude = rawUsable ? event.longitude : existing?.rawLongitude ?? event.longitude;
+  const rawLatitude = retained && existing
+    ? existing.rawLatitude
+    : rawUsable ? event.latitude : existing?.rawLatitude ?? event.latitude;
+  const rawLongitude = retained && existing
+    ? existing.rawLongitude
+    : rawUsable ? event.longitude : existing?.rawLongitude ?? event.longitude;
   const matchedLatitude = matched
     ? (event.matchedLatitude as number)
     : existing?.matchedLatitude ?? null;
@@ -179,10 +185,14 @@ function merge(existing: LiveVehicle | undefined, event: LivePositionEvent): Liv
 
   // Once a road coordinate exists, an unmatched packet retains it. Raw GPS is
   // only allowed to bootstrap a vehicle that has never had a road match.
-  const latitude = matched
+  const latitude = retained && existing
+    ? existing.latitude
+    : matched
     ? (event.matchedLatitude as number)
     : existing?.latitude ?? (rawUsable ? event.latitude : rawLatitude);
-  const longitude = matched
+  const longitude = retained && existing
+    ? existing.longitude
+    : matched
     ? (event.matchedLongitude as number)
     : existing?.longitude ?? (rawUsable ? event.longitude : rawLongitude);
 
@@ -197,18 +207,26 @@ function merge(existing: LiveVehicle | undefined, event: LivePositionEvent): Liv
     longitude,
     matchConfidence: event.matchConfidence ?? existing?.matchConfidence ?? null,
     roadBearing: event.roadBearing ?? existing?.roadBearing ?? null,
-    speedKmh: Number.isFinite(event.speedKmh) ? event.speedKmh : existing?.speedKmh ?? 0,
+    speedKmh: stationaryHeld
+      ? 0
+      : Number.isFinite(event.speedKmh) ? event.speedKmh : existing?.speedKmh ?? 0,
     // A trip total never goes backwards within a trip, but it DOES reset to 0
     // when a new trip starts, so this takes the packet's value rather than a
     // running maximum. The server owns when that reset happens.
-    tripDistanceKm: Number.isFinite(event.tripDistanceKm)
+    tripDistanceKm: stationaryHeld && existing
+      ? existing.tripDistanceKm
+      : Number.isFinite(event.tripDistanceKm)
       ? event.tripDistanceKm
       : existing?.tripDistanceKm ?? 0,
-    course: Number.isFinite(event.course) ? event.course : existing?.course ?? 0,
+    course: retained && existing
+      ? existing.course
+      : Number.isFinite(event.course) ? event.course : existing?.course ?? 0,
     accuracyMeters: event.accuracyMeters ?? existing?.accuracyMeters ?? null,
     ignition: event.ignition ?? existing?.ignition ?? null,
     gpsValid: event.gpsValid,
-    state: event.state ?? existing?.state ?? null,
+    state: stationaryHeld
+      ? event.state === 'IDLE' ? 'IDLE' : 'STOPPED'
+      : event.state ?? existing?.state ?? null,
     connectionState: event.connectionState ?? existing?.connectionState ?? null,
     // An update without an address must not blank the one already shown.
     address: event.address?.trim() ? event.address : existing?.address ?? null,

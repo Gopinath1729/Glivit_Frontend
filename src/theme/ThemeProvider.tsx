@@ -24,7 +24,7 @@ type ThemeContextValue = {
   isDark: boolean;
   colors: ThemeColors;
   stateColors: Record<string, string>;
-  elevation: (level?: 1 | 2 | 3) => ReturnType<typeof elevationFor>;
+  elevation: (level?: 1 | 2 | 3 | 4 | 5) => ReturnType<typeof elevationFor>;
   setMode: (mode: ThemeMode) => void;
   toggle: () => void;
   setPrimaryColor: (hex: string | null) => void;
@@ -162,7 +162,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       isDark: scheme === 'dark',
       colors,
       stateColors: stateColorsFor(colors),
-      elevation: (level: 1 | 2 | 3 = 1) => elevationFor(colors, level),
+      elevation: (level: 1 | 2 | 3 | 4 | 5 = 1) => elevationFor(colors, level),
       setMode,
       toggle,
       setPrimaryColor,
@@ -171,6 +171,41 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     };
   }, [scheme, mode, colors, setMode, toggle, setPrimaryColor, autoFollowVehicle, setAutoFollowVehicle]);
 
+  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
+}
+
+/**
+ * Pins everything inside it to one scheme, whatever the user's preference.
+ *
+ * <p>Used by the signed-out screens. Before sign-in there is no user, so there
+ * is no theme preference belonging to anybody - the app was reading whatever
+ * the previous user of the device had chosen and rendering the login screen
+ * dark or light accordingly. The controls inside (fields, buttons) all read the
+ * same context, so overriding it here is what makes them agree with the light
+ * card they sit on instead of having to be restyled one by one.
+ *
+ * <p>The mutators are kept live: a screen inside can still change the real
+ * preference, it just will not see it applied to itself.
+ */
+export function ForcedScheme({
+  children,
+  scheme,
+}: {
+  children: React.ReactNode;
+  scheme: Scheme;
+}) {
+  const outer = useTheme();
+  const value = useMemo<ThemeContextValue>(() => {
+    const colors = buildColors(scheme);
+    return {
+      ...outer,
+      scheme,
+      isDark: scheme === 'dark',
+      colors,
+      stateColors: stateColorsFor(colors),
+      elevation: (level: 1 | 2 | 3 | 4 | 5 = 1) => elevationFor(colors, level),
+    };
+  }, [outer, scheme]);
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
 }
 
@@ -185,7 +220,7 @@ export function useTheme(): ThemeContextValue {
       isDark: false,
       colors,
       stateColors: stateColorsFor(colors),
-      elevation: (level: 1 | 2 | 3 = 1) => elevationFor(colors, level),
+      elevation: (level: 1 | 2 | 3 | 4 | 5 = 1) => elevationFor(colors, level),
       setMode: () => undefined,
       toggle: () => undefined,
       setPrimaryColor: () => undefined,

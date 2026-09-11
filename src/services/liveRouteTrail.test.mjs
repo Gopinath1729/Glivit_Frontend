@@ -8,6 +8,7 @@ import {
   safeMatchedGeometry,
   travelledSegment,
 } from './liveRouteTrail.ts';
+import { matchedStepLimitFor } from './gpsPipeline.ts';
 
 const BASE_LAT = 12.9716;
 const BASE_LNG = 77.5946;
@@ -192,9 +193,11 @@ test('CARRIED keeps the marker where it is and invents no geometry', () => {
     // No new road answer. The previous road coordinate stands.
     { display: at(50), matchedSource: 'CARRIED' },
     { display: at(50), matchedSource: 'HELD' },
+    { display: at(50), matchedSource: 'PREVIOUS_TRUSTED' },
+    { display: at(50), matchedSource: 'HELD_STATIONARY' },
   ]);
 
-  assert.deepEqual(sources, ['matched', 'matched', 'carried', 'carried']);
+  assert.deepEqual(sources, ['matched', 'matched', 'carried', 'carried', 'carried', 'carried']);
   const runs = drawableRuns(trail);
   assert.equal(runs.length, 1);
   assert.equal(runs[0].length, 2, 'the carried fixes added no vertices');
@@ -502,4 +505,73 @@ test('hydration never closes a telemetry gap between live runs', () => {
     drawn(merged).map((run) => run.length),
     [4, 2]
   );
+});
+
+/*
+ * Regression: a 1 Hz drive on a continuous road, broken by one noisy sample.
+ *
+ * Taken from a real trip (device 14, 2026-09-10 09:02:46Z). The tracker reports
+ * every second and steps 5.8-8.0 m per fix at ~20 km/h; one multipath sample
+ * displaced a single fix by 30.9 m, then the next returned to 10.5 m and the
+ * one after that to 7.8 m. That lone 30.9 m step crossed the flat 30 m bound,
+ * so the road route broke and the same two points were redrawn as an amber
+ * "GPS only" chord - a visible hole in a road with no junction on it.
+ */
+test('a single noisy 1 Hz sample does not break a continuous road', () => {
+  const previousDisplay = at(0);
+  const segment = travelledSegment({
+    // A vehicle that has not left its road segment reports no new vertex.
+    matchedGeometry: [],
+    matchedSource: 'SOLVED',
+    previousDisplay,
+    previousTimestampMs: T0,
+    currentDisplay: at(30.9),
+    currentTimestampMs: T0 + 1_000,
+    expectedIntervalMs: 1_000,
+    roadRouteOpen: true,
+  });
+
+  assert.equal(segment.source, 'matched', 'both ends are engine-matched road positions');
+  assert.equal(segment.mode, 'extend', 'the blue route continues through the noisy sample');
+  assert.deepEqual(segment.diagnosticVertices, [], 'nothing is offered as GPS-only');
+  assert.equal(segment.vertices.length, 2);
+});
+
+test('a step past what the cadence allows still breaks the road route', () => {
+  // Ten seconds of missing fixes from a 1 Hz device, covered at a perfectly
+  // ordinary 72 km/h. Telemetry never broke, so the vehicle's motion is
+  // continuous - but 200 m of road with no reported vertex can hide a turn,
+  // which is the case this bound exists for.
+  const segment = travelledSegment({
+    matchedGeometry: [],
+    matchedSource: 'SOLVED',
+    previousDisplay: at(0),
+    previousTimestampMs: T0,
+    currentDisplay: at(200),
+    currentTimestampMs: T0 + 10_000,
+    expectedIntervalMs: 1_000,
+    roadRouteOpen: true,
+  });
+
+  assert.equal(segment.mode, 'extend', 'the vehicle itself never stopped reporting');
+  assert.equal(segment.source, 'none', 'the road taken across 200 m is genuinely unknown');
+  assert.equal(segment.vertices.length, 0, 'the blue route is not extended');
+  assert.equal(segment.diagnosticVertices.length, 2, 'the stretch is offered as GPS-only');
+});
+
+test('the matched-step bound scales with the device cadence', () => {
+  // Nothing known about the device yet: the conservative floor.
+  assert.equal(matchedStepLimitFor(null), 30);
+  assert.equal(matchedStepLimitFor(0), 30);
+
+  // A 1 Hz phone: the distance reachable in a second at the network ceiling.
+  assert.ok(
+    matchedStepLimitFor(1_000) > 30.9,
+    'clears the real 30.9 m sample that produced the reported hole'
+  );
+  assert.equal(Math.round(matchedStepLimitFor(1_000)), 56);
+
+  // A hardware tracker reporting every two minutes could cover kilometres, but
+  // a turn can hide in any of them, so the bound stops at the geometry limit.
+  assert.equal(matchedStepLimitFor(120_000), 120);
 });

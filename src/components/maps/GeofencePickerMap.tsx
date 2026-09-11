@@ -185,7 +185,13 @@ function buildPickerHtml(
   <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
   <style>
     html, body, #map { height: 100%; margin: 0; padding: 0; background: transparent; }
+    /* MapLibre's compact attribution still mounts expanded, so on a 168pt
+       picker the credit ran the full width of the map and collided with the
+       controls over it. Collapsed to its (i) button; a tap still opens the
+       full credit, which is what the OpenMapTiles/OSM licence requires. */
     .maplibregl-ctrl-attrib { font-size: 9px; }
+    .maplibregl-ctrl-attrib.maplibregl-compact { min-height: 20px; }
+    .maplibregl-ctrl-bottom-right { margin-bottom: 2px; margin-right: 2px; }
     .glivt-pin {
       width: 30px; height: 30px; cursor: grab;
       display: flex; align-items: center; justify-content: center;
@@ -251,6 +257,11 @@ function buildPickerHtml(
       });
 
       map.on('load', function () {
+        // Mounted with the credit open; collapse it to the (i) button so the
+        // map is legible. Tapping it still reveals the full attribution.
+        var attrib = document.querySelector('.maplibregl-ctrl-attrib');
+        if (attrib) attrib.classList.remove('maplibregl-compact-show');
+
         map.addSource('glivt-ring', { type: 'geojson', data: ringPolygon(CENTRE.lat, CENTRE.lng, RADIUS) });
         map.addLayer({
           id: 'glivt-ring-fill', type: 'fill', source: 'glivt-ring',

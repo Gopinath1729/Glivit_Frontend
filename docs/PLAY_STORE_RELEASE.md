@@ -3,7 +3,6 @@
 The Android package is `com.vehiclemoment.tracker`. Expo SDK 54 targets Android API 36, and the production profile builds an Android App Bundle (`.aab`) with automatic version-code increments. Production configuration fails closed if any of these are absent:
 
 - `EXPO_PUBLIC_BACKEND_BASE_URL`: stable public HTTPS Spring Boot API
-- `EXPO_PUBLIC_GEOAPIFY_TILES_API_KEY`: restricted Geoapify Map Tiles key
 
 Do not use an expiring tunnel URL for a Play release.
 
@@ -11,8 +10,8 @@ Road map matching is configured on the **backend**, not in the app. The app draw
 the matched geometry the API returns and never calls a routing service itself, so
 there is no routing variable to set here. The backend needs
 `MAP_MATCHING_PROVIDER=GEOAPIFY`, `GEOAPIFY_API_KEY`, and the Geoapify matching
-URL. The public tile key embedded in the app must be a separate, API-restricted
-credential and must never be the backend matching key.
+URL. Frontend maps use key-free OpenFreeMap tiles, so no map credential is
+embedded in the app.
 
 ## First EAS setup
 
@@ -23,14 +22,13 @@ npx eas-cli whoami
 npx eas-cli init
 ```
 
-Add the two production variables to the EAS `production` environment. Public
+Add the production API variable to the EAS `production` environment. Public
 Expo variables are embedded in the app bundle and must never be treated as
-server secrets. Restrict Geoapify API access to the APIs the app uses and set
-usage limits/alerts on the Geoapify project.
+server secrets. Restrict the backend Geoapify key and set usage limits/alerts
+on that project.
 
 ```powershell
 npx eas-cli env:create --environment production --name EXPO_PUBLIC_BACKEND_BASE_URL --value https://api.example.com --visibility plaintext
-npx eas-cli env:create --environment production --name EXPO_PUBLIC_GEOAPIFY_TILES_API_KEY --value YOUR_RESTRICTED_TILE_KEY --visibility sensitive
 ```
 
 ## Verify and build

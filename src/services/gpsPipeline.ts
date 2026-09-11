@@ -148,8 +148,12 @@ export const GPS_LIMITS = {
    * and lie on the road, and the straight line between two points on one road
    * segment IS that segment. The bound is what keeps it honest - past it, the
    * absence of geometry means the road taken is genuinely unknown, and the line
-   * breaks. 30 m is about 108 km/h at a 1 Hz report rate, so it covers ordinary
-   * driving and excludes the long silences it is there to catch.
+   * breaks.
+   *
+   * <p>This is the FLOOR, used when the device's cadence is not yet known. The
+   * rule is {@link matchedStepLimitFor}, because "the furthest a vehicle could
+   * have gone since the last fix" is a function of how often it reports - the
+   * same reason {@link coverageLimitsFor} exists.
    */
   maxMatchedSegmentStepMeters: 30,
   /** How far matched geometry may sit from the points it claims to join. */
@@ -185,6 +189,42 @@ export function coverageLimitsFor(expectedIntervalMs: number | null | undefined)
   // the ceiling speed, never below the absolute step limit.
   const reachableMeters = cadence == null ? 0 : (cadence / 1000) * (GPS_LIMITS.maxSpeedKph / 3.6);
   return { gapMs, stepMeters: Math.max(GPS_LIMITS.maxStepMeters, reachableMeters) };
+}
+
+/**
+ * Longest straight join allowed between two matched positions with no road
+ * vertices between them.
+ *
+ * <p>A flat 30 m was applied here regardless of cadence, and that is the bound
+ * a real 1 Hz drive kept crossing. A phone reporting every second steps about
+ * 6 m at 20 km/h, but GPS noise rides on top of the true step: a single
+ * multipath sample displaces one fix by 30 m without the vehicle doing anything
+ * unusual. Crossing the bound broke the road route and re-drew the identical
+ * two-point line as an amber "GPS only" chord, so a continuous road showed a
+ * hole in it - which is what this bound was supposed to prevent, not cause.
+ *
+ * <p>Scaled the way {@link coverageLimitsFor} scales its own step: the distance
+ * reachable in one reporting interval at {@link GPS_LIMITS.maxSpeedKph}, which
+ * no vehicle on this network exceeds. Capped at
+ * {@link GPS_LIMITS.maxGeometryStepMeters} so a tracker reporting every two
+ * minutes does not get licence to draw a kilometre of straight line through
+ * whatever it passed - past that distance a turn really can hide in the gap,
+ * and the line should break.
+ *
+ * @param expectedIntervalMs this device's typical gap between accepted fixes,
+ *                           or null before enough have arrived to know
+ */
+export function matchedStepLimitFor(expectedIntervalMs: number | null | undefined): number {
+  const cadence =
+    expectedIntervalMs != null && Number.isFinite(expectedIntervalMs) && expectedIntervalMs > 0
+      ? expectedIntervalMs
+      : null;
+  if (cadence == null) return GPS_LIMITS.maxMatchedSegmentStepMeters;
+  const reachableMeters = (cadence / 1000) * (GPS_LIMITS.maxSpeedKph / 3.6);
+  return Math.min(
+    GPS_LIMITS.maxGeometryStepMeters,
+    Math.max(GPS_LIMITS.maxMatchedSegmentStepMeters, reachableMeters)
+  );
 }
 
 const EARTH_RADIUS_METERS = 6_371_008.8;
@@ -831,15 +871,46 @@ function resolveBearing(params: {
     params.reportedHeading != null && Number.isFinite(params.reportedHeading)
       ? normalizeDegrees(params.reportedHeading)
       : null;
-  // The device's course is preferred only when the device itself says it is
-  // moving. A phone creeping in traffic reports zero long after it has covered
-  // real ground, and there the coordinates are the better witness.
-  if (movingBySpeed && reported != null) return reported;
+  // A device course can remain stuck at its previous cardinal direction even
+  // while coordinates clearly travel another way. Cross-check only after the
+  // step is longer than twice the stated accuracy, otherwise a noisy one-second
+  // delta would be less trustworthy than the tracker heading it replaces.
+  if (movingBySpeed && reported != null) {
+    if (movingByDistance) {
+      const travelled = bearingBetween(params.previous, params.current);
+      const courseCheckMeters = Math.max(
+        10,
+        params.accuracyMeters != null && Number.isFinite(params.accuracyMeters)
+          ? Math.max(0, params.accuracyMeters) * 2
+          : 0
+      );
+      if (params.distanceMeters >= courseCheckMeters) {
+        const disagreement = Math.abs(
+          ((((travelled - reported) % 360) + 540) % 360) - 180
+        );
+        if (disagreement > 55) return travelled;
+        if (disagreement > 22) {
+          return normalizeDegrees(
+            reported + (((((travelled - reported) % 360) + 540) % 360) - 180) * 0.4
+          );
+        }
+      }
+    }
+    return reported;
+  }
   if (movingByDistance) return bearingBetween(params.previous, params.current);
   return reported ?? held;
 }
 
 // ------------------------------------------------- road-matched acceptance
+
+export type RoadMatchSource =
+  | 'SOLVED'
+  | 'HELD_STATIONARY'
+  | 'PREVIOUS_TRUSTED'
+  | 'HELD'
+  | 'CARRIED'
+  | 'NONE';
 
 export type MatchedCandidate = {
   latitude: unknown;
@@ -859,7 +930,7 @@ export type MatchedCandidate = {
    * a confidence is present and `NONE` otherwise - the behaviour those clients
    * already had.
    */
-  source: 'SOLVED' | 'HELD' | 'CARRIED' | 'NONE' | null;
+  source: RoadMatchSource | null;
 };
 
 export type RoadMatchedPoint = {
@@ -871,7 +942,7 @@ export type RoadMatchedPoint = {
   /** Metres between the validated fix and where it was drawn. */
   snapDistanceMeters: number;
   confidence: number | null;
-  source: 'SOLVED' | 'HELD' | 'CARRIED' | 'NONE';
+  source: RoadMatchSource;
 };
 
 /**
@@ -902,34 +973,40 @@ export function acceptMatchedCoordinate(
     source: 'NONE',
   };
 
-  if (validated.held) {
-    return previousDisplay
-      ? { ...unmatched, coordinate: previousDisplay }
-      : unmatched;
-  }
   if (!candidate) return unmatched;
 
   const matched = coordinateOf(candidate.latitude, candidate.longitude);
-  if (!matched) return unmatched;
-
   const source =
     candidate.source ?? (candidate.confidence != null ? 'SOLVED' : 'NONE');
-  if (source === 'NONE') return unmatched;
+  const retained = source === 'HELD_STATIONARY'
+    || source === 'PREVIOUS_TRUSTED'
+    || source === 'HELD';
 
-  if (source === 'HELD') {
-    // A provider failure never promotes the new raw coordinate. The backend
-    // repeats its last trusted road coordinate and the client independently
-    // verifies that it is the same point it was already drawing.
-    if (!previousDisplay || distanceBetween(previousDisplay, matched) > 1) return unmatched;
+  // Retention is authoritative even when local validation independently
+  // classified the repeated coordinate as held. It can never move or rotate
+  // the marker and it never contributes geometry.
+  if (retained) {
+    if (!previousDisplay) return unmatched;
+    if (source === 'HELD' && matched && distanceBetween(previousDisplay, matched) > 1) {
+      return unmatched;
+    }
     return {
       validated,
       coordinate: previousDisplay,
       onRoad: true,
       snapDistanceMeters: distanceBetween(validated.coordinate, previousDisplay),
       confidence: candidate.confidence,
-      source: 'HELD',
+      source,
     };
   }
+
+  if (validated.held) {
+    return previousDisplay
+      ? { ...unmatched, coordinate: previousDisplay }
+      : unmatched;
+  }
+  if (!matched) return unmatched;
+  if (source === 'NONE') return unmatched;
 
   const snapDistanceMeters = distanceBetween(validated.coordinate, matched);
 

@@ -155,6 +155,8 @@ export type LiveRoadMotion = {
   position: LiveCoordinate | null;
   /** Heading to draw, 0-360. */
   heading: number;
+  /** Monotonic local timestamp for this rendered motion sample. */
+  sourceTime: number;
   /** Metres travelled along the current segment. */
   travelledMeters: number;
   /**
@@ -191,7 +193,16 @@ export function useLiveRoadMotion(
   fallback: LiveCoordinate | null,
   fallbackHeading = 0
 ): LiveRoadMotion {
-  const [travelledMeters, setTravelledMeters] = useState(0);
+  type MotionFrame = {
+    segmentKey: string;
+    sourceTime: number;
+    travelledMeters: number;
+  };
+  const [frame, setFrame] = useState<MotionFrame>({
+    segmentKey: '',
+    sourceTime: 0,
+    travelledMeters: 0,
+  });
   const frameRef = useRef<number | null>(null);
   /**
    * Monotonic id of the animation that owns the marker. A frame scheduled by a
@@ -200,6 +211,15 @@ export function useLiveRoadMotion(
    */
   const generationRef = useRef(0);
   const headingRef = useRef(normalizeHeading(fallbackHeading));
+  const segmentKey = segment ? `${segment.positionId ?? 'none'}:${segment.startedAt}` : '';
+
+  /**
+   * React publishes targets at 20 Hz; the map interpolates those targets on its
+   * own animation frame. Rendering this entire screen at display refresh rate
+   * sent a marker command and a changing route across the WebView bridge sixty
+   * times a second, starving the camera loop it was meant to animate.
+   */
+  const MOTION_PUBLISH_INTERVAL_MS = 50;
 
   useEffect(() => {
     const generation = (generationRef.current += 1);
@@ -208,27 +228,32 @@ export function useLiveRoadMotion(
       frameRef.current = null;
     }
     if (!segment) {
-      setTravelledMeters(0);
+      setFrame({ segmentKey: '', sourceTime: 0, travelledMeters: 0 });
       return;
     }
     const total = segment.polyline.lengthMeters;
     if (segment.placeImmediately || total <= 0) {
       // No observed ground to travel over: appear at the end of the segment
       // rather than sliding across roads nobody saw the vehicle take.
-      setTravelledMeters(total);
+      setFrame({ segmentKey, sourceTime: Date.now(), travelledMeters: total });
       return;
     }
 
-    setTravelledMeters(0);
+    setFrame({ segmentKey, sourceTime: segment.startedAt, travelledMeters: 0 });
     const startedAt = Date.now();
+    let lastPublishedAt = startedAt;
     const tick = () => {
       if (generationRef.current !== generation) return;
-      const fraction = Math.min(1, (Date.now() - startedAt) / Math.max(1, segment.durationMs));
+      const now = Date.now();
+      const fraction = Math.min(1, (now - startedAt) / Math.max(1, segment.durationMs));
       // Linear in DISTANCE. GPS fixes arrive at a steady cadence, so an
       // ease-in-out on every segment makes the vehicle visibly accelerate and
       // brake once per fix; constant progress along the road is what real
       // motion looks like.
-      setTravelledMeters(total * fraction);
+      if (fraction >= 1 || now - lastPublishedAt >= MOTION_PUBLISH_INTERVAL_MS) {
+        lastPublishedAt = now;
+        setFrame({ segmentKey, sourceTime: now, travelledMeters: total * fraction });
+      }
       if (fraction < 1) {
         frameRef.current = requestAnimationFrame(tick);
       } else {
@@ -243,7 +268,7 @@ export function useLiveRoadMotion(
       if (frameRef.current != null) cancelAnimationFrame(frameRef.current);
       frameRef.current = null;
     };
-  }, [segment]);
+  }, [segment, segmentKey]);
 
   return useMemo(() => {
     const runs = drawableRuns(trail);
@@ -251,11 +276,20 @@ export function useLiveRoadMotion(
       return {
         position: fallback,
         heading: normalizeHeading(fallbackHeading),
+        sourceTime: 0,
         travelledMeters: 0,
         route: runs,
       };
     }
 
+    // A changed segment renders once before its effect resets progress. Keying
+    // the value prevents the previous segment's completed distance from being
+    // applied to the new geometry for that frame (end -> start -> drive).
+    const travelledMeters = segment.placeImmediately
+      ? segment.polyline.lengthMeters
+      : frame.segmentKey === segmentKey
+        ? frame.travelledMeters
+        : 0;
     const at = positionAtDistance(segment.polyline, travelledMeters, segment.endHeading);
     const position = at?.coordinate ?? fallback;
     // Turn through the shortest angle toward the segment's direction of travel,
@@ -269,14 +303,26 @@ export function useLiveRoadMotion(
     // the newest run, so the drawn route stops exactly at the marker.
     const remaining = Math.max(0, segment.polyline.lengthMeters - travelledMeters);
     if (remaining <= 0.5 || runs.length === 0) {
-      return { position, heading, travelledMeters, route: runs };
+      return {
+        position,
+        heading,
+        sourceTime: frame.segmentKey === segmentKey ? frame.sourceTime : segment.startedAt,
+        travelledMeters,
+        route: runs,
+      };
     }
     const clippedLast = clipPolylineTail(runs[runs.length - 1], remaining);
     const route =
       clippedLast.length >= 2
         ? [...runs.slice(0, runs.length - 1), clippedLast]
         : runs.slice(0, runs.length - 1);
-    return { position, heading, travelledMeters, route };
-  }, [fallback, fallbackHeading, segment, trail, travelledMeters]);
+    return {
+      position,
+      heading,
+      sourceTime: frame.segmentKey === segmentKey ? frame.sourceTime : segment.startedAt,
+      travelledMeters,
+      route,
+    };
+  }, [fallback, fallbackHeading, frame, segment, segmentKey, trail]);
 }
 

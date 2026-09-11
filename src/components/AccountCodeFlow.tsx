@@ -1,27 +1,17 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
-import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import React from 'react';
-import {
-  Alert,
-  Pressable,
-  StyleSheet,
-  Text,
-  useWindowDimensions,
-  View,
-} from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { GlivtLogo } from '@/src/components/GlivtLogo';
+import { AuthScreenShell, authPalette as AUTH } from '@/src/components/ui/AuthScreenShell';
 import { Button } from '@/src/components/ui/Button';
-import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
 import { OtpInput } from '@/src/components/ui/OtpInput';
 import { TextField } from '@/src/components/ui/TextField';
 import { formatCountdown, useCountdown } from '@/src/hooks/useCountdown';
 import { apiErrorMessage } from '@/src/services/apiError';
 import { useAppSelector } from '@/src/store/hooks';
-import { useTheme } from '@/src/theme/ThemeProvider';
-import { spacing, typography, type ThemeColors } from '@/src/theme/tokens';
+import { ForcedScheme } from '@/src/theme/ThemeProvider';
+import { radius, spacing } from '@/src/theme/tokens';
 import type { OtpChallengeResponse, OtpVerifiedResponse } from '@/src/types/api';
 
 /** The password rule the backend enforces, mirrored so errors appear before the round trip. */
@@ -97,11 +87,8 @@ export function AccountCodeFlow(props: AccountCodeFlowProps) {
     settingPassword,
   } = props;
 
-  const { height: screenHeight } = useWindowDimensions();
-  const isSmallScreen = screenHeight < 750;
   const router = useRouter();
-  const { colors: c } = useTheme();
-  const styles = React.useMemo(() => makeStyles(c, isSmallScreen), [c, isSmallScreen]);
+  const styles = React.useMemo(() => makeStyles(), []);
   const tenant = useAppSelector((s) => s.auth.tenantConfig);
   const companyCode = useAppSelector((s) => s.auth.companyCode);
 
@@ -240,412 +227,223 @@ export function AccountCodeFlow(props: AccountCodeFlowProps) {
 
   const passwordMismatch = Boolean(confirmPassword) && confirmPassword !== newPassword;
 
+  const stepTitle =
+    step === 'password' ? passwordStepTitle : step === 'otp' ? 'Verification code' : title;
+  const stepSubtitle =
+    step === 'password'
+      ? PASSWORD_RULE
+      : step === 'otp'
+        ? `Enter the 6-digit code we sent to ${normalizedEmail}.`
+        : subtitle;
+
   return (
-    <View style={styles.flex}>
-      <View pointerEvents="none" style={styles.ambient}>
-        <View style={styles.ambientOrbOne} />
-        <View style={styles.ambientOrbTwo} />
-        <View style={styles.roadLineOne} />
-        <View style={styles.roadLineTwo} />
-      </View>
-
-      <KeyboardAwareForm
-        applyBottomInset={false}
-        contentContainerStyle={styles.grow}
-        style={styles.flex}>
-        <SafeAreaView edges={['top', 'bottom']} style={styles.flex}>
-          <View style={styles.contentContainer}>
-            <View style={styles.upperGroup}>
-              <View style={styles.headerGroup}>
-                <View style={styles.logo}>
-                  {tenant?.logoUrl ? (
-                    <Image
-                      contentFit="contain"
-                      source={{ uri: tenant.logoUrl }}
-                      style={styles.logoImage}
-                    />
-                  ) : (
-                    <GlivtLogo size={isSmallScreen ? 40 : 56} />
-                  )}
-                </View>
-                <View style={styles.heroCopy}>
-                  <Text style={styles.appName}>{title}</Text>
-                  <Text style={styles.heroSubtitle}>{subtitle}</Text>
-                </View>
-              </View>
-
-              <View style={styles.mainGroup}>
-                <View style={styles.form}>
-                  <View style={styles.formHeadingRow}>
-                    <View style={styles.formIcon}>
-                      <MaterialCommunityIcons
-                        color="#2BE6A6"
-                        name={
-                          step === 'password'
-                            ? 'lock-reset'
-                            : step === 'otp'
-                              ? 'email-check-outline'
-                              : 'email-outline'
-                        }
-                        size={21}
-                      />
-                    </View>
-                    <View style={styles.formHeadingCopy}>
-                      <Text style={styles.formTitle}>
-                        {step === 'password'
-                          ? passwordStepTitle
-                          : step === 'otp'
-                            ? 'Verification Code'
-                            : title}
-                      </Text>
-                      <Text numberOfLines={1} style={styles.formSubtitle}>
-                        {tenant?.name ?? 'Glivt Fleet Management'}
-                      </Text>
-                    </View>
-                    <View style={styles.companyBadge}>
-                      <Text numberOfLines={1} style={styles.companyBadgeText}>
-                        {companyCode ?? '-'}
-                      </Text>
-                    </View>
-                  </View>
-                  <View style={styles.formRule} />
-
-                  {step === 'email' ? (
-                    <>
-                      <TextField
-                        autoCapitalize="none"
-                        autoComplete="email"
-                        autoCorrect={false}
-                        keyboardType="email-address"
-                        label="Email Address"
-                        onChangeText={setEmail}
-                        onSubmitEditing={sendCode}
-                        placeholder="you@company.com"
-                        returnKeyType="send"
-                        textContentType="emailAddress"
-                        value={email}
-                      />
-                      <Text style={styles.hint}>{emailHint}</Text>
-                      {formError ? <Text style={styles.formError}>{formError}</Text> : null}
-                      <View style={styles.submit}>
-                        <Button
-                          color="#D1FAE5"
-                          disabled={anyLoading || !emailValid}
-                          label="Send Code"
-                          loading={requestingCode}
-                          onPress={sendCode}
-                          textColor="#0F172A"
-                        />
-                      </View>
-                    </>
-                  ) : null}
-
-                  {step === 'otp' ? (
-                    <>
-                      <Text style={styles.hint}>
-                        Enter the 6-digit code sent to{' '}
-                        <Text style={styles.hintStrong}>{normalizedEmail}</Text>.
-                      </Text>
-                      <View style={styles.otpBlock}>
-                        <OtpInput
-                          autoFocus
-                          disabled={verifyingCode}
-                          error={formError ?? undefined}
-                          onChange={setOtp}
-                          onComplete={(code) => void verify(code)}
-                          value={otp}
-                        />
-                      </View>
-                      <Text style={styles.countdown}>
-                        {expiry.remaining > 0
-                          ? `Code expires in ${formatCountdown(expiry.remaining)}`
-                          : 'This code has expired. Request a new one.'}
-                      </Text>
-                      <View style={styles.submit}>
-                        <Button
-                          color="#D1FAE5"
-                          disabled={anyLoading || otp.length !== 6}
-                          label="Verify Code"
-                          loading={verifyingCode}
-                          onPress={() => void verify()}
-                          textColor="#0F172A"
-                        />
-                      </View>
-                      {/* Disabled, not hidden, while the cooldown runs: a
-                          button that vanishes reads as a failure, whereas a
-                          countdown reads as "not yet". */}
-                      <Pressable
-                        accessibilityRole="button"
-                        accessibilityState={{ disabled: cooldown.remaining > 0 || anyLoading }}
-                        disabled={cooldown.remaining > 0 || anyLoading}
-                        onPress={resend}
-                        style={styles.link}>
-                        <Text
-                          style={[
-                            styles.linkText,
-                            (cooldown.remaining > 0 || anyLoading) && styles.linkTextDisabled,
-                          ]}>
-                          {cooldown.remaining > 0
-                            ? `Resend Code in ${cooldown.remaining}s`
-                            : 'Resend Code'}
-                        </Text>
-                      </Pressable>
-                      <Pressable
-                        accessibilityRole="button"
-                        disabled={anyLoading}
-                        onPress={() => {
-                          setStep('email');
-                          setOtp('');
-                          setFormError(null);
-                        }}
-                        style={styles.link}>
-                        <Text style={styles.linkTextMuted}>Use a different email</Text>
-                      </Pressable>
-                    </>
-                  ) : null}
-
-                  {step === 'password' ? (
-                    <>
-                      <TextField
-                        autoCapitalize="none"
-                        autoComplete="new-password"
-                        autoCorrect={false}
-                        label="New Password"
-                        onChangeText={setNewPassword}
-                        placeholder="New password"
-                        secure
-                        textContentType="newPassword"
-                        value={newPassword}
-                      />
-                      <View style={styles.gap} />
-                      <TextField
-                        autoCapitalize="none"
-                        autoComplete="new-password"
-                        autoCorrect={false}
-                        error={passwordMismatch ? 'Passwords do not match' : undefined}
-                        label="Confirm Password"
-                        onChangeText={setConfirmPassword}
-                        onSubmitEditing={submitPassword}
-                        placeholder="Re-enter new password"
-                        returnKeyType="go"
-                        secure
-                        textContentType="newPassword"
-                        value={confirmPassword}
-                      />
-                      <Text style={styles.hint}>{PASSWORD_RULE}</Text>
-                      {formError ? <Text style={styles.formError}>{formError}</Text> : null}
-                      <View style={styles.submit}>
-                        <Button
-                          color="#D1FAE5"
-                          disabled={
-                            anyLoading ||
-                            !STRONG_PASSWORD.test(newPassword) ||
-                            newPassword !== confirmPassword
-                          }
-                          label={passwordButtonLabel}
-                          loading={settingPassword}
-                          onPress={submitPassword}
-                          textColor="#0F172A"
-                        />
-                      </View>
-                    </>
-                  ) : null}
-
-                  {notice && step === 'otp' ? (
-                    <Text style={styles.notice}>{notice}</Text>
-                  ) : null}
-                </View>
-              </View>
+    <ForcedScheme scheme="light">
+      <AuthScreenShell
+        eyebrow={(tenant?.name ?? 'GLIVT FLEET').toUpperCase()}
+        footer={
+          <>
+            <Pressable
+              accessibilityRole="button"
+              disabled={anyLoading}
+              onPress={() => router.replace('/login')}
+              style={styles.link}>
+              <Text style={styles.linkText}>Back to sign in</Text>
+            </Pressable>
+            <View style={styles.codeChip}>
+              <MaterialCommunityIcons color={AUTH.inkMuted} name="domain" size={13} />
+              <Text style={styles.codeChipText}>{companyCode ?? '—'}</Text>
             </View>
+          </>
+        }
+        subtitle={stepSubtitle}
+        title={stepTitle}>
+        {step === 'email' ? (
+          <>
+            <TextField
+              autoCapitalize="none"
+              autoComplete="email"
+              autoCorrect={false}
+              keyboardType="email-address"
+              label="Email address"
+              onChangeText={setEmail}
+              onSubmitEditing={sendCode}
+              placeholder="you@company.com"
+              returnKeyType="send"
+              textContentType="emailAddress"
+              value={email}
+            />
+            <Text style={styles.hint}>{emailHint}</Text>
+            {formError ? <FormError message={formError} styles={styles} /> : null}
+            <Button
+              disabled={anyLoading || !emailValid}
+              label="Send code"
+              loading={requestingCode}
+              onPress={sendCode}
+            />
+          </>
+        ) : null}
 
-            <View style={styles.footerGroup}>
+        {step === 'otp' ? (
+          <>
+            <View style={styles.otpBlock}>
+              <OtpInput
+                autoFocus
+                disabled={verifyingCode}
+                error={formError ?? undefined}
+                onChange={setOtp}
+                onComplete={(code) => void verify(code)}
+                value={otp}
+              />
+            </View>
+            <View style={styles.countdownRow}>
+              <MaterialCommunityIcons
+                color={expiry.remaining > 0 ? AUTH.inkMuted : '#B42318'}
+                name={expiry.remaining > 0 ? 'timer-sand' : 'timer-off-outline'}
+                size={13}
+              />
+              <Text style={[styles.countdown, expiry.remaining === 0 && styles.countdownExpired]}>
+                {expiry.remaining > 0
+                  ? `Code expires in ${formatCountdown(expiry.remaining)}`
+                  : 'This code has expired. Request a new one.'}
+              </Text>
+            </View>
+            <Button
+              disabled={anyLoading || otp.length !== 6}
+              label="Verify code"
+              loading={verifyingCode}
+              onPress={() => void verify()}
+            />
+            {/* Disabled, not hidden, while the cooldown runs: a button that
+                vanishes reads as a failure, whereas a countdown reads as
+                "not yet". */}
+            <View style={styles.linkRow}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ disabled: cooldown.remaining > 0 || anyLoading }}
+                disabled={cooldown.remaining > 0 || anyLoading}
+                onPress={resend}
+                style={styles.link}>
+                <Text
+                  style={[
+                    styles.linkText,
+                    (cooldown.remaining > 0 || anyLoading) && styles.linkTextDisabled,
+                  ]}>
+                  {cooldown.remaining > 0 ? `Resend in ${cooldown.remaining}s` : 'Resend code'}
+                </Text>
+              </Pressable>
+              <View style={styles.linkDivider} />
               <Pressable
                 accessibilityRole="button"
                 disabled={anyLoading}
-                onPress={() => router.replace('/login')}
+                onPress={() => {
+                  setStep('email');
+                  setOtp('');
+                  setFormError(null);
+                }}
                 style={styles.link}>
-                <Text style={styles.backText}>Back to sign in</Text>
+                <Text style={styles.linkTextMuted}>Use a different email</Text>
               </Pressable>
-              <Text style={styles.clearCodeText}>
-                Company code: <Text style={styles.clearCodeStrong}>{companyCode ?? '-'}</Text>
-              </Text>
             </View>
-          </View>
-        </SafeAreaView>
-      </KeyboardAwareForm>
+            {notice ? <Text style={styles.notice}>{notice}</Text> : null}
+          </>
+        ) : null}
+
+        {step === 'password' ? (
+          <>
+            <TextField
+              autoCapitalize="none"
+              autoComplete="new-password"
+              autoCorrect={false}
+              label="New password"
+              onChangeText={setNewPassword}
+              placeholder="New password"
+              secure
+              textContentType="newPassword"
+              value={newPassword}
+            />
+            <TextField
+              autoCapitalize="none"
+              autoComplete="new-password"
+              autoCorrect={false}
+              error={passwordMismatch ? 'Passwords do not match' : undefined}
+              label="Confirm password"
+              onChangeText={setConfirmPassword}
+              onSubmitEditing={submitPassword}
+              placeholder="Re-enter new password"
+              returnKeyType="go"
+              secure
+              textContentType="newPassword"
+              value={confirmPassword}
+            />
+            {formError ? <FormError message={formError} styles={styles} /> : null}
+            <Button
+              disabled={
+                anyLoading ||
+                !STRONG_PASSWORD.test(newPassword) ||
+                newPassword !== confirmPassword
+              }
+              label={passwordButtonLabel}
+              loading={settingPassword}
+              onPress={submitPassword}
+            />
+          </>
+        ) : null}
+      </AuthScreenShell>
+    </ForcedScheme>
+  );
+}
+
+function FormError({
+  message,
+  styles,
+}: {
+  message: string;
+  styles: ReturnType<typeof makeStyles>;
+}) {
+  return (
+    <View style={styles.formError}>
+      <MaterialCommunityIcons color="#B42318" name="alert-circle-outline" size={16} />
+      <Text style={styles.formErrorText}>{message}</Text>
     </View>
   );
 }
 
-const makeStyles = (c: ThemeColors, isSmallScreen: boolean) =>
+const makeStyles = () =>
   StyleSheet.create({
-    flex: { flex: 1, backgroundColor: c.loginBackground },
-    grow: { flexGrow: 1 },
-    ambient: {
-      ...StyleSheet.absoluteFillObject,
-      backgroundColor: c.loginBackground,
-      overflow: 'hidden',
-    },
-    ambientOrbOne: {
-      backgroundColor: 'rgba(0, 190, 143, 0.18)',
-      borderRadius: 220,
-      height: 360,
-      position: 'absolute',
-      right: -170,
-      top: -120,
-      width: 360,
-    },
-    ambientOrbTwo: {
-      backgroundColor: 'rgba(0, 120, 196, 0.13)',
-      borderRadius: 180,
-      bottom: -150,
-      height: 320,
-      left: -170,
-      position: 'absolute',
-      width: 320,
-    },
-    roadLineOne: {
-      backgroundColor: 'rgba(43, 230, 166, 0.09)',
-      borderRadius: 8,
-      height: 2,
-      left: -70,
-      position: 'absolute',
-      right: -70,
-      top: '36%',
-      transform: [{ rotate: '-12deg' }],
-    },
-    roadLineTwo: {
-      backgroundColor: 'rgba(67, 188, 226, 0.08)',
-      borderRadius: 8,
-      height: 1,
-      left: -70,
-      position: 'absolute',
-      right: -70,
-      top: '41%',
-      transform: [{ rotate: '-12deg' }],
-    },
-    contentContainer: {
-      flex: 1,
+    hint: { color: AUTH.inkSoft, fontSize: 12, lineHeight: 18 },
+    otpBlock: { paddingVertical: spacing.xs },
+    countdownRow: { alignItems: 'center', flexDirection: 'row', gap: 5 },
+    countdown: { color: AUTH.inkMuted, fontSize: 12, fontWeight: '600' },
+    countdownExpired: { color: '#B42318' },
+    linkRow: { alignItems: 'center', flexDirection: 'row', gap: spacing.sm, justifyContent: 'center' },
+    link: { paddingVertical: 2 },
+    linkText: { color: AUTH.accent, fontSize: 13, fontWeight: '800' },
+    linkTextDisabled: { color: AUTH.inkMuted },
+    linkTextMuted: { color: AUTH.inkSoft, fontSize: 13, fontWeight: '700' },
+    linkDivider: { backgroundColor: AUTH.border, height: 13, width: StyleSheet.hairlineWidth * 2 },
+    notice: { color: AUTH.inkSoft, fontSize: 12, lineHeight: 18, textAlign: 'center' },
+    codeChip: {
       alignItems: 'center',
-      justifyContent: 'space-between',
-      paddingHorizontal: spacing.xl,
-      paddingTop: isSmallScreen ? 5 : 15,
-      paddingBottom: isSmallScreen ? 5 : 15,
-      width: '100%',
+      backgroundColor: AUTH.card,
+      borderColor: AUTH.border,
+      borderRadius: radius.pill,
+      borderWidth: StyleSheet.hairlineWidth * 2,
+      flexDirection: 'row',
+      gap: 6,
+      paddingHorizontal: spacing.md,
+      paddingVertical: spacing.xs + 2,
     },
-    upperGroup: { alignItems: 'center', width: '100%' },
-    headerGroup: { alignItems: 'center', width: '100%' },
-    mainGroup: { alignItems: 'center', width: '100%' },
-    footerGroup: { alignItems: 'center', width: '100%' },
-    logo: {
-      alignItems: 'center',
-      minHeight: isSmallScreen ? 40 : 60,
-      justifyContent: 'center',
-    },
-    logoImage: { height: isSmallScreen ? 36 : 56, width: isSmallScreen ? 115 : 180 },
-    heroCopy: {
-      alignItems: 'center',
-      marginTop: isSmallScreen ? 4 : spacing.lg,
-      maxWidth: 390,
-    },
-    appName: {
-      color: c.white,
-      fontSize: isSmallScreen ? 20 : 28,
-      fontWeight: '900',
-      letterSpacing: -0.6,
-    },
-    heroSubtitle: {
-      color: 'rgba(226,239,247,0.68)',
-      fontSize: isSmallScreen ? 11 : typography.body,
-      lineHeight: isSmallScreen ? 14 : 21,
-      marginTop: isSmallScreen ? 2 : 4,
-      textAlign: 'center',
-    },
-    form: {
-      backgroundColor: 'rgba(10, 20, 32, 0.92)',
-      borderColor: 'rgba(255,255,255,0.13)',
-      borderRadius: isSmallScreen ? 16 : 24,
-      borderWidth: 1,
-      elevation: 8,
-      maxWidth: 470,
-      marginTop: isSmallScreen ? 8 : spacing.xl,
-      padding: isSmallScreen ? 10 : 20,
-      shadowColor: '#02070D',
-      shadowOffset: { width: 0, height: 18 },
-      shadowOpacity: 0.36,
-      shadowRadius: 28,
-      width: '100%',
-    },
-    formHeadingRow: { alignItems: 'center', flexDirection: 'row', gap: 10 },
-    formHeadingCopy: { flex: 1, minWidth: 0 },
-    formIcon: {
-      alignItems: 'center',
-      backgroundColor: 'rgba(43,230,166,0.1)',
-      borderColor: 'rgba(43,230,166,0.2)',
-      borderRadius: 12,
-      borderWidth: 1,
-      height: 42,
-      justifyContent: 'center',
-      width: 42,
-    },
-    formTitle: { color: '#F4FAFE', fontSize: 16, fontWeight: '900' },
-    formSubtitle: { color: '#8299AA', fontSize: 10, fontWeight: '700', marginTop: 2 },
-    companyBadge: {
-      backgroundColor: 'rgba(255,255,255,0.06)',
-      borderColor: 'rgba(255,255,255,0.11)',
-      borderRadius: 9,
-      borderWidth: 1,
-      maxWidth: 88,
-      paddingHorizontal: 9,
-      paddingVertical: 6,
-    },
-    companyBadgeText: {
-      color: '#AFC0CC',
-      fontSize: 9,
-      fontWeight: '900',
-      letterSpacing: 0.8,
-    },
-    formRule: {
-      backgroundColor: 'rgba(255,255,255,0.08)',
-      height: 1,
-      marginBottom: isSmallScreen ? 8 : spacing.lg,
-      marginTop: isSmallScreen ? 4 : spacing.md,
-    },
-    gap: { height: isSmallScreen ? 6 : spacing.md },
-    otpBlock: { marginTop: spacing.md, width: '100%' },
-    hint: {
-      color: 'rgba(226,239,247,0.6)',
-      fontSize: typography.caption,
-      lineHeight: 17,
-      marginTop: spacing.sm,
-    },
-    hintStrong: { color: '#D1FAE5', fontWeight: '800' },
-    countdown: {
-      color: '#9BEED1',
-      fontSize: typography.caption,
-      fontWeight: '700',
-      marginTop: spacing.sm,
-      textAlign: 'center',
-    },
-    notice: {
-      color: 'rgba(226,239,247,0.5)',
-      fontSize: 10,
-      lineHeight: 15,
-      marginTop: spacing.md,
-      textAlign: 'center',
-    },
+    codeChipText: { color: AUTH.ink, fontSize: 12, fontWeight: '900', letterSpacing: 0.6 },
     formError: {
-      color: c.danger,
-      fontSize: typography.label,
-      marginTop: spacing.md,
-      textAlign: 'center',
+      alignItems: 'center',
+      backgroundColor: '#FEF3F2',
+      borderColor: '#FDA29B',
+      borderRadius: radius.md,
+      borderWidth: StyleSheet.hairlineWidth * 2,
+      flexDirection: 'row',
+      gap: spacing.sm,
+      paddingHorizontal: spacing.sm + 2,
+      paddingVertical: spacing.sm,
     },
-    submit: { marginTop: isSmallScreen ? 8 : spacing.lg },
-    link: { alignSelf: 'center', marginTop: spacing.sm, padding: spacing.xs },
-    linkText: { color: '#69D9F3', fontSize: typography.label, fontWeight: '700' },
-    linkTextDisabled: { color: 'rgba(105,217,243,0.42)' },
-    linkTextMuted: { color: 'rgba(226,239,247,0.5)', fontSize: typography.caption },
-    backText: { color: 'rgba(255,255,255,0.72)', fontSize: typography.label, fontWeight: '700' },
-    clearCodeText: { color: 'rgba(255,255,255,0.64)', fontSize: typography.caption },
-    clearCodeStrong: { color: c.white, fontWeight: '800' },
+    formErrorText: { color: '#B42318', flex: 1, fontSize: 12.5, lineHeight: 18 },
   });

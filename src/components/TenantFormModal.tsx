@@ -1,4 +1,5 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import React from 'react';
 import {
   Modal,
@@ -8,21 +9,17 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import Animated, { FadeInDown, FadeOut } from 'react-native-reanimated';
 
 import { Button } from '@/src/components/ui/Button';
 import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
 import { Chip } from '@/src/components/ui/ModulePrimitives';
-import {
-  SearchableDropdown,
-  type DropdownOption,
-} from '@/src/components/ui/SearchableDropdown';
 import { TextField } from '@/src/components/ui/TextField';
 import { apiErrorMessage } from '@/src/services/apiError';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
 import type {
   ApiResponse,
-  ManagedUserDto,
   TenantCreateRequest,
   TenantStatus,
   TenantSummary,
@@ -38,7 +35,6 @@ type Draft = {
   name: string;
   tenantId: string;
   companyName: string;
-  adminUserId?: number;
   adminName: string;
   adminEmail: string;
   adminPhone: string;
@@ -51,7 +47,6 @@ const EMPTY: Draft = {
   name: '',
   tenantId: '',
   companyName: '',
-  adminUserId: undefined,
   adminName: '',
   adminEmail: '',
   adminPhone: '',
@@ -64,7 +59,6 @@ function draftFrom(tenant: TenantSummary | null): Draft {
     name: tenant.name,
     tenantId: tenant.tenantId,
     companyName: tenant.companyName,
-    adminUserId: undefined,
     adminName: tenant.adminName ?? '',
     adminEmail: tenant.adminEmail ?? '',
     adminPhone: tenant.adminPhone ?? '',
@@ -102,10 +96,6 @@ export function validateTenantDraft(
   if (!companyName) errors.companyName = 'Company name is required';
   else if (companyName.length > 160) {
     errors.companyName = 'Company name must be 160 characters or fewer';
-  }
-
-  if (mode === 'create' && !draft.adminUserId) {
-    errors.adminUserId = 'Choose an administrator';
   }
 
   const adminName = draft.adminName.trim();
@@ -164,9 +154,6 @@ export function TenantFormModal({
   mode,
   tenant,
   existingTenants,
-  adminCandidates,
-  adminCandidatesLoading,
-  adminCandidatesError,
   submitting,
   onClose,
   onCreate,
@@ -176,9 +163,6 @@ export function TenantFormModal({
   mode: 'create' | 'edit';
   tenant: TenantSummary | null;
   existingTenants: TenantSummary[];
-  adminCandidates: ManagedUserDto[];
-  adminCandidatesLoading?: boolean;
-  adminCandidatesError?: string;
   submitting: boolean;
   onClose: () => void;
   onCreate: (body: TenantCreateRequest) => Promise<void>;
@@ -192,18 +176,6 @@ export function TenantFormModal({
   const [errors, setErrors] = React.useState<FieldErrors>({});
   const [banner, setBanner] = React.useState<string | null>(null);
   const [touched, setTouched] = React.useState(false);
-
-  const adminOptions = React.useMemo<DropdownOption[]>(
-    () =>
-      adminCandidates.map((member) => ({
-        id: member.id,
-        label: member.name,
-        subLabel: `${roleLabel(member.role)} · ${member.email ?? member.username}`,
-        phone: member.mobile ?? undefined,
-        searchTags: [member.username, member.email ?? '', roleLabel(member.role)],
-      })),
-    [adminCandidates]
-  );
 
   // Reopening the form must never show the previous tenant's values or errors.
   React.useEffect(() => {
@@ -222,27 +194,6 @@ export function TenantFormModal({
     setBanner(null);
   };
 
-  const selectAdmin = (option: DropdownOption | undefined) => {
-    const member = option
-      ? adminCandidates.find((candidate) => candidate.id === option.id)
-      : undefined;
-    setDraft((prev) => ({
-      ...prev,
-      adminUserId: member?.id,
-      adminName: member?.name ?? '',
-      adminEmail: member?.email ?? (member?.username.includes('@') ? member.username : ''),
-      adminPhone: member?.mobile ?? '',
-    }));
-    setErrors((prev) => ({
-      ...prev,
-      adminUserId: undefined,
-      adminName: undefined,
-      adminEmail: undefined,
-      adminPhone: undefined,
-    }));
-    setBanner(null);
-  };
-
   const submit = async () => {
     if (submitting) return;
     setTouched(true);
@@ -258,7 +209,9 @@ export function TenantFormModal({
         await onCreate({
           name: draft.name.trim(),
           companyName: draft.companyName.trim(),
-          adminUserId: draft.adminUserId!,
+          adminName: draft.adminName.trim(),
+          adminEmail: draft.adminEmail.trim(),
+          adminPhone: draft.adminPhone.trim(),
           status: draft.status,
         });
       } else if (tenant) {
@@ -281,16 +234,39 @@ export function TenantFormModal({
   const liveErrors = touched ? errors : {};
 
   return (
-    <Modal animationType="slide" onRequestClose={onClose} statusBarTranslucent visible={visible}>
-      <View style={styles.flex}>
-        <View style={[styles.header, { paddingTop: Math.max(insets.top + spacing.sm, spacing.lg) }]}>
+    <Modal
+      animationType="fade"
+      onRequestClose={onClose}
+      presentationStyle="overFullScreen"
+      statusBarTranslucent
+      transparent
+      visible={visible}>
+      <View
+        style={[
+          styles.overlay,
+          {
+            paddingBottom: Math.max(insets.bottom, spacing.md),
+            paddingTop: Math.max(insets.top, spacing.md),
+          },
+        ]}>
+        <Pressable
+          accessibilityLabel="Close tenant form"
+          accessibilityRole="button"
+          onPress={onClose}
+          style={StyleSheet.absoluteFill}
+        />
+        <Animated.View
+          entering={FadeInDown.springify().damping(18).stiffness(185)}
+          exiting={FadeOut.duration(150)}
+          style={styles.modalCard}>
+        <LinearGradient colors={['#1B66C9', '#123875']} end={{ x: 1, y: 1 }} style={styles.header}>
           <Pressable
             accessibilityLabel="Close"
             accessibilityRole="button"
             hitSlop={12}
             onPress={onClose}
             style={styles.headerButton}>
-            <MaterialCommunityIcons color={c.onPrimary} name="arrow-left" size={24} />
+            <MaterialCommunityIcons color={c.onPrimary} name="close" size={22} />
           </Pressable>
           <View style={styles.headerCopy}>
             <Text style={styles.headerEyebrow}>TENANT MANAGEMENT</Text>
@@ -303,16 +279,17 @@ export function TenantFormModal({
                 : 'Update organization, administrator and access details.'}
             </Text>
           </View>
-        </View>
+        </LinearGradient>
 
         <KeyboardAwareForm
           applyBottomInset={false}
           contentContainerStyle={[
             styles.content,
-            { paddingBottom: Math.max(insets.bottom, spacing.md) + spacing.xl },
+            { paddingBottom: spacing.xl },
           ]}
           extraOffset={32}
-          style={styles.flex}>
+          style={styles.formScroll}
+          testID="tenant-form-scroll">
           <View style={styles.page}>
             {banner ? (
               <View style={styles.banner}>
@@ -366,33 +343,19 @@ export function TenantFormModal({
                 </View>
                 <View style={styles.sectionCopy}>
                   <Text style={styles.sectionTitle}>Tenant administrator</Text>
-                  <Text style={styles.sectionSubtitle}>Choose the member responsible for this organization.</Text>
+                  <Text style={styles.sectionSubtitle}>Enter the new administrator for this organization.</Text>
                 </View>
               </View>
               <View style={styles.fieldStack}>
-                {mode === 'create' ? (
-                  <SearchableDropdown
-                    emptyText="No available members found"
-                    error={liveErrors.adminUserId ?? adminCandidatesError}
-                    label="Admin Name"
-                    loading={adminCandidatesLoading}
-                    onSelect={selectAdmin}
-                    options={adminOptions}
-                    placeholder="Choose an admin or member"
-                    selectedId={draft.adminUserId}
-                  />
-                ) : (
-                  <TextField
-                    error={liveErrors.adminName}
-                    label="Admin Name"
-                    onChangeText={(v) => set('adminName', v)}
-                    placeholder="Priya Sharma"
-                    value={draft.adminName}
-                  />
-                )}
+                <TextField
+                  error={liveErrors.adminName}
+                  label="Admin Name"
+                  onChangeText={(v) => set('adminName', v)}
+                  placeholder="Priya Sharma"
+                  value={draft.adminName}
+                />
                 <TextField
                   autoCapitalize="none"
-                  editable={mode !== 'create'}
                   error={liveErrors.adminEmail}
                   keyboardType="email-address"
                   label="Admin Email"
@@ -401,7 +364,6 @@ export function TenantFormModal({
                   value={draft.adminEmail}
                 />
                 <TextField
-                  editable={mode !== 'create'}
                   error={liveErrors.adminPhone}
                   keyboardType="phone-pad"
                   label="Phone Number"
@@ -413,8 +375,8 @@ export function TenantFormModal({
                   <View style={styles.infoNote}>
                     <MaterialCommunityIcons color={c.primary} name="information-outline" size={17} />
                     <Text style={styles.infoNoteText}>
-                      Contact details come from the selected member. They activate their own account
-                      and choose their password from the login screen.
+                      A new, tenant-owned administrator account will be created from these details.
+                      They can activate it and choose their password from the login screen.
                     </Text>
                   </View>
                 ) : null}
@@ -457,6 +419,7 @@ export function TenantFormModal({
             </View>
           </View>
         </KeyboardAwareForm>
+        </Animated.View>
       </View>
     </Modal>
   );
@@ -474,14 +437,32 @@ function statusHint(status: TenantStatus) {
   return 'Sign-in is blocked with a maintenance message; existing sessions keep working.';
 }
 
-function roleLabel(role: ManagedUserDto['role']) {
-  if (role === 'COMPANY_USER') return 'User';
-  return 'Admin';
-}
-
 const makeStyles = (c: ThemeColors) =>
   StyleSheet.create({
-    flex: { backgroundColor: c.pageBackground, flex: 1 },
+    overlay: {
+      alignItems: 'center',
+      backgroundColor: c.overlay,
+      flex: 1,
+      justifyContent: 'center',
+      paddingHorizontal: spacing.md,
+    },
+    modalCard: {
+      backgroundColor: c.pageBackground,
+      borderColor: c.border,
+      borderRadius: radius.xl,
+      borderWidth: StyleSheet.hairlineWidth,
+      elevation: 18,
+      height: '94%',
+      maxHeight: 860,
+      maxWidth: 720,
+      overflow: 'hidden',
+      shadowColor: c.shadowColor,
+      shadowOffset: { width: 0, height: 14 },
+      shadowOpacity: 0.28,
+      shadowRadius: 30,
+      width: '100%',
+    },
+    formScroll: { backgroundColor: c.pageBackground, flex: 1, minHeight: 0 },
     header: {
       alignItems: 'center',
       backgroundColor: c.primary,
@@ -489,6 +470,7 @@ const makeStyles = (c: ThemeColors) =>
       gap: spacing.md,
       paddingBottom: spacing.lg,
       paddingHorizontal: spacing.md,
+      paddingTop: spacing.lg,
     },
     headerButton: {
       alignItems: 'center',

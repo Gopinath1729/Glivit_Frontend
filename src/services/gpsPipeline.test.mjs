@@ -474,6 +474,48 @@ test('a failed match holds the exact previous road position', () => {
   assert.deepEqual(held.coordinate, previousDisplay);
 });
 
+test('sustained travel corrects a stale tracker course', () => {
+  const decision = validateGpsSample({
+    raw: raw({ metresEast: 50, timestampMs: NOW, deviceSpeedKmh: 60, reportedHeading: 0 }),
+    previous: anchor({ timestampMs: NOW - 3_000, bearing: 0 }),
+    now: NOW,
+  });
+  assert.equal(decision.accepted, true);
+  assert.ok(
+    Math.abs(decision.point.bearing - 90) < 2,
+    `expected eastbound coordinate course, got ${decision.point.bearing}`
+  );
+});
+
+test('a short GPS delta cannot overrule a valid tracker course', () => {
+  const decision = validateGpsSample({
+    raw: raw({ metresEast: 7, timestampMs: NOW, deviceSpeedKmh: 10, reportedHeading: 15 }),
+    previous: anchor({ timestampMs: NOW - 3_000, bearing: 15 }),
+    now: NOW,
+  });
+  assert.equal(decision.accepted, true);
+  assert.equal(decision.point.bearing, 15);
+});
+
+test('HELD_STATIONARY is an authoritative freeze even if packet coordinates drift', () => {
+  const previousDisplay = at(0, 6);
+  const validated = validateGpsSample({
+    raw: raw({ metresNorth: 18, timestampMs: NOW, deviceSpeedKmh: 0 }),
+    previous: anchor({ timestampMs: NOW - 10_000 }),
+    now: NOW,
+  }).point;
+
+  const held = acceptMatchedCoordinate(
+    validated,
+    { ...at(70, 40), confidence: 0.92, source: 'HELD_STATIONARY' },
+    previousDisplay
+  );
+
+  assert.equal(held.onRoad, true);
+  assert.equal(held.source, 'HELD_STATIONARY');
+  assert.deepEqual(held.coordinate, previousDisplay);
+});
+
 test('a held fix is drawn where it was held, never moved by a road match', () => {
   const previousDisplay = at(0, 4);
   const validated = validateGpsSample({

@@ -1,7 +1,6 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import React from 'react';
 import {
-  Alert,
   Pressable,
   RefreshControl,
   ScrollView,
@@ -12,10 +11,13 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Button } from '@/src/components/ui/Button';
+import { CompactSearchBar } from '@/src/components/ui/CompactSearchBar';
+import { useAppDialog } from '@/src/components/ui/useAppDialog';
 import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
+import { ListPagination } from '@/src/components/ui/ListPagination';
 import {
   ManagementActionButton,
-  ManagementBottomSheet,
+  ManagementModal,
   ManagementCard,
   ManagementSectionHeader,
 } from '@/src/components/ui/ManagementPrimitives';
@@ -86,6 +88,7 @@ type Draft = {
 };
 
 const EMPTY: Draft = { name: '', email: '', mobile: '' };
+const PAGE_SIZE = 10;
 
 /**
  * Members tab: the tenant's Admin and User accounts.
@@ -104,6 +107,10 @@ export function MembersPanel() {
   const currentUser = useAppSelector((s) => s.auth.user);
 
   const [roleTab, setRoleTab] = React.useState<MemberRole>('ADMIN');
+  const [searchInput, setSearchInput] = React.useState('');
+  const [search, setSearch] = React.useState('');
+  const [page, setPage] = React.useState(0);
+  const { confirm, dialogElement, notify } = useAppDialog();
   const [createVisible, setCreateVisible] = React.useState(false);
   const [editing, setEditing] = React.useState<ManagedUserDto | null>(null);
   const [draft, setDraft] = React.useState<Draft>(EMPTY);
@@ -112,7 +119,20 @@ export function MembersPanel() {
     status: 'ACTIVE',
   });
 
-  const members = useGetUsersQuery({ role: roleTab, size: 100 });
+  React.useEffect(() => {
+    const handle = setTimeout(() => {
+      setSearch(searchInput.trim());
+      setPage(0);
+    }, 300);
+    return () => clearTimeout(handle);
+  }, [searchInput]);
+
+  const members = useGetUsersQuery({
+    role: roleTab,
+    search: search || undefined,
+    page,
+    size: PAGE_SIZE,
+  });
   const [createUser, createState] = useCreateUserMutation();
   const [updateUser, updateState] = useUpdateUserMutation();
   const [deleteUser] = useDeleteUserMutation();
@@ -123,6 +143,8 @@ export function MembersPanel() {
     () => (members.data?.content ?? []).filter((m) => m.role === roleTab),
     [members.data?.content, roleTab]
   );
+  const totalMembers = members.data?.totalElements ?? 0;
+  const totalPages = members.data?.totalPages ?? 0;
 
   const openCreate = () => {
     setDraft(EMPTY);
@@ -148,7 +170,11 @@ export function MembersPanel() {
     // Checked before any await, so a fast double tap cannot create two members.
     if (createState.isLoading) return;
     if (!draftValid(draft)) {
-      Alert.alert('Check the form', 'Enter a full name, a valid email address and a mobile number.');
+      notify({
+        message: 'Enter a full name, a valid email address and a mobile number.',
+        title: 'Check the form',
+        tone: 'info',
+      });
       return;
     }
     try {
@@ -163,19 +189,29 @@ export function MembersPanel() {
       setDraft(EMPTY);
       // The mutation invalidates the User tag; the list refetches itself.
       // Appending the response by hand is what produces a duplicate row.
-      Alert.alert(
-        'Member created',
-        'Member created successfully. They can activate the account from the login screen.'
-      );
+      notify({
+        message:
+          'The member was created and their activation code was emailed. They can finish setup from Activate Account.',
+        title: 'Member created',
+        tone: 'success',
+      });
     } catch (err) {
-      Alert.alert(`${roleLabel(roleTab)} not created`, apiErrorMessage(err));
+      notify({
+        message: apiErrorMessage(err),
+        title: `${roleLabel(roleTab)} not created`,
+        tone: 'danger',
+      });
     }
   };
 
   const submitEdit = async () => {
     if (!editing || updateState.isLoading) return;
     if (!draftValid(editDraft)) {
-      Alert.alert('Check the form', 'Enter a full name, a valid email address and a mobile number.');
+      notify({
+        message: 'Enter a full name, a valid email address and a mobile number.',
+        title: 'Check the form',
+        tone: 'info',
+      });
       return;
     }
     const email = normalizeEmail(editDraft.email);
@@ -194,14 +230,19 @@ export function MembersPanel() {
           },
         }).unwrap();
         setEditing(null);
-        Alert.alert(
-          'Member updated',
-          emailChanged
+        notify({
+          message: emailChanged
             ? `${editDraft.name.trim()} must verify ${email} with a code before signing in again.`
-            : `${editDraft.name.trim()} has been updated.`
-        );
+            : `${editDraft.name.trim()} has been updated.`,
+          title: 'Member updated',
+          tone: 'success',
+        });
       } catch (err) {
-        Alert.alert('Member not updated', apiErrorMessage(err));
+        notify({
+          message: apiErrorMessage(err),
+          title: 'Member not updated',
+          tone: 'danger',
+        });
       }
     };
 
@@ -209,14 +250,13 @@ export function MembersPanel() {
       // Moving an account to a new address is a security event, not a typo
       // fix: the new mailbox has proved nothing, so the member goes back
       // through activation. The admin should know that before confirming.
-      Alert.alert(
-        'Change email address?',
-        `${editDraft.name.trim()} will be signed out and must verify ${email} using a code before they can sign in again.`,
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Change email', style: 'destructive', onPress: () => void apply() },
-        ]
-      );
+      confirm({
+        confirmLabel: 'Change email',
+        message: `${editDraft.name.trim()} will be signed out and must verify ${email} using a code before they can sign in again.`,
+        onConfirm: apply,
+        title: 'Change email address?',
+        tone: 'danger',
+      });
       return;
     }
     await apply();
@@ -224,25 +264,30 @@ export function MembersPanel() {
 
   const confirmDelete = (member: ManagedUserDto) => {
     if (currentUser?.id === member.id) {
-      Alert.alert('Not allowed', 'You cannot delete your own account.');
+      notify({
+        message: 'You cannot delete your own account.',
+        title: 'Not allowed',
+        tone: 'info',
+      });
       return;
     }
-    Alert.alert(
-      `Delete ${roleLabel(member.role as MemberRole)}`,
-      `${member.name} will be disabled and signed out immediately. Their history is kept.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: () => {
-            void deleteUser(member.id)
-              .unwrap()
-              .catch((err) => Alert.alert('Member not deleted', apiErrorMessage(err)));
-          },
-        },
-      ]
-    );
+    confirm({
+      confirmLabel: 'Delete',
+      message: `${member.name} will be disabled and signed out immediately. Their history is kept.`,
+      onConfirm: async () => {
+        try {
+          await deleteUser(member.id).unwrap();
+        } catch (err) {
+          notify({
+            message: apiErrorMessage(err),
+            title: 'Member not deleted',
+            tone: 'danger',
+          });
+        }
+      },
+      title: `Delete ${roleLabel(member.role as MemberRole)}?`,
+      tone: 'danger',
+    });
   };
 
   return (
@@ -250,24 +295,35 @@ export function MembersPanel() {
       <ManagementSectionHeader
         createLabel={`Create ${roleLabel(roleTab)}`}
         onCreate={openCreate}
-        subtitle={`${rows.length} ${roleLabel(roleTab).toLowerCase()}${rows.length === 1 ? '' : 's'}`}
+        subtitle={`${totalMembers} ${roleLabel(roleTab).toLowerCase()}${totalMembers === 1 ? '' : 's'}`}
         title="Members"
       />
 
-      <View style={styles.roleRow}>
-        {ROLE_TABS.map((tab) => {
+      <View style={styles.filterStack}>
+        <View style={styles.roleRow}>
+          {ROLE_TABS.map((tab) => {
           const active = roleTab === tab.id;
           return (
             <Pressable
               accessibilityRole="tab"
               accessibilityState={{ selected: active }}
               key={tab.id}
-              onPress={() => setRoleTab(tab.id)}
+              onPress={() => {
+                setRoleTab(tab.id);
+                setPage(0);
+              }}
               style={[styles.roleChip, active && styles.roleChipActive]}>
               <Text style={[styles.roleChipText, active && styles.roleChipTextActive]}>{tab.label}</Text>
             </Pressable>
           );
         })}
+        </View>
+        <CompactSearchBar
+          loading={members.isFetching && searchInput.trim() === search}
+          onChangeText={setSearchInput}
+          placeholder="Search name, email or mobile"
+          value={searchInput}
+        />
       </View>
 
       {members.isLoading && !members.data ? (
@@ -331,43 +387,53 @@ export function MembersPanel() {
                     </View>
                   </View>
 
-                  <View style={styles.detailRow}>
-                    <Text style={styles.detailLabel}>Role</Text>
-                    <Text style={styles.detailValue}>{roleLabel(member.role as MemberRole)}</Text>
-                    {member.mobile ? (
-                      <>
+                  <View style={styles.cardFooter}>
+                    <View style={styles.facts}>
+                      <View style={styles.fact}>
+                        <Text style={styles.detailLabel}>Role</Text>
+                        <Text style={styles.detailValue}>{roleLabel(member.role as MemberRole)}</Text>
+                      </View>
+                      <View style={styles.factDivider} />
+                      <View style={[styles.fact, styles.mobileFact]}>
                         <Text style={styles.detailLabel}>Mobile</Text>
-                        <Text style={styles.detailValue}>{member.mobile}</Text>
-                      </>
-                    ) : null}
-                  </View>
-
-                  <View style={styles.actions}>
-                    <ManagementActionButton
-                      accessibilityLabel={`Edit ${member.name}`}
-                      icon="pencil-outline"
-                      label="Edit"
-                      onPress={() => openEdit(member)}
-                    />
-                    {isSelf ? null : (
+                        <Text numberOfLines={1} style={styles.detailValue}>{member.mobile || 'Not set'}</Text>
+                      </View>
+                    </View>
+                    <View style={styles.actions}>
                       <ManagementActionButton
-                        accessibilityLabel={`Delete ${member.name}`}
-                        destructive
-                        icon="trash-can-outline"
-                        label="Delete"
-                        onPress={() => confirmDelete(member)}
+                        accessibilityLabel={`Edit ${member.name}`}
+                        icon="pencil-outline"
+                        label="Edit"
+                        onPress={() => openEdit(member)}
                       />
-                    )}
+                      {isSelf ? null : (
+                        <ManagementActionButton
+                          accessibilityLabel={`Delete ${member.name}`}
+                          destructive
+                          icon="trash-can-outline"
+                          label="Delete"
+                          onPress={() => confirmDelete(member)}
+                        />
+                      )}
+                    </View>
                   </View>
                 </ManagementCard>
               );
             })
           )}
+          <ListPagination
+            itemLabel="members"
+            onPageChange={setPage}
+            page={page}
+            pageSize={PAGE_SIZE}
+            totalItems={totalMembers}
+            totalPages={totalPages}
+          />
         </ScrollView>
       )}
 
       {/* Create member */}
-      <ManagementBottomSheet
+      <ManagementModal
         onClose={() => setCreateVisible(false)}
         title={`Create ${roleLabel(roleTab)}`}
         visible={createVisible}>
@@ -376,8 +442,8 @@ export function MembersPanel() {
           contentContainerStyle={styles.sheetBody}
           contentSized>
               <Text style={styles.sheetHint}>
-                Create a member using their email address. The member can activate the account using
-                an email verification code and create their own password.
+                Create a member using their email address. We will email their activation code
+                immediately; they choose their own password.
               </Text>
               <MemberRoleSummary role={roleTab} />
               <TextField
@@ -423,10 +489,10 @@ export function MembersPanel() {
                 />
               </View>
         </KeyboardAwareForm>
-      </ManagementBottomSheet>
+      </ManagementModal>
 
       {/* Edit member */}
-      <ManagementBottomSheet
+      <ManagementModal
         onClose={() => setEditing(null)}
         title="Edit member"
         visible={editing != null}>
@@ -509,7 +575,9 @@ export function MembersPanel() {
                 />
               </View>
         </KeyboardAwareForm>
-      </ManagementBottomSheet>
+      </ManagementModal>
+
+      {dialogElement}
     </View>
   );
 }
@@ -541,15 +609,7 @@ function MemberRoleSummary({ role }: { role: MemberRole }) {
 const makeStyles = (c: ThemeColors) =>
   StyleSheet.create({
     flex: { flex: 1 },
-    roleRow: {
-      backgroundColor: c.surface,
-      borderBottomColor: c.border,
-      borderBottomWidth: StyleSheet.hairlineWidth,
-      flexDirection: 'row',
-      gap: spacing.sm,
-      paddingBottom: spacing.sm + 2,
-      paddingHorizontal: spacing.md,
-    },
+    roleRow: { flexDirection: 'row', gap: spacing.sm },
     roleRowInline: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.xs },
     roleChip: {
       backgroundColor: c.surfaceAlt,
@@ -577,15 +637,35 @@ const makeStyles = (c: ThemeColors) =>
     name: { color: c.textPrimary, fontSize: 15, fontWeight: '800' },
     meta: { color: c.textMuted, fontSize: 11, marginTop: 2 },
     badge: { borderRadius: radius.pill, paddingHorizontal: 8, paddingVertical: 3 },
-    badgeActive: { backgroundColor: 'rgba(34, 197, 94, 0.15)' },
+    badgeActive: { backgroundColor: 'rgba(26, 115, 232, 0.15)' },
     // Amber: a pending member is waiting on the person, not broken and not ready.
     badgePending: { backgroundColor: 'rgba(245, 158, 11, 0.16)' },
     badgeInactive: { backgroundColor: 'rgba(148, 163, 184, 0.15)' },
     badgeText: { fontSize: 9, fontWeight: '800', letterSpacing: 0.4 },
-    badgeTextActive: { color: '#22C55E' },
+    badgeTextActive: { color: '#1A73E8' },
     badgeTextPending: { color: '#B45309' },
     badgeTextInactive: { color: c.textSecondary },
-    detailRow: { alignItems: 'center', columnGap: spacing.sm, flexDirection: 'row', flexWrap: 'wrap' },
+    filterStack: {
+      backgroundColor: c.surface,
+      borderBottomColor: c.border,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      gap: spacing.sm,
+      paddingBottom: spacing.sm + 2,
+      paddingHorizontal: spacing.md,
+    },
+    cardFooter: {
+      alignItems: 'center',
+      borderTopColor: c.border,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      marginTop: spacing.sm,
+      paddingTop: spacing.sm,
+    },
+    facts: { alignItems: 'center', flex: 1, flexDirection: 'row', gap: spacing.sm, minWidth: 0 },
+    fact: { minWidth: 0 },
+    mobileFact: { flex: 1 },
+    factDivider: { backgroundColor: c.border, height: 22, width: StyleSheet.hairlineWidth * 2 },
     detailLabel: { color: c.textMuted, fontSize: 10, fontWeight: '800', textTransform: 'uppercase' },
     detailValue: { color: c.textPrimary, fontSize: 12, fontWeight: '700', marginRight: spacing.sm },
     actions: { flexDirection: 'row', gap: spacing.sm },

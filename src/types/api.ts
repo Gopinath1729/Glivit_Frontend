@@ -99,7 +99,9 @@ export type TenantSummary = {
 export type TenantCreateRequest = {
   name: string;
   companyName: string;
-  adminUserId: number;
+  adminName: string;
+  adminEmail: string;
+  adminPhone: string;
   status: TenantStatus;
 };
 
@@ -417,6 +419,13 @@ export type VehicleActivityReport = {
     maximumSpeedKmh: number;
     averageSpeedKmh: number;
     overspeedCount: number;
+    /**
+     * Continuous periods of movement, not one per position report.
+     *
+     * Optional because a backend older than this field simply omits it, and a
+     * client that types it as required renders `NaN` against such a server.
+     */
+    trips?: number;
   };
   distanceTrend: ReportTrendPoint[];
   journey: { start?: ReportLocationPoint | null; end?: ReportLocationPoint | null };

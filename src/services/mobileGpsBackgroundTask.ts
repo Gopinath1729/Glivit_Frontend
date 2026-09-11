@@ -310,7 +310,7 @@ export async function startBackgroundMobileGps(
       distanceInterval: 0,
       foregroundService: {
         notificationBody: 'Your vehicle location is being shared securely.',
-        notificationColor: '#16A34A',
+        notificationColor: '#1B66C9',
         notificationTitle: 'Glivt Mobile GPS is active',
       },
       pausesUpdatesAutomatically: false,

@@ -2,6 +2,8 @@ import React, { memo, useMemo } from 'react';
 import { Image, StyleSheet, View } from 'react-native';
 import Svg, { Path } from 'react-native-svg';
 
+import { vehicleBodyType } from '@/src/services/vehicleCategory';
+
 export type VehicleMarkerCategory =
   | 'car'
   | 'truck'
@@ -64,51 +66,14 @@ const CATEGORY_SCALE: Record<VehicleMarkerCategory, number> = {
 };
 
 export function markerCategory(category?: string | null): VehicleMarkerCategory {
-  switch ((category ?? '').toUpperCase()) {
+  switch (vehicleBodyType(category)) {
     case 'CAR':
-    case 'SEDAN':
-    case 'HATCHBACK':
-    case 'SUV':
       return 'car';
     case 'TRUCK':
-    case 'LORRY':
-    case 'MIXER_TRUCK':
       return 'truck';
-    case 'BUS':
-      return 'bus';
-    case 'VAN':
-    case 'JEEP':
-      return 'van';
     case 'BIKE':
-    case 'MOTORCYCLE':
-    case 'SCOOTER':
       return 'bike';
-    case 'AUTO':
-    case 'RICKSHAW':
-      return 'auto';
-    case 'EXCAVATOR':
-    case 'HEAVY_MACHINERY':
-      return 'machinery';
-    default:
-      return 'unknown';
   }
-}
-
-function colorWithAlpha(color: string, alpha: number): string {
-  const clean = (color ?? '').trim().replace('#', '');
-  if (clean.length === 3) {
-    const r = parseInt(clean[0] + clean[0], 16);
-    const g = parseInt(clean[1] + clean[1], 16);
-    const b = parseInt(clean[2] + clean[2], 16);
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-  }
-  if (clean.length >= 6) {
-    const r = parseInt(clean.slice(0, 2), 16);
-    const g = parseInt(clean.slice(2, 4), 16);
-    const b = parseInt(clean.slice(4, 6), 16);
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-  }
-  return color;
 }
 
 /**
@@ -126,19 +91,10 @@ function VehicleMarkerBase({
 }: Props) {
   const styles = useMemo(() => makeStyles(size), [size]);
   const rotation = Number.isFinite(heading) ? ((heading % 360) + 360) % 360 : 0;
-  const categoryScale = CATEGORY_SCALE[category] ?? 1;
+  const categoryScale = (CATEGORY_SCALE[category] ?? 1) * (selected ? 1.1 : 1);
 
   return (
     <View collapsable={false} pointerEvents="none" style={styles.wrapper}>
-      {selected ? (
-        <View
-          style={[
-            styles.selectionRing,
-            { backgroundColor: colorWithAlpha(color, 0.08), borderColor: color },
-          ]}
-        />
-      ) : null}
-
       <View
         style={[
           styles.rotatingBody,
@@ -156,7 +112,6 @@ function VehicleMarkerBase({
           style={styles.vehicleImage}
         />
       </View>
-      <View style={[styles.statusDot, { backgroundColor: color, shadowColor: color }]} />
     </View>
   );
 }
@@ -176,22 +131,12 @@ export const VehicleMarker = memo(
 const makeStyles = (size: number) =>
   {
     const canvas = vehicleMarkerCanvas(size);
-    const bodyOffset = (canvas - size) / 2;
-    const ringSize = size * 1.08;
-    const statusSize = Math.max(7, size * 0.16);
     return StyleSheet.create({
     wrapper: {
       alignItems: 'center',
       height: canvas,
       justifyContent: 'center',
       width: canvas,
-    },
-    selectionRing: {
-      borderRadius: size,
-      borderWidth: 2,
-      height: ringSize,
-      position: 'absolute',
-      width: ringSize,
     },
     // The full canvas, not `size`: a rotated child sweeps beyond the unrotated
     // box, and Android clips whatever leaves its parent. Everything inside
@@ -211,20 +156,6 @@ const makeStyles = (size: number) =>
     vehicleImage: {
       height: size,
       width: size * SPRITE_ASPECT,
-    },
-    statusDot: {
-      borderColor: '#FFFFFF',
-      borderRadius: size,
-      borderWidth: 1.5,
-      bottom: bodyOffset + size * 0.06,
-      elevation: 4,
-      height: statusSize,
-      position: 'absolute',
-      right: bodyOffset + size * 0.06,
-      shadowOffset: { width: 0, height: 1 },
-      shadowOpacity: 0.55,
-      shadowRadius: 3,
-      width: statusSize,
     },
   });
   };

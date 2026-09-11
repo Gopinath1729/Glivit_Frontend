@@ -1,10 +1,12 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import React from 'react';
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Button } from '@/src/components/ui/Button';
 import { TextField } from '@/src/components/ui/TextField';
+import { useAppDialog } from '@/src/components/ui/useAppDialog';
 import { apiErrorMessage } from '@/src/services/apiError';
+import { vehicleBodyType } from '@/src/services/vehicleCategory';
 import {
   useCreateDeviceMutation,
   useUpdateDeviceMutation,
@@ -26,10 +28,19 @@ type Draft = {
   driverAddress: string;
   expiryDate: string;
   timezone: string;
-  distanceUnit: 'KM' | 'MI';
-  speedUnit: 'KMH' | 'MPH';
   remarks: string;
 };
+
+/**
+ * Distance and speed are fixed fleet-wide rather than per device.
+ *
+ * The form used to ask for both on every vehicle, which is a question with one
+ * right answer: every screen that renders a distance or a speed - the vehicle
+ * list, playback, reports - is hardcoded to km and km/h. Offering "Miles" let
+ * an operator record a device whose readings the app then relabelled anyway.
+ */
+const DISTANCE_UNIT = 'KM' as const;
+const SPEED_UNIT = 'KMH' as const;
 
 type FieldErrors = Partial<Record<'name' | 'imei' | 'expiryDate' | 'driverPhone', string>>;
 type DeviceSourceType = 'GPS_DEVICE' | 'MOBILE_GPS';
@@ -40,11 +51,8 @@ const CATEGORIES: {
   icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
 }[] = [
   { id: 'CAR', label: 'Car', icon: 'car' },
-  { id: 'TRUCK', label: 'Truck', icon: 'truck' },
-  { id: 'BUS', label: 'Bus', icon: 'bus' },
   { id: 'BIKE', label: 'Bike', icon: 'motorbike' },
-  { id: 'TRAILER', label: 'Trailer', icon: 'truck-trailer' },
-  { id: 'ASSET', label: 'Asset', icon: 'package-variant-closed' },
+  { id: 'TRUCK', label: 'Truck', icon: 'truck' },
 ];
 
 const IMEI_LENGTH = 15;
@@ -58,8 +66,7 @@ function oneYearFromNow(): string {
 function emptyDraft(initialDevice?: any): Draft {
   if (initialDevice) {
     return {
-      category: initialDevice.category || 'CAR',
-      distanceUnit: (initialDevice.distanceUnit as 'KM' | 'MI') || 'KM',
+      category: vehicleBodyType(initialDevice.category),
       expiryDate: initialDevice.expiryDate ? String(initialDevice.expiryDate).slice(0, 10) : oneYearFromNow(),
       imei: initialDevice.imei || '',
       model: initialDevice.model || '',
@@ -71,13 +78,11 @@ function emptyDraft(initialDevice?: any): Draft {
       simApn: initialDevice.simApn || '',
       simNumber: initialDevice.simNumber || '',
       simProvider: initialDevice.simProvider || '',
-      speedUnit: (initialDevice.speedUnit as 'KMH' | 'MPH') || 'KMH',
       timezone: initialDevice.timezone || 'Asia/Kolkata',
     };
   }
   return {
     category: 'CAR',
-    distanceUnit: 'KM',
     expiryDate: oneYearFromNow(),
     imei: '',
     model: '',
@@ -89,7 +94,6 @@ function emptyDraft(initialDevice?: any): Draft {
     simApn: '',
     simNumber: '',
     simProvider: '',
-    speedUnit: 'KMH',
     timezone: 'Asia/Kolkata',
   };
 }
@@ -106,6 +110,7 @@ export function DeviceCreateForm({ initialDevice, onSuccess }: DeviceCreateFormP
   const [createDevice, { isLoading: isCreating }] = useCreateDeviceMutation();
   const [updateDevice, { isLoading: isUpdating }] = useUpdateDeviceMutation();
   const isLoading = isCreating || isUpdating;
+  const { dialogElement, notify } = useAppDialog();
 
 
   const [draft, setDraft] = React.useState<Draft>(() => emptyDraft(initialDevice));
@@ -170,7 +175,7 @@ export function DeviceCreateForm({ initialDevice, onSuccess }: DeviceCreateFormP
     const trimmed = (value: string) => (value.trim() ? value.trim() : undefined);
     const body: DeviceUpsertRequest = {
       category: draft.category,
-      distanceUnit: draft.distanceUnit,
+      distanceUnit: DISTANCE_UNIT,
       expiryDate: trimmed(draft.expiryDate),
       imei: isMobileGps ? undefined : draft.imei.replace(/\D/g, ''),
       model: isMobileGps ? undefined : trimmed(draft.model),
@@ -183,7 +188,7 @@ export function DeviceCreateForm({ initialDevice, onSuccess }: DeviceCreateFormP
       simNumber: isMobileGps ? undefined : trimmed(draft.simNumber),
       simProvider: isMobileGps ? undefined : trimmed(draft.simProvider),
       sourceType,
-      speedUnit: draft.speedUnit,
+      speedUnit: SPEED_UNIT,
       timezone: draft.timezone,
     };
 
@@ -196,14 +201,22 @@ export function DeviceCreateForm({ initialDevice, onSuccess }: DeviceCreateFormP
           // The authenticated app shell observes the invalidated Device tag,
           // confirms this user owns the new Mobile GPS tracker, and only then
           // performs the platform location/permission flow.
-          Alert.alert('Mobile GPS registered', 'Location setup will continue for this device.');
+          notify({
+            message: 'Location setup will continue for this device.',
+            title: 'Mobile GPS registered',
+            tone: 'success',
+          });
         }
       }
       setDraft(emptyDraft());
       setErrors({});
       onSuccess?.();
     } catch (err) {
-      Alert.alert(isEditing ? 'Device not updated' : 'Device not saved', apiErrorMessage(err));
+      notify({
+        message: apiErrorMessage(err),
+        title: isEditing ? 'Device not updated' : 'Device not saved',
+        tone: 'danger',
+      });
     }
   }, [
     createDevice,
@@ -211,6 +224,7 @@ export function DeviceCreateForm({ initialDevice, onSuccess }: DeviceCreateFormP
     initialDevice,
     isEditing,
     isMobileGps,
+    notify,
     onSuccess,
     sourceType,
     updateDevice,
@@ -353,10 +367,12 @@ export function DeviceCreateForm({ initialDevice, onSuccess }: DeviceCreateFormP
               accessibilityLabel="Scan IMEI barcode"
               accessibilityRole="button"
               onPress={() =>
-                Alert.alert(
-                  'Scan IMEI',
-                  'The QR/barcode scanner is available in native builds with camera permission granted.'
-                )
+                notify({
+                  message:
+                    'The QR/barcode scanner is available in native builds with camera permission granted.',
+                  title: 'Scan IMEI',
+                  tone: 'info',
+                })
               }
               style={[styles.scanButton, errors.imei ? styles.scanButtonRaised : null]}>
               <MaterialCommunityIcons color={c.primary} name="qrcode-scan" size={24} />
@@ -429,7 +445,7 @@ export function DeviceCreateForm({ initialDevice, onSuccess }: DeviceCreateFormP
       {/* Driver contact, not a driver account. Free text on the device so
           there is somebody to call about this vehicle; nothing here creates a
           login or a record to keep in step. All three are optional. */}
-      <FormSection icon="account-outline" step={isMobileGps ? 2 : 3} title="Driver details">
+      <FormSection icon="account-outline" step={isMobileGps ? 2 : 3} title="Driver & notes">
         <TextField
           autoCapitalize="words"
           label="Driver name"
@@ -452,48 +468,6 @@ export function DeviceCreateForm({ initialDevice, onSuccess }: DeviceCreateFormP
           placeholder="Street, city"
           value={draft.driverAddress}
         />
-      </FormSection>
-
-      <FormSection icon="calendar-clock" step={isMobileGps ? 3 : 4} title="Subscription & units">
-        <TextField
-          autoCapitalize="none"
-          error={errors.expiryDate}
-          label="Expiry date (YYYY-MM-DD)"
-          onChangeText={(value) => set('expiryDate', value)}
-          placeholder="2027-07-27"
-          value={draft.expiryDate}
-        />
-        <TextField
-          autoCapitalize="none"
-          label="Timezone"
-          onChangeText={(value) => set('timezone', value)}
-          placeholder="Asia/Kolkata"
-          value={draft.timezone}
-        />
-        <View style={styles.pairRow}>
-          <View style={styles.pairItem}>
-            <FieldLabel>Distance</FieldLabel>
-            <Segmented
-              onSelect={(value) => set('distanceUnit', value)}
-              options={[
-                { label: 'Kilometres', value: 'KM' as const },
-                { label: 'Miles', value: 'MI' as const },
-              ]}
-              value={draft.distanceUnit}
-            />
-          </View>
-          <View style={styles.pairItem}>
-            <FieldLabel>Speed</FieldLabel>
-            <Segmented
-              onSelect={(value) => set('speedUnit', value)}
-              options={[
-                { label: 'km/h', value: 'KMH' as const },
-                { label: 'mph', value: 'MPH' as const },
-              ]}
-              value={draft.speedUnit}
-            />
-          </View>
-        </View>
         <TextField
           label="Remarks"
           multiline
@@ -521,6 +495,8 @@ export function DeviceCreateForm({ initialDevice, onSuccess }: DeviceCreateFormP
           onPress={() => void submit()}
         />
       </View>
+
+      {dialogElement}
     </View>
   );
 }
@@ -556,39 +532,6 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
   const { colors: c } = useTheme();
   const styles = React.useMemo(() => makeStyles(c), [c]);
   return <Text style={styles.fieldLabel}>{children}</Text>;
-}
-
-function Segmented<T extends string>({
-  options,
-  value,
-  onSelect,
-}: {
-  options: { label: string; value: T }[];
-  value: T;
-  onSelect: (value: T) => void;
-}) {
-  const { colors: c } = useTheme();
-  const styles = React.useMemo(() => makeStyles(c), [c]);
-  return (
-    <View style={styles.segmented}>
-      {options.map((option) => {
-        const active = option.value === value;
-        return (
-          <Pressable
-            accessibilityLabel={option.label}
-            accessibilityRole="button"
-            accessibilityState={{ selected: active }}
-            key={option.value}
-            onPress={() => onSelect(option.value)}
-            style={[styles.segment, active && styles.segmentActive]}>
-            <Text style={[styles.segmentText, active && styles.segmentTextActive]}>
-              {option.label}
-            </Text>
-          </Pressable>
-        );
-      })}
-    </View>
-  );
 }
 
 const makeStyles = (c: ThemeColors) =>
@@ -744,24 +687,6 @@ const makeStyles = (c: ThemeColors) =>
     pairRow: { flexDirection: 'row', gap: spacing.sm },
     pairItem: { flex: 1, gap: spacing.md, minWidth: 0 },
 
-    segmented: {
-      backgroundColor: c.surfaceAlt,
-      borderColor: c.border,
-      borderRadius: radius.md,
-      borderWidth: StyleSheet.hairlineWidth * 2,
-      flexDirection: 'row',
-      overflow: 'hidden',
-      padding: 3,
-    },
-    segment: {
-      alignItems: 'center',
-      borderRadius: radius.sm,
-      flex: 1,
-      paddingVertical: 9,
-    },
-    segmentActive: { backgroundColor: c.primary },
-    segmentText: { color: c.textSecondary, fontSize: typography.caption, fontWeight: '700' },
-    segmentTextActive: { color: c.onPrimary, fontWeight: '900' },
 
     submitBar: {
       backgroundColor: c.surface,

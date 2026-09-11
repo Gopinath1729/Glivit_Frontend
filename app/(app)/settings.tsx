@@ -1,30 +1,24 @@
-import { useRouter } from 'expo-router';
 import React, { useMemo } from 'react';
-import { Alert, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
+import { ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 
 import { Button } from '@/src/components/ui/Button';
 import { Card } from '@/src/components/ui/Card';
+import { useAppDialog } from '@/src/components/ui/useAppDialog';
 import { Chip } from '@/src/components/ui/ModulePrimitives';
 import { ErrorRetryView, LoadingView } from '@/src/components/ui/StateViews';
 import { apiErrorMessage } from '@/src/services/apiError';
 import { useGetSettingsQuery, useUpdateSettingsMutation } from '@/src/services/operationsApi';
 import type { SettingsDto } from '@/src/types/api';
-import { useTheme, type ThemeMode } from '@/src/theme/ThemeProvider';
+import { useTheme } from '@/src/theme/ThemeProvider';
 import { spacing, typography, type ThemeColors } from '@/src/theme/tokens';
 
-const THEME_MODES: { value: ThemeMode; label: string }[] = [
-  { value: 'system', label: 'System' },
-  { value: 'light', label: 'Light' },
-  { value: 'dark', label: 'Dark' },
-];
-
 export default function SettingsScreen() {
-  const router = useRouter();
-  const { colors: c, mode, setMode } = useTheme();
+  const { colors: c } = useTheme();
   const styles = useMemo(() => makeStyles(c), [c]);
   const { data, isLoading, isError, error, refetch } = useGetSettingsQuery();
   const [draft, setDraft] = React.useState<SettingsDto | null>(null);
   const [updateSettings, { isLoading: isSaving }] = useUpdateSettingsMutation();
+  const { dialogElement, notify } = useAppDialog();
 
   React.useEffect(() => {
     if (data) setDraft(data);
@@ -37,29 +31,18 @@ export default function SettingsScreen() {
   const save = async () => {
     try {
       await updateSettings(draft).unwrap();
-      Alert.alert('Settings saved', 'Preferences updated for this account.');
+      notify({
+        message: 'Preferences updated for this account.',
+        title: 'Settings saved',
+        tone: 'success',
+      });
     } catch (err) {
-      Alert.alert('Settings not saved', apiErrorMessage(err));
+      notify({ message: apiErrorMessage(err), title: 'Settings not saved', tone: 'danger' });
     }
   };
 
   return (
     <ScrollView contentContainerStyle={styles.content} style={styles.screen}>
-      <Card style={styles.card}>
-        <Text style={styles.title}>Appearance</Text>
-        <View style={styles.segment}>
-          <Text style={styles.label}>Theme</Text>
-          <View style={styles.chips}>
-            {THEME_MODES.map((m) => (
-              <Chip key={m.value} active={m.value === mode} label={m.label} onPress={() => setMode(m.value)} />
-            ))}
-          </View>
-          <Text style={styles.hint}>
-            {mode === 'system' ? 'Following your device appearance.' : `Always ${mode}.`}
-          </Text>
-        </View>
-      </Card>
-
       <Card style={styles.card}>
         <Text style={styles.title}>Units</Text>
         <Segment
@@ -125,24 +108,8 @@ export default function SettingsScreen() {
         />
       </Card>
 
-      {/* Password rotation lives on its own screen rather than inline here:
-          it is the one control on this page that is not a preference, and
-          mixing it into the Save Settings button would tie a credential change
-          to an unrelated save. */}
-      <Card style={styles.card}>
-        <Text style={styles.title}>Security</Text>
-        <Text style={styles.hint}>
-          Change the password you sign in with. You will need your current password.
-        </Text>
-        <Button
-          label="Change password"
-          icon="lock-reset"
-          onPress={() => router.push('/change-password')}
-          variant="secondary"
-        />
-      </Card>
-
       <Button label="Save settings" icon="content-save-outline" loading={isSaving} onPress={save} />
+      {dialogElement}
     </ScrollView>
   );
 }

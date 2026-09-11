@@ -177,13 +177,13 @@ const makeStyles = (c: ThemeColors) =>
       borderColor: 'transparent',
     },
     chipActive: {
-      backgroundColor: c.primaryGreen,
-      borderColor: c.primaryGreen,
+      backgroundColor: c.accent,
+      borderColor: c.accent,
     },
     chipText: {
       fontSize: typography.caption,
       fontWeight: '600',
-      color: c.primaryGreen,
+      color: c.accent,
     },
     chipTextActive: {
       color: c.white,

@@ -1,339 +1,215 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 import React, { useMemo, useState } from 'react';
-import {
-  ActivityIndicator,
-  Alert,
-  Pressable,
-  RefreshControl,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
-import { DeviceCreateForm } from '@/src/components/DeviceCreateForm';
+import { TenantManagementPanel } from '@/app/(app)/manage-tenants';
 import { MembersPanel } from '@/src/components/MembersPanel';
-import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
-import {
-  ManagementActionButton,
-  ManagementBottomSheet,
-  ManagementCard,
-  ManagementSectionHeader,
-} from '@/src/components/ui/ManagementPrimitives';
-import { EmptyView, ErrorRetryView, LoadingView } from '@/src/components/ui/StateViews';
+import { EmptyView } from '@/src/components/ui/StateViews';
 import { P } from '@/src/constants/permissions';
-import { apiErrorMessage } from '@/src/services/apiError';
-import { resolveDeviceRecordState } from '@/src/services/deviceState';
-import { useMobileGpsReadiness } from '@/src/services/mobileGpsStatus';
-import {
-  useDeleteDeviceMutation,
-  useGetAllDevicesQuery,
-  useGetDeviceQuery,
-} from '@/src/services/devicesApi';
-import { useHasPermission } from '@/src/store/hooks';
+import { useCanManageTenants, useHasPermission } from '@/src/store/hooks';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
-import type { DeviceSummary } from '@/src/types/api';
 
-type ManagementTab = 'devices' | 'members';
+type ManagementSection = 'members' | 'organizations';
 
-/** Tenant administration for registered devices and member accounts. */
+/** A single administration hub for people, roles and Super Admin organizations. */
 export default function ManagementScreen() {
-  const { colors: c, stateColors } = useTheme();
+  const { colors: c } = useTheme();
   const styles = useMemo(() => makeStyles(c), [c]);
-  const insets = useSafeAreaInsets();
-  const canCreate = useHasPermission(P.CREATE_DEVICE);
-  const canManage = useHasPermission(P.MANAGE_DEVICES);
-  const canDelete = useHasPermission(P.DELETE_DEVICE);
   const canManageMembers = useHasPermission(P.MANAGE_USERS);
-  const [tab, setTab] = useState<ManagementTab>('devices');
-  const readiness = useMobileGpsReadiness();
-  const devices = useGetAllDevicesQuery(
-    undefined,
-    { pollingInterval: 30_000, skipPollingIfUnfocused: true }
-  );
-  const [deleteDevice] = useDeleteDeviceMutation();
-  const [editing, setEditing] = useState<DeviceSummary | null>(null);
-  const [formVisible, setFormVisible] = useState(false);
-  const deviceDetails = useGetDeviceQuery(editing?.id ?? 0, {
-    skip: editing == null || !formVisible,
-  });
+  const isSuperAdmin = useCanManageTenants();
+  const [section, setSection] = useState<ManagementSection>('members');
 
-  const openCreate = () => {
-    setEditing(null);
-    setFormVisible(true);
-  };
-  const openEdit = (device: DeviceSummary) => {
-    setEditing(device);
-    setFormVisible(true);
-  };
-  const closeForm = () => {
-    setFormVisible(false);
-    setEditing(null);
-  };
-  const remove = (device: DeviceSummary) => {
-    Alert.alert(
-      'Delete device permanently?',
-      `This erases ${device.name} and ALL data related to it — its complete location history, trips, alerts, commands and documents. The vehicle is removed too if this was its only tracker.
-
-This cannot be undone.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete everything',
-          style: 'destructive',
-          onPress: () => {
-            void deleteDevice(device.id)
-              .unwrap()
-              .catch((error) => Alert.alert('Device not deleted', apiErrorMessage(error)));
-          },
-        },
-      ]
-    );
-  };
-
-  const tabStrip = canManageMembers ? (
-    <View accessibilityRole="tablist" style={styles.tabStrip}>
-      {(['devices', 'members'] as const).map((value) => {
-        const active = tab === value;
-        return (
-          <Pressable
-            accessibilityRole="tab"
-            accessibilityState={{ selected: active }}
-            key={value}
-            onPress={() => setTab(value)}
-            style={({ pressed }) => [
-              styles.tabItem,
-              active && styles.tabItemActive,
-              pressed && styles.tabItemPressed,
-            ]}>
-            <Text style={[styles.tabText, active && styles.tabTextActive]}>
-              {value === 'devices' ? 'Devices' : 'Members'}
-            </Text>
-          </Pressable>
-        );
-      })}
-    </View>
-  ) : null;
-
-  if (canManageMembers && tab === 'members') {
+  if (!canManageMembers && !isSuperAdmin) {
     return (
       <View style={styles.screen}>
-        {tabStrip}
-        <MembersPanel />
+        <View style={styles.empty}>
+          <EmptyView
+            icon="shield-lock-outline"
+            message="Ask an administrator for access to people and role management."
+            title="Management access required"
+          />
+        </View>
       </View>
     );
   }
 
-  const rows = devices.data ?? [];
+  const activeSection = section === 'organizations' && isSuperAdmin ? section : 'members';
+  const organizationsActive = activeSection === 'organizations';
+
   return (
     <View style={styles.screen}>
-      {tabStrip}
-      <ManagementSectionHeader
-        createLabel="Create device"
-        onCreate={canCreate ? openCreate : undefined}
-        subtitle={`${rows.length} registered tracker${rows.length === 1 ? '' : 's'}`}
-        title="Devices"
-      />
-
-      {devices.isLoading && !devices.data ? (
-        <LoadingView label="Loading devices…" />
-      ) : devices.isError && !devices.data ? (
-        <ErrorRetryView message={apiErrorMessage(devices.error)} onRetry={devices.refetch} />
-      ) : (
-        <ScrollView
-          contentContainerStyle={[
-            styles.content,
-            { paddingBottom: Math.max(insets.bottom, spacing.md) + 88 },
-          ]}
-          refreshControl={
-            <RefreshControl
-              onRefresh={devices.refetch}
-              refreshing={devices.isFetching}
-              tintColor={c.primary}
-            />
-          }
-          showsVerticalScrollIndicator={false}>
-          {rows.length === 0 ? (
-            <EmptyView
-              icon="access-point-off"
-              message="Tap + to register a physical tracker or a mobile GPS tracker."
-              title="No devices"
-            />
-          ) : (
-            rows.map((device) => {
-              const status = managementStatus(device, readiness);
-              const tone = status === 'Active' ? c.success : stateColors.OFFLINE;
-              const isMobile = device.sourceType === 'MOBILE_GPS';
-              return (
-                <ManagementCard key={device.id}>
-                  <View style={styles.cardHeader}>
-                    <View style={styles.identity}>
-                      <View style={[styles.deviceIcon, { backgroundColor: `${tone}18` }]}>
-                        <MaterialCommunityIcons
-                          color={tone}
-                          name={isMobile ? 'cellphone-marker' : 'access-point'}
-                          size={23}
-                        />
-                      </View>
-                      <View style={styles.identityText}>
-                        <Text numberOfLines={1} style={styles.name}>
-                          {device.name}
-                        </Text>
-                        <Text numberOfLines={1} style={styles.meta}>
-                          {isMobile ? 'Mobile GPS Tracker' : 'Physical GPS Device'}
-                        </Text>
-                      </View>
-                    </View>
-                    <View style={[styles.badge, { backgroundColor: `${tone}18` }]}>
-                      <View style={[styles.statusDot, { backgroundColor: tone }]} />
-                      <Text style={[styles.badgeText, { color: tone }]}>{status}</Text>
-                    </View>
-                  </View>
-
-                  <View style={styles.updatedRow}>
-                    <MaterialCommunityIcons color={c.textMuted} name="clock-outline" size={14} />
-                    <Text style={styles.updatedText}>Last updated {relativeAge(device.lastUpdate)}</Text>
-                  </View>
-
-                  {canManage || canDelete ? (
-                    <View style={styles.actions}>
-                      {canManage ? (
-                        <ManagementActionButton
-                          accessibilityLabel={`Edit ${device.name}`}
-                          icon="pencil-outline"
-                          label="Edit"
-                          onPress={() => openEdit(device)}
-                        />
-                      ) : null}
-                      {canDelete ? (
-                        <ManagementActionButton
-                          accessibilityLabel={`Delete ${device.name}`}
-                          destructive
-                          icon="trash-can-outline"
-                          label="Delete"
-                          onPress={() => remove(device)}
-                        />
-                      ) : null}
-                    </View>
-                  ) : null}
-                </ManagementCard>
-              );
-            })
-          )}
-        </ScrollView>
-      )}
-
-      <ManagementBottomSheet
-        maxHeightRatio={0.94}
-        onClose={closeForm}
-        title={editing ? 'Edit device' : 'Create device'}
-        visible={formVisible}>
-        {editing && deviceDetails.isFetching && !deviceDetails.currentData ? (
-          <View style={styles.formLoading}>
-            <ActivityIndicator color={c.primary} size="small" />
-            <Text style={styles.formLoadingText}>Loading device details…</Text>
+      <View style={styles.heroWrap}>
+        <LinearGradient
+          colors={['#1769D2', '#153C8A', '#0A1D49']}
+          end={{ x: 1, y: 1 }}
+          locations={[0, 0.58, 1]}
+          start={{ x: 0, y: 0 }}
+          style={styles.hero}>
+          <View pointerEvents="none" style={styles.heroGlow} />
+          <View style={styles.heroIcon}>
+            <MaterialCommunityIcons color="#FFFFFF" name="shield-crown-outline" size={25} />
           </View>
-        ) : (
-          <KeyboardAwareForm
-            applyBottomInset={false}
-            contentContainerStyle={styles.form}
-            contentSized>
-            <DeviceCreateForm
-              initialDevice={editing ? (deviceDetails.currentData ?? editing) : null}
-              onSuccess={closeForm}
-            />
-          </KeyboardAwareForm>
-        )}
-      </ManagementBottomSheet>
+          <View style={styles.heroCopy}>
+            <Text style={styles.eyebrow}>CONTROL CENTER</Text>
+            <Text numberOfLines={1} style={styles.title}>Workspace management</Text>
+            <Text numberOfLines={2} style={styles.subtitle}>
+              {organizationsActive
+                ? 'Create organizations, assign their first admin and switch workspaces.'
+                : 'Invite people, shape access and keep account ownership clear.'}
+            </Text>
+          </View>
+          <View style={styles.secureBadge}>
+            <MaterialCommunityIcons color="#B9D8FF" name="lock-check" size={13} />
+            <Text style={styles.secureBadgeText}>{isSuperAdmin ? 'SUPER ADMIN' : 'ADMIN'}</Text>
+          </View>
+        </LinearGradient>
+      </View>
+
+      <View style={styles.segmentBar}>
+        {canManageMembers ? (
+          <Segment
+            active={!organizationsActive}
+            icon="account-multiple-outline"
+            label="People"
+            onPress={() => setSection('members')}
+          />
+        ) : null}
+        {isSuperAdmin ? (
+          <Segment
+            active={organizationsActive}
+            icon="office-building-cog-outline"
+            label="Organizations"
+            onPress={() => setSection('organizations')}
+          />
+        ) : null}
+      </View>
+
+      <View style={styles.content}>
+        {organizationsActive ? <TenantManagementPanel embedded /> : <MembersPanel />}
+      </View>
     </View>
   );
 }
 
-/**
- * Management shows lifecycle, not motion, so it collapses the shared status
- * into three buckets — but off the SAME resolved value every other screen
- * renders, so a device cannot read Active here and Offline in the fleet list.
- */
-/**
- * Management shows lifecycle, not motion, so it collapses the shared status
- * into two buckets — but off the SAME resolved value every other screen
- * renders, so a device cannot read Active here and Offline in the fleet list.
- */
-function managementStatus(
-  device: DeviceSummary,
-  readiness: { deviceId: number | null; locationDisabled: boolean }
-): 'Active' | 'Offline' {
-  return resolveDeviceRecordState(device, readiness).offline ? 'Offline' : 'Active';
-}
-
-function relativeAge(value?: string | null): string {
-  if (!value) return 'never';
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return 'unknown';
-  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
-  if (seconds < 60) return `${Math.max(1, seconds)}s ago`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
-  return `${Math.floor(seconds / 86400)}d ago`;
+function Segment({
+  active,
+  icon,
+  label,
+  onPress,
+}: {
+  active: boolean;
+  icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
+  label: string;
+  onPress: () => void;
+}) {
+  const { colors: c } = useTheme();
+  const styles = useMemo(() => makeStyles(c), [c]);
+  return (
+    <Pressable
+      accessibilityRole="tab"
+      accessibilityState={{ selected: active }}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.segment,
+        active && styles.segmentActive,
+        pressed && styles.segmentPressed,
+      ]}>
+      <MaterialCommunityIcons color={active ? c.primary : c.textMuted} name={icon} size={18} />
+      <Text style={[styles.segmentText, active && styles.segmentTextActive]}>{label}</Text>
+      {active ? <View style={styles.segmentIndicator} /> : null}
+    </Pressable>
+  );
 }
 
 const makeStyles = (c: ThemeColors) =>
   StyleSheet.create({
     screen: { backgroundColor: c.pageBackground, flex: 1 },
-    tabStrip: {
-      backgroundColor: c.surface,
+    empty: { flex: 1, justifyContent: 'center' },
+    heroWrap: { paddingHorizontal: spacing.md, paddingTop: spacing.sm },
+    hero: {
+      alignItems: 'center',
+      borderRadius: radius.lg,
+      elevation: 7,
       flexDirection: 'row',
-      gap: spacing.md,
-      paddingHorizontal: spacing.md,
-      paddingTop: spacing.sm + 2,
+      gap: spacing.sm + 2,
+      minHeight: 104,
+      overflow: 'hidden',
+      padding: spacing.md,
+      shadowColor: '#07142E',
+      shadowOffset: { width: 0, height: 7 },
+      shadowOpacity: 0.22,
+      shadowRadius: 16,
     },
-    tabItem: {
-      borderBottomColor: 'transparent',
-      borderBottomWidth: 3,
-      justifyContent: 'center',
-      minHeight: 46,
-      paddingHorizontal: spacing.sm,
+    heroGlow: {
+      backgroundColor: 'rgba(120, 196, 255, 0.18)',
+      borderRadius: 100,
+      height: 150,
+      position: 'absolute',
+      right: -36,
+      top: -86,
+      width: 190,
     },
-    tabItemActive: { borderBottomColor: c.primary },
-    tabItemPressed: { opacity: 0.7 },
-    tabText: { color: c.textSecondary, fontSize: typography.body, fontWeight: '700' },
-    tabTextActive: { color: c.primary, fontWeight: '800' },
-    content: { gap: spacing.sm + 2, padding: spacing.md, paddingTop: spacing.sm + 2 },
-    cardHeader: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
-    identity: { alignItems: 'center', flex: 1, flexDirection: 'row', gap: spacing.sm, minWidth: 0 },
-    identityText: { flex: 1, minWidth: 0 },
-    deviceIcon: {
+    heroIcon: {
       alignItems: 'center',
-      borderRadius: radius.md,
-      height: 44,
+      backgroundColor: 'rgba(255,255,255,0.14)',
+      borderColor: 'rgba(255,255,255,0.24)',
+      borderRadius: 14,
+      borderWidth: StyleSheet.hairlineWidth,
+      height: 48,
       justifyContent: 'center',
-      width: 44,
+      width: 48,
     },
-    name: { color: c.textPrimary, fontSize: typography.body, fontWeight: '800' },
-    meta: { color: c.textMuted, fontSize: typography.caption, marginTop: 2 },
-    badge: {
+    heroCopy: { flex: 1, minWidth: 0 },
+    eyebrow: { color: '#B9D8FF', fontSize: 9, fontWeight: '900', letterSpacing: 1.2 },
+    title: { color: '#FFFFFF', fontSize: 18, fontWeight: '900', letterSpacing: -0.35, marginTop: 2 },
+    subtitle: { color: 'rgba(255,255,255,0.72)', fontSize: 11, lineHeight: 15, marginTop: 3 },
+    secureBadge: {
       alignItems: 'center',
+      alignSelf: 'flex-start',
+      backgroundColor: 'rgba(5,18,48,0.34)',
       borderRadius: radius.pill,
       flexDirection: 'row',
-      gap: 5,
-      marginLeft: spacing.sm,
-      paddingHorizontal: spacing.sm,
-      paddingVertical: spacing.xs,
+      gap: 4,
+      paddingHorizontal: 8,
+      paddingVertical: 5,
     },
-    statusDot: { borderRadius: radius.pill, height: 6, width: 6 },
-    badgeText: { fontSize: 10, fontWeight: '800' },
-    updatedRow: { alignItems: 'center', flexDirection: 'row', gap: 5 },
-    updatedText: { color: c.textMuted, fontSize: typography.caption },
-    actions: { flexDirection: 'row', gap: spacing.sm },
-    form: { paddingBottom: spacing.sm },
-    formLoading: {
-      alignItems: 'center',
+    secureBadgeText: { color: '#D8EAFF', fontSize: 8, fontWeight: '900', letterSpacing: 0.6 },
+    segmentBar: {
+      backgroundColor: c.surface,
+      borderColor: c.border,
+      borderRadius: radius.md,
+      borderWidth: StyleSheet.hairlineWidth,
       flexDirection: 'row',
-      gap: spacing.sm,
-      paddingHorizontal: spacing.lg,
-      paddingVertical: spacing.xl,
+      gap: 4,
+      marginHorizontal: spacing.md,
+      marginTop: spacing.md,
+      padding: 4,
     },
-    formLoadingText: { color: c.textSecondary, fontSize: typography.body },
+    segment: {
+      alignItems: 'center',
+      borderRadius: radius.sm,
+      flex: 1,
+      flexDirection: 'row',
+      gap: 7,
+      justifyContent: 'center',
+      minHeight: 42,
+      overflow: 'hidden',
+      paddingHorizontal: spacing.sm,
+      position: 'relative',
+    },
+    segmentActive: { backgroundColor: c.accentSoft },
+    segmentPressed: { opacity: 0.74 },
+    segmentText: { color: c.textMuted, fontSize: typography.label, fontWeight: '800' },
+    segmentTextActive: { color: c.primary },
+    segmentIndicator: {
+      backgroundColor: c.primary,
+      borderRadius: 2,
+      bottom: 0,
+      height: 3,
+      position: 'absolute',
+      width: 34,
+    },
+    content: { flex: 1, marginTop: spacing.sm, minHeight: 0 },
   });

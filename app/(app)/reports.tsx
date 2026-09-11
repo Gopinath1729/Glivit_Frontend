@@ -1,10 +1,11 @@
 import DateTimePicker, { type DateTimePickerEvent } from '@react-native-community/datetimepicker';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as Linking from 'expo-linking';
+import * as Sharing from 'expo-sharing';
+import { Circle, G, Path, Svg, Text as SvgText } from 'react-native-svg';
 import React from 'react';
 import {
   ActivityIndicator,
-  Alert,
   Platform,
   Pressable,
   RefreshControl,
@@ -19,7 +20,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { SearchableDropdown, type DropdownOption } from '@/src/components/ui/SearchableDropdown';
 import { Button } from '@/src/components/ui/Button';
 import { Card } from '@/src/components/ui/Card';
-import { EmptyView } from '@/src/components/ui/StateViews';
+import { useAppDialog } from '@/src/components/ui/useAppDialog';
 import { apiErrorMessage } from '@/src/services/apiError';
 import {
   useGetVehicleActivityReportQuery,
@@ -38,36 +39,139 @@ import type {
   VehicleActivityReport,
 } from '@/src/types/api';
 
+const EXCEL_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+
 const PERIODS: { label: string; value: ReportPeriod }[] = [
   { label: 'Daily', value: 'DAILY' },
   { label: 'Weekly', value: 'WEEKLY' },
   { label: 'Monthly', value: 'MONTHLY' },
 ];
 
+/**
+ * Everything the summary reports, as one uniform grid.
+ *
+ * <p>Two tiles were drawn large and six small, on the theory that distance and
+ * top speed are what the page is opened for. That is true of some visits and
+ * wrong for the rest - somebody checking utilisation wants running against
+ * idle, and somebody checking a driver wants average against maximum - and the
+ * split made the pairs that need comparing different sizes. They are equals
+ * now; `tone` carries the colour that ties each one to its arc in the donut
+ * below, which is what actually helps the eye group them.
+ */
 const SUMMARY_ITEMS: {
   key: keyof VehicleActivityReport['summary'];
   label: string;
   icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
   format: (value: number) => string;
+  tone?: 'running' | 'idle' | 'stopped' | 'offline' | 'alert';
 }[] = [
-  { key: 'totalDistanceKm', label: 'Total Distance', icon: 'map-marker-distance', format: (v) => `${v.toFixed(1)} km` },
-  { key: 'runningSeconds', label: 'Running Time', icon: 'car-cruise-control', format: duration },
-  { key: 'idleSeconds', label: 'Idle Time', icon: 'engine-outline', format: duration },
-  { key: 'stoppedSeconds', label: 'Stopped Time', icon: 'stop-circle-outline', format: duration },
-  { key: 'offlineSeconds', label: 'Offline Time', icon: 'signal-off', format: duration },
-  { key: 'maximumSpeedKmh', label: 'Maximum Speed', icon: 'speedometer', format: (v) => `${v.toFixed(1)} km/h` },
-  { key: 'averageSpeedKmh', label: 'Average Speed', icon: 'gauge', format: (v) => `${v.toFixed(1)} km/h` },
-  { key: 'overspeedCount', label: 'Overspeed Count', icon: 'alert-octagon-outline', format: (v) => String(v) },
+  {
+    key: 'totalDistanceKm',
+    label: 'Distance',
+    icon: 'map-marker-distance',
+    format: (v) => `${v.toFixed(1)} km`,
+  },
+  { key: 'trips', label: 'Trips', icon: 'road-variant', format: (v) => String(Math.round(v)) },
+  {
+    key: 'runningSeconds',
+    label: 'Running time',
+    icon: 'car-cruise-control',
+    format: compactDuration,
+    tone: 'running',
+  },
+  {
+    key: 'idleSeconds',
+    label: 'Idle time',
+    icon: 'engine-outline',
+    format: compactDuration,
+    tone: 'idle',
+  },
+  {
+    key: 'stoppedSeconds',
+    label: 'Stopped time',
+    icon: 'stop-circle-outline',
+    format: compactDuration,
+    tone: 'stopped',
+  },
+  {
+    key: 'offlineSeconds',
+    label: 'Offline time',
+    icon: 'signal-off',
+    format: compactDuration,
+    tone: 'offline',
+  },
+  {
+    key: 'averageSpeedKmh',
+    label: 'Average speed',
+    icon: 'gauge',
+    format: (v) => `${v.toFixed(1)} km/h`,
+  },
+  {
+    key: 'maximumSpeedKmh',
+    label: 'Maximum speed',
+    icon: 'speedometer',
+    format: (v) => `${v.toFixed(1)} km/h`,
+  },
 ];
 
-/** Identity of a filter selection, used to tell "applied" from "edited since". */
+/**
+ * A metric's text, or a dash when the server did not send it.
+ *
+ * <p>`trips` is newer than some deployed backends, and `Number(undefined)` is
+ * `NaN` - which formats as "NaN" and reads as a broken report rather than a
+ * field this server does not publish yet. An em dash says the difference.
+ */
+function metricValue(
+  item: (typeof SUMMARY_ITEMS)[number],
+  summary: VehicleActivityReport['summary']
+): string {
+  const raw = Number(summary[item.key]);
+  return Number.isFinite(raw) ? item.format(raw) : '—';
+}
+
+function toneColor(tone: string | undefined, c: ThemeColors): string {
+  switch (tone) {
+    case 'running':
+      return c.success;
+    case 'idle':
+      return c.warning;
+    case 'stopped':
+      return c.danger;
+    case 'alert':
+      return c.danger;
+    case 'offline':
+      return c.textMuted;
+    default:
+      return c.primary;
+  }
+}
+
+/**
+ * Identity of a filter selection, used to tell "applied" from "edited since".
+ *
+ * <p>Built from the calendar days the user picked, never from a computed
+ * instant. It used to end the range with `endOfSelectedDay`, which returns
+ * `new Date()` whenever the chosen day is today - so the signature of an
+ * unchanged selection differed every time it was evaluated, the applied and
+ * current signatures could never match, and the export buttons were
+ * unreachable for the default range.
+ */
 function filterSignature(
   deviceId: number | undefined,
   from: Date,
   to: Date,
   period: ReportPeriod
 ): string {
-  return [deviceId ?? 'none', startOfDay(from).getTime(), endOfSelectedDay(to).getTime(), period].join('|');
+  return [deviceId ?? 'none', dayKey(from), dayKey(to), period].join('|');
+}
+
+/** Local calendar day, stable regardless of the time of day inside the Date. */
+function dayKey(value: Date): string {
+  return [
+    value.getFullYear(),
+    String(value.getMonth() + 1).padStart(2, '0'),
+    String(value.getDate()).padStart(2, '0'),
+  ].join('-');
 }
 
 type AppliedFilters = ActivityReportArgs;
@@ -80,7 +184,19 @@ export default function ReportsScreen() {
   const compact = width < 720;
   const scrollRef = React.useRef<ScrollView>(null);
 
-  const devices = useGetAllDevicesQuery();
+  /**
+   * Re-validated every time this tab is entered.
+   *
+   * <p>This is the only screen that asks for the device list with no
+   * arguments, so it owns a cache entry of its own - separate from the one the
+   * Vehicles tab fills. Nothing was subscribed to it while the fleet changed,
+   * so re-entering Reports was served the empty array it had cached from
+   * before the vehicle existed, and the screen said "No vehicles available"
+   * about a vehicle visible one tab away. That state was also terminal: it
+   * renders before the scroll view, so there was no pull-to-refresh and no
+   * retry, and only restarting the app cleared it.
+   */
+  const devices = useGetAllDevicesQuery(undefined, { refetchOnMountOrArgChange: true });
   const [selectedDeviceId, setSelectedDeviceId] = React.useState<number | undefined>();
   const [fromDate, setFromDate] = React.useState(() => daysAgo(6));
   const [toDate, setToDate] = React.useState(() => new Date());
@@ -96,6 +212,7 @@ export default function ReportsScreen() {
   const [showAllOverspeed, setShowAllOverspeed] = React.useState(false);
   const [exportFormat, setExportFormat] = React.useState<'PDF' | 'EXCEL' | null>(null);
   const [exportReport] = useLazyExportVehicleActivityReportQuery();
+  const { confirm, dialogElement, notify } = useAppDialog();
 
   const deviceOptions = React.useMemo<DropdownOption[]>(
     () =>
@@ -109,17 +226,23 @@ export default function ReportsScreen() {
     [c, devices.data]
   );
 
+  // First vehicle is selected and applied automatically, and the signature is
+  // recorded with it - otherwise the very first report on screen counted as
+  // "never applied" and offered no export until the user pressed a filter
+  // button that would change nothing.
   React.useEffect(() => {
     if (selectedDeviceId != null || deviceOptions.length === 0) return;
     const first = deviceOptions[0].id;
     setSelectedDeviceId(first);
     setApplied(toArgs(first, fromDate, toDate, period));
+    setAppliedSignature(filterSignature(first, fromDate, toDate, period));
   }, [deviceOptions, fromDate, period, selectedDeviceId, toDate]);
 
-  const reportArgs = React.useMemo(
-    () => (applied ? { ...applied, period } : null),
-    [applied, period]
-  );
+  // `applied` already carries the period it was applied with. Overriding it
+  // here with the live control made the request and the recorded selection
+  // disagree, so the chart could be rebuilt for a granularity the rest of the
+  // page had never been told about.
+  const reportArgs = applied;
   const report = useGetVehicleActivityReportQuery(reportArgs as ActivityReportArgs, {
     skip: reportArgs == null,
     refetchOnFocus: true,
@@ -145,13 +268,38 @@ export default function ReportsScreen() {
     !report.isError &&
     report.data != null;
 
+  /**
+   * Trend granularity re-applies immediately.
+   *
+   * It only re-buckets a window that is already chosen, so making the user
+   * press Apply for it would be ceremony - but it does change the exported
+   * file, so it has to move the applied filter and its signature together.
+   */
+  const changePeriod = React.useCallback(
+    (next: ReportPeriod) => {
+      setPeriod(next);
+      if (selectedDeviceId == null) return;
+      setApplied(toArgs(selectedDeviceId, fromDate, toDate, next));
+      setAppliedSignature(filterSignature(selectedDeviceId, fromDate, toDate, next));
+    },
+    [fromDate, selectedDeviceId, toDate]
+  );
+
   const applyFilters = React.useCallback(() => {
     if (selectedDeviceId == null) {
-      Alert.alert('Select a vehicle', 'Choose a vehicle before applying the report filter.');
+      notify({
+        message: 'Choose a vehicle before applying the report filter.',
+        title: 'Select a vehicle',
+        tone: 'info',
+      });
       return;
     }
-    if (startOfDay(fromDate).getTime() > endOfSelectedDay(toDate).getTime()) {
-      Alert.alert('Invalid date range', 'From Date must be before or equal to To Date.');
+    if (startOfDay(fromDate).getTime() > startOfDay(toDate).getTime()) {
+      notify({
+        message: 'From Date must be before or equal to To Date.',
+        title: 'Invalid date range',
+        tone: 'danger',
+      });
       return;
     }
     setShowAllStops(false);
@@ -159,25 +307,51 @@ export default function ReportsScreen() {
     setShowAllOverspeed(false);
     setApplied(toArgs(selectedDeviceId, fromDate, toDate, period));
     setAppliedSignature(filterSignature(selectedDeviceId, fromDate, toDate, period));
-  }, [fromDate, period, selectedDeviceId, toDate]);
+  }, [fromDate, notify, period, selectedDeviceId, toDate]);
 
   const download = React.useCallback(
     async (format: 'PDF' | 'EXCEL') => {
       if (!reportArgs || exportFormat) return;
       setExportFormat(format);
       try {
-        const payload = await exportReport({ ...reportArgs, period, format }).unwrap();
+        const payload = await exportReport({ ...reportArgs, format }).unwrap();
         const saved = await saveReportFile(payload, reportArgs.deviceId, format);
-        Alert.alert('Report downloaded', `${saved.fileName} saved to ${saved.location}.`);
+        // The file is already written. Opening it is the operator's choice, and
+        // the share sheet is also how the file reaches Downloads or Drive if
+        // that is where they want it.
+        if (saved.uri && (await Sharing.isAvailableAsync())) {
+          confirm({
+            cancelLabel: 'Done',
+            confirmLabel: 'Open',
+            message: `${saved.fileName} was saved to ${saved.location}.`,
+            onConfirm: () =>
+              Sharing.shareAsync(saved.uri as string, {
+                dialogTitle: saved.fileName,
+                mimeType: format === 'PDF' ? 'application/pdf' : EXCEL_MIME,
+              }),
+            title: 'Report downloaded',
+            tone: 'success',
+          });
+          return;
+        }
+        notify({
+          message: `${saved.fileName} was saved to ${saved.location}.`,
+          title: 'Report downloaded',
+          tone: 'success',
+        });
       } catch (error) {
         if (!isFilePickerCancellation(error)) {
-          Alert.alert('Export failed', apiErrorMessage(error, 'Unable to export this report.'));
+          notify({
+            message: apiErrorMessage(error, 'Unable to export this report.'),
+            title: 'Export failed',
+            tone: 'danger',
+          });
         }
       } finally {
         setExportFormat(null);
       }
     },
-    [exportFormat, exportReport, period, reportArgs]
+    [confirm, exportFormat, exportReport, notify, reportArgs]
   );
 
   if (devices.isLoading) {
@@ -194,10 +368,22 @@ export default function ReportsScreen() {
     );
   }
   if (deviceOptions.length === 0) {
-    return <EmptyView icon="car-off" title="No vehicles available" message="Add a vehicle before creating an activity report." />;
+    // Offered a retry rather than only an explanation: an empty fleet and a
+    // list that failed to refresh look identical from here, and one of them
+    // is fixed by asking again.
+    return (
+      <PageState
+        icon="car-off"
+        label="No vehicles available. Add a vehicle before creating an activity report."
+        onRetry={devices.refetch}
+        styles={styles}
+      />
+    );
   }
 
   const data = report.data;
+  const selectedVehicleLabel =
+    deviceOptions.find((option) => option.id === selectedDeviceId)?.label ?? 'Select vehicle';
 
   return (
     <ScrollView
@@ -218,22 +404,35 @@ export default function ReportsScreen() {
       }
       style={styles.screen}>
       <View style={[styles.pageWidth, !compact && styles.pageWidthDesktop]}>
-        <View style={styles.titleRow}>
-          <View>
-            <Text style={styles.pageTitle}>Reports</Text>
-            <Text style={styles.pageSubtitle}>Comprehensive vehicle activity report</Text>
+        {/* The app bar already says "Reports". This row spends its space on the
+            selection instead, so the filters can stay collapsed while still
+            telling the operator what they are looking at. */}
+        <Pressable
+          accessibilityHint="Opens the vehicle and date range filters"
+          accessibilityLabel="Report filters"
+          accessibilityRole="button"
+          onPress={() => {
+            setFilterOpen((value) => !value);
+            scrollRef.current?.scrollTo({ animated: true, y: 0 });
+          }}
+          style={[styles.filterBar, filterOpen && styles.filterBarOpen]}>
+          <View style={styles.filterBarIcon}>
+            <MaterialCommunityIcons color={c.primary} name="filter-variant" size={19} />
           </View>
-          <Pressable
-            accessibilityLabel="Show report filters"
-            accessibilityRole="button"
-            onPress={() => {
-              setFilterOpen((value) => !value);
-              scrollRef.current?.scrollTo({ animated: true, y: 0 });
-            }}
-            style={[styles.filterIcon, filterOpen && styles.filterIconActive]}>
-            <MaterialCommunityIcons color={filterOpen ? c.onPrimary : c.primary} name="filter-variant" size={22} />
-          </Pressable>
-        </View>
+          <View style={styles.filterBarCopy}>
+            <Text numberOfLines={1} style={styles.filterBarTitle}>
+              {selectedVehicleLabel}
+            </Text>
+            <Text numberOfLines={1} style={styles.filterBarMeta}>
+              {`${dayKey(fromDate)} → ${dayKey(toDate)} · ${period.toLowerCase()}`}
+            </Text>
+          </View>
+          <MaterialCommunityIcons
+            color={c.textMuted}
+            name={filterOpen ? 'chevron-up' : 'chevron-down'}
+            size={20}
+          />
+        </Pressable>
 
         {filterOpen ? (
           <Card style={styles.filterCard}>
@@ -290,16 +489,28 @@ export default function ReportsScreen() {
             ) : null}
 
             <ReportSection title="Summary overview" icon="view-dashboard-outline" styles={styles} color={c.primary}>
-              <View style={styles.summaryGrid}>
-                {SUMMARY_ITEMS.map((item) => (
-                  <View key={item.key} style={[styles.summaryCard, compact ? styles.summaryCardCompact : styles.summaryCardWide]}>
-                    <View style={styles.metricIcon}>
-                      <MaterialCommunityIcons color={c.primary} name={item.icon} size={19} />
+              <View style={styles.metricGrid}>
+                {SUMMARY_ITEMS.map((item) => {
+                  const tint = toneColor(item.tone, c);
+                  return (
+                    <View
+                      key={item.key}
+                      style={[
+                        styles.metricCard,
+                        compact ? styles.metricCardCompact : styles.metricCardWide,
+                      ]}>
+                      <View style={[styles.metricIcon, { backgroundColor: `${tint}1A` }]}>
+                        <MaterialCommunityIcons color={tint} name={item.icon} size={16} />
+                      </View>
+                      <Text numberOfLines={1} style={styles.metricLabel}>
+                        {item.label}
+                      </Text>
+                      <Text adjustsFontSizeToFit numberOfLines={1} style={styles.metricValue}>
+                        {metricValue(item, data.summary)}
+                      </Text>
                     </View>
-                    <Text style={styles.metricLabel}>{item.label}</Text>
-                    <Text style={styles.metricValue}>{item.format(Number(data.summary[item.key]))}</Text>
-                  </View>
-                ))}
+                  );
+                })}
               </View>
             </ReportSection>
 
@@ -308,7 +519,7 @@ export default function ReportsScreen() {
                 {PERIODS.map((item) => (
                   <Pressable
                     key={item.value}
-                    onPress={() => setPeriod(item.value)}
+                    onPress={() => changePeriod(item.value)}
                     style={[styles.periodButton, period === item.value && styles.periodButtonActive]}>
                     <Text style={[styles.periodText, period === item.value && styles.periodTextActive]}>{item.label}</Text>
                   </Pressable>
@@ -349,23 +560,7 @@ export default function ReportsScreen() {
             </ReportSection>
 
             <ReportSection title="Activity summary" icon="chart-donut" styles={styles} color={c.primary}>
-              {data.activitySummary.map((item) => {
-                const color = activityColor(item.status, c);
-                return (
-                  <View key={item.status} style={styles.activityRow}>
-                    <View style={styles.activityHeader}>
-                      <View style={styles.activityNameRow}>
-                        <View style={[styles.activityDot, { backgroundColor: color }]} />
-                        <Text style={styles.activityName}>{prettyState(item.status)}</Text>
-                      </View>
-                      <Text style={styles.activityValue}>{duration(item.durationSeconds)} · {item.percentage.toFixed(1)}%</Text>
-                    </View>
-                    <View style={styles.progressTrack}>
-                      <View style={[styles.progressFill, { backgroundColor: color, width: `${Math.min(100, Math.max(0, item.percentage))}%` }]} />
-                    </View>
-                  </View>
-                );
-              })}
+              <ActivityDonut compact={compact} items={data.activitySummary} styles={styles} />
             </ReportSection>
 
             <ReportSection title="Overspeed details" icon="speedometer" styles={styles} color={c.primary}>
@@ -402,6 +597,8 @@ export default function ReportsScreen() {
           </Card>
         )}
       </View>
+
+      {dialogElement}
     </ScrollView>
   );
 }
@@ -449,6 +646,178 @@ function DistanceChart({ data, styles, color, muted }: { data: VehicleActivityRe
       })}
     </ScrollView>
   );
+}
+
+/**
+ * How the window was spent.
+ *
+ * <p>One shape whose parts are the whole period, because that is the question
+ * this section answers - what the vehicle's time was made of. Four stacked
+ * progress bars could tell you idle was thirty hours but not that it was a
+ * fifth of the month, and bars on separate rows share no baseline, so
+ * comparing two of them meant reading two numbers instead of looking at a
+ * picture.
+ *
+ * <p>Each figure appears exactly once in the place it reads best: the share on
+ * its own arc, the duration in the legend beside it, and the period total in
+ * the hole in the middle - which is the number every other one is a fraction
+ * of, and the only one with nowhere else to go.
+ *
+ * <p>Drawn with arc paths rather than a chart library: four segments needs no
+ * axes, no scales and no layout engine.
+ */
+function ActivityDonut({
+  compact,
+  items,
+  styles,
+}: {
+  compact: boolean;
+  items: VehicleActivityReport['activitySummary'];
+  styles: ReturnType<typeof makeStyles>;
+}) {
+  const { colors: c } = useTheme();
+  const size = compact ? 190 : 210;
+  const stroke = compact ? 34 : 38;
+  const radius = (size - stroke) / 2;
+  const centre = size / 2;
+
+  const totalSeconds = items.reduce((sum, item) => sum + Math.max(0, item.durationSeconds), 0);
+
+  if (totalSeconds <= 0) {
+    return <Text style={styles.emptyInlineText}>No activity recorded for this period.</Text>;
+  }
+
+  // Laid out from 12 o'clock, clockwise, in the fixed order the legend lists
+  // them - so the same status is always in the same place across two different
+  // vehicles' reports.
+  let cursor = 0;
+  const segments = items.map((item) => {
+    const share = Math.max(0, item.durationSeconds) / totalSeconds;
+    const start = cursor;
+    cursor += share;
+    return { ...item, color: activityColor(item.status, c), share, start };
+  });
+
+  return (
+    <View style={styles.donutWrap}>
+      <View style={styles.donutStage}>
+        <Svg height={size} width={size}>
+          <G rotation={-90} origin={`${centre}, ${centre}`}>
+            {/* A track behind the arcs keeps the ring closed where rounding
+                leaves a hairline between two segments. */}
+            <Circle
+              cx={centre}
+              cy={centre}
+              fill="none"
+              r={radius}
+              stroke={c.surfaceAlt}
+              strokeWidth={stroke}
+            />
+            {segments
+              .filter((segment) => segment.share > 0)
+              .map((segment) => (
+                <Path
+                  d={arcPath(centre, radius, segment.start, segment.start + segment.share)}
+                  fill="none"
+                  key={segment.status}
+                  stroke={segment.color}
+                  strokeWidth={stroke}
+                />
+              ))}
+          </G>
+          {/* Labelled on the arc itself, but only where the slice is wide
+              enough to hold the text - a 0.4% sliver cannot, and printing it
+              anyway is how three labels end up stacked on one edge. */}
+          {segments
+            .filter((segment) => segment.share >= 0.06)
+            .map((segment) => {
+              const mid = segment.start + segment.share / 2;
+              const angle = mid * 2 * Math.PI - Math.PI / 2;
+              return (
+                <SvgText
+                  fill="#FFFFFF"
+                  fontSize={compact ? 12 : 13}
+                  fontWeight="900"
+                  key={`label-${segment.status}`}
+                  textAnchor="middle"
+                  x={centre + radius * Math.cos(angle)}
+                  y={centre + radius * Math.sin(angle) + (compact ? 4 : 5)}>
+                  {`${Math.round(segment.percentage)}%`}
+                </SvgText>
+              );
+            })}
+        </Svg>
+        <View pointerEvents="none" style={styles.donutCentre}>
+          <Text adjustsFontSizeToFit numberOfLines={1} style={styles.donutValue}>
+            {compactDuration(totalSeconds)}
+          </Text>
+          <Text style={styles.donutCaption}>Total time</Text>
+        </View>
+      </View>
+
+      <View style={styles.donutLegend}>
+        {items.map((item) => (
+          <View key={item.status} style={styles.legendRow}>
+            <View style={[styles.legendDot, { backgroundColor: activityColor(item.status, c) }]} />
+            <View style={styles.legendCopy}>
+              <Text numberOfLines={2} style={styles.legendName}>
+                {statusLabel(item.status)}
+              </Text>
+              <Text numberOfLines={1} style={styles.legendDuration}>
+                {compactDuration(item.durationSeconds)}
+              </Text>
+            </View>
+            <Text style={styles.legendPercent}>{item.percentage.toFixed(0)}%</Text>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+/** The label the operator reads, which is not always the wire value. */
+function statusLabel(status: string): string {
+  return status === 'OFFLINE' ? 'Offline / Not reporting' : prettyState(status);
+}
+
+/**
+ * `104h 10m` — the form these durations are read in.
+ *
+ * A month of offline time is 158 hours, and `158:16:19` makes the reader parse
+ * a clock to find that out. Seconds are dropped above a minute because nothing
+ * here is decided on them.
+ */
+function compactDuration(raw: number): string {
+  const seconds = Math.max(0, Math.round(raw));
+  if (seconds < 60) return `${seconds}s`;
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (hours === 0) return `${minutes}m`;
+  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
+}
+
+/**
+ * An SVG arc between two fractions of a full turn.
+ *
+ * A full-circle segment is drawn as two half arcs, because an arc whose start
+ * and end points coincide is a zero-length path and renders as nothing - which
+ * is exactly the case for a vehicle that was offline for the whole window.
+ */
+function arcPath(centre: number, radius: number, from: number, to: number): string {
+  const span = Math.min(1, Math.max(0, to - from));
+  if (span >= 0.9999) {
+    const top = `${centre} ${centre - radius}`;
+    const bottom = `${centre} ${centre + radius}`;
+    return `M ${top} A ${radius} ${radius} 0 1 1 ${bottom} A ${radius} ${radius} 0 1 1 ${top}`;
+  }
+  const startAngle = from * 2 * Math.PI;
+  const endAngle = (from + span) * 2 * Math.PI;
+  const x1 = centre + radius * Math.cos(startAngle);
+  const y1 = centre + radius * Math.sin(startAngle);
+  const x2 = centre + radius * Math.cos(endAngle);
+  const y2 = centre + radius * Math.sin(endAngle);
+  const largeArc = span > 0.5 ? 1 : 0;
+  return `M ${x1} ${y1} A ${radius} ${radius} 0 ${largeArc} 1 ${x2} ${y2}`;
 }
 
 function LocationCard({ location, styles, color }: { location?: ReportLocationPoint | null; styles: ReturnType<typeof makeStyles>; color: string }) {
@@ -533,11 +902,29 @@ const makeStyles = (c: ThemeColors) => StyleSheet.create({
   content: { padding: 10 },
   pageWidth: { alignSelf: 'center', gap: 10, width: '100%' },
   pageWidthDesktop: { maxWidth: 1080 },
-  titleRow: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 2 },
-  pageTitle: { color: c.textPrimary, fontSize: 26, fontWeight: '900', letterSpacing: -0.6 },
-  pageSubtitle: { color: c.textSecondary, fontSize: typography.caption, marginTop: 2 },
-  filterIcon: { alignItems: 'center', backgroundColor: c.surface, borderColor: c.border, borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth * 2, height: 44, justifyContent: 'center', width: 44 },
-  filterIconActive: { backgroundColor: c.primary, borderColor: c.primary },
+  filterBar: {
+    alignItems: 'center',
+    backgroundColor: c.surface,
+    borderColor: c.border,
+    borderRadius: radius.md,
+    borderWidth: StyleSheet.hairlineWidth * 2,
+    flexDirection: 'row',
+    gap: spacing.sm,
+    paddingHorizontal: 10,
+    paddingVertical: 9,
+  },
+  filterBarOpen: { borderColor: c.primary },
+  filterBarIcon: {
+    alignItems: 'center',
+    backgroundColor: c.accentSoft,
+    borderRadius: 9,
+    height: 32,
+    justifyContent: 'center',
+    width: 32,
+  },
+  filterBarCopy: { flex: 1, minWidth: 0 },
+  filterBarTitle: { color: c.textPrimary, fontSize: 14, fontWeight: '800' },
+  filterBarMeta: { color: c.textMuted, fontSize: 11, marginTop: 1 },
   filterCard: { gap: 10, padding: 12 },
   filterGrid: { gap: 10 },
   filterGridDesktop: { alignItems: 'flex-start', flexDirection: 'row' },
@@ -566,13 +953,83 @@ const makeStyles = (c: ThemeColors) => StyleSheet.create({
   bannerCopy: { flex: 1 },
   noGpsTitle: { color: c.warning, fontSize: typography.label, fontWeight: '800' },
   noGpsText: { color: c.textSecondary, fontSize: typography.caption, lineHeight: 17, marginTop: 2 },
-  summaryGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
-  summaryCard: { backgroundColor: c.surfaceAlt, borderColor: c.border, borderRadius: radius.md, borderWidth: StyleSheet.hairlineWidth, gap: 4, minHeight: 94, padding: 10 },
-  summaryCardCompact: { flexBasis: '47%', flexGrow: 1 },
-  summaryCardWide: { flexBasis: '23%', flexGrow: 1 },
-  metricIcon: { alignItems: 'center', backgroundColor: c.accentSoft, borderRadius: 9, height: 30, justifyContent: 'center', width: 30 },
+  donutWrap: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: spacing.md,
+    justifyContent: 'center',
+  },
+  donutStage: { alignItems: 'center', justifyContent: 'center', position: 'relative' },
+  donutCentre: {
+    alignItems: 'center',
+    bottom: 0,
+    justifyContent: 'center',
+    left: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
+  },
+  donutValue: {
+    color: c.textPrimary,
+    fontSize: 22,
+    fontVariant: ['tabular-nums'],
+    fontWeight: '900',
+    letterSpacing: -0.6,
+    maxWidth: '58%',
+  },
+  donutCaption: { color: c.textMuted, fontSize: 10.5, fontWeight: '700', marginTop: 1 },
+  donutLegend: { flex: 1, gap: 6, minWidth: 0 },
+  legendRow: {
+    alignItems: 'center',
+    backgroundColor: c.surfaceAlt,
+    borderRadius: radius.sm,
+    flexDirection: 'row',
+    gap: spacing.sm,
+    paddingHorizontal: 9,
+    paddingVertical: 7,
+  },
+  legendDot: { borderRadius: 5, height: 10, width: 10 },
+  legendCopy: { flex: 1, minWidth: 0 },
+  legendName: { color: c.textPrimary, fontSize: 12, fontWeight: '800', lineHeight: 15 },
+  legendDuration: {
+    color: c.textMuted,
+    fontSize: 10.5,
+    fontVariant: ['tabular-nums'],
+    marginTop: 1,
+  },
+  legendPercent: {
+    color: c.textPrimary,
+    fontSize: 13,
+    fontVariant: ['tabular-nums'],
+    fontWeight: '900',
+  },
+  metricGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
+  metricCard: {
+    backgroundColor: c.surfaceAlt,
+    borderColor: c.border,
+    borderRadius: radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    gap: 5,
+    padding: 11,
+  },
+  metricCardCompact: { flexBasis: '47%', flexGrow: 1 },
+  metricCardWide: { flexBasis: '22%', flexGrow: 1 },
+  metricIcon: {
+    alignItems: 'center',
+    borderRadius: 9,
+    height: 30,
+    justifyContent: 'center',
+    width: 30,
+  },
   metricLabel: { color: c.textSecondary, fontSize: 11, fontWeight: '700' },
-  metricValue: { color: c.textPrimary, fontSize: 16, fontVariant: ['tabular-nums'], fontWeight: '900' },
+  metricValue: {
+    color: c.textPrimary,
+    fontSize: 17,
+    fontVariant: ['tabular-nums'],
+    fontWeight: '900',
+    letterSpacing: -0.3,
+  },
+  /** A colour key that ties each figure to its bar in Activity summary. */
   periodRow: { backgroundColor: c.surfaceAlt, borderRadius: radius.md, flexDirection: 'row', padding: 3 },
   periodButton: { alignItems: 'center', borderRadius: radius.sm, flex: 1, paddingVertical: 9 },
   periodButtonActive: { backgroundColor: c.primary },
@@ -614,15 +1071,6 @@ const makeStyles = (c: ThemeColors) => StyleSheet.create({
   expandButton: { alignItems: 'center', alignSelf: 'center', flexDirection: 'row', gap: 3, padding: spacing.sm },
   expandText: { fontSize: typography.caption, fontWeight: '800' },
   sectionDivider: { backgroundColor: c.divider, height: StyleSheet.hairlineWidth, marginVertical: spacing.xs },
-  activityRow: { gap: 6 },
-  activityHeader: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
-  activityNameRow: { alignItems: 'center', flexDirection: 'row', gap: spacing.xs },
-  activityDot: { borderRadius: 5, height: 10, width: 10 },
-  activityName: { color: c.textPrimary, fontSize: typography.caption, fontWeight: '800' },
-  activityValue: { color: c.textSecondary, fontSize: typography.caption, fontVariant: ['tabular-nums'], fontWeight: '700' },
-  progressTrack: { backgroundColor: c.surfaceAlt, borderRadius: radius.pill, height: 9, overflow: 'hidden' },
-  progressFill: { borderRadius: radius.pill, height: 9 },
-  emptyInline: { alignItems: 'center', backgroundColor: c.surfaceAlt, borderRadius: radius.md, flexDirection: 'row', gap: spacing.sm, padding: 12 },
   emptyInlineText: { color: c.textSecondary, flex: 1, fontSize: typography.caption, lineHeight: 18 },
   exportHint: { color: c.textSecondary, fontSize: typography.caption, lineHeight: 18 },
   exportRow: { gap: spacing.sm },

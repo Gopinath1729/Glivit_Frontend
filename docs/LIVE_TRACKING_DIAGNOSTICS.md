@@ -220,9 +220,9 @@ the app draws what the server matched.
 | `MAP_MATCHING_TIMEOUT_MS` | `2000` | per attempt |
 | `MAP_MATCHING_MAX_RETRIES` | `1` | transient 429/5xx/transport failures only |
 
-`GEOAPIFY_API_KEY` exists only in backend configuration. The app's separately
-restricted `EXPO_PUBLIC_GEOAPIFY_TILES_API_KEY` can access map tiles only and
-must never reuse the matching credential.
+`GEOAPIFY_API_KEY` exists only in backend configuration. The app uses key-free
+OpenFreeMap vector tiles through MapLibre and never receives the matching
+credential.
 
 The application logs whether the provider, URL, and key are configured without
 logging the URL query string or secret. It does not spend a paid API request on

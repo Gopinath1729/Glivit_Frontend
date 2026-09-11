@@ -2,17 +2,12 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { useRouter } from 'expo-router';
 import React from 'react';
 import { Controller, useForm } from 'react-hook-form';
-import {
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { StyleSheet, Text, View } from 'react-native';
 import { z } from 'zod';
 
-import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
+import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { AuthScreenShell, authPalette as AUTH } from '@/src/components/ui/AuthScreenShell';
 import { Button } from '@/src/components/ui/Button';
-import { GlivtLogo } from '@/src/components/GlivtLogo';
 import { TextField } from '@/src/components/ui/TextField';
 import { apiErrorMessage } from '@/src/services/apiError';
 import { authStorage } from '@/src/services/authStorage';
@@ -23,8 +18,7 @@ import {
 import { useResolveTenantMutation } from '@/src/services/tenantApi';
 import { clearTenant, setTenant } from '@/src/store/authState';
 import { useAppDispatch } from '@/src/store/hooks';
-import { useTheme } from '@/src/theme/ThemeProvider';
-import { radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
+import { ForcedScheme } from '@/src/theme/ThemeProvider';
 
 const schema = z.object({
   companyCode: z
@@ -41,11 +35,9 @@ type FormInput = z.input<typeof schema>;
 type FormValues = z.output<typeof schema>;
 
 export default function CompanyCodeScreen() {
-  const insets = useSafeAreaInsets();
   const router = useRouter();
   const dispatch = useAppDispatch();
-  const { colors: c } = useTheme();
-  const styles = React.useMemo(() => makeStyles(c), [c]);
+  const styles = React.useMemo(() => makeStyles(), []);
   const [resolveTenant, { isLoading, reset: resetResolveTenant }] = useResolveTenantMutation();
   // React state does not update synchronously, so this closes the tiny window in
   // which two return-key events could start overlapping requests.
@@ -108,88 +100,51 @@ export default function CompanyCodeScreen() {
   });
 
   return (
-    <View style={styles.flex}>
-      {/* Bottom inset is already in the content padding below. */}
-      <KeyboardAwareForm
-        applyBottomInset={false}
-        style={styles.flex}
-        contentContainerStyle={[
-          styles.content,
-          { paddingTop: insets.top + spacing.xxl, paddingBottom: insets.bottom + spacing.xl },
-        ]}>
-        <View style={{ marginBottom: spacing.lg }}>
-          <GlivtLogo size={72} />
-        </View>
-        <Text style={styles.title}>Enter Company Code</Text>
-        <Text style={styles.subtitle}>
-          Provided by your service provider to connect this app to your account.
-        </Text>
-
-        <View style={styles.form}>
-          <Controller
-            control={control}
-            name="companyCode"
-            render={({ field: { onChange, onBlur, value } }) => (
-              <TextField
-                autoCapitalize="characters"
-                autoCorrect={false}
-                editable={!isLoading}
-                error={errors.companyCode?.message}
-                onBlur={onBlur}
-                onChangeText={(text) => {
-                  // Clear both React Hook Form's message and the last
-                  // mutation result as soon as the operator changes the value.
-                  clearErrors('companyCode');
-                  resetResolveTenant();
-                  onChange(normalizeCompanyCodeInput(text));
-                }}
-                placeholder="e.g. ACME01"
-                returnKeyType="go"
-                onSubmitEditing={onSubmit}
-                value={value}
-              />
-            )}
-          />
-          <View style={styles.submit}>
-            <Button label="Continue" loading={isLoading} onPress={onSubmit} />
+    <ForcedScheme scheme="light">
+      <AuthScreenShell
+        eyebrow="CONNECT THIS DEVICE"
+        footer={
+          <View style={styles.help}>
+            <MaterialCommunityIcons color={AUTH.inkMuted} name="help-circle-outline" size={13} />
+            <Text style={styles.helpText}>
+              Your administrator or service provider issues this code.
+            </Text>
           </View>
-        </View>
-      </KeyboardAwareForm>
-    </View>
+        }
+        subtitle="Enter the code that links this app to your organization's fleet account."
+        title="Enter company code">
+        <Controller
+          control={control}
+          name="companyCode"
+          render={({ field: { onChange, onBlur, value } }) => (
+            <TextField
+              autoCapitalize="characters"
+              autoCorrect={false}
+              editable={!isLoading}
+              error={errors.companyCode?.message}
+              onBlur={onBlur}
+              onChangeText={(text) => {
+                // Clear both React Hook Form's message and the last mutation
+                // result as soon as the operator changes the value.
+                clearErrors('companyCode');
+                resetResolveTenant();
+                onChange(normalizeCompanyCodeInput(text));
+              }}
+              onSubmitEditing={onSubmit}
+              placeholder="e.g. ACME01"
+              returnKeyType="go"
+              value={value}
+            />
+          )}
+        />
+        <Button label="Continue" loading={isLoading} onPress={onSubmit} />
+      </AuthScreenShell>
+    </ForcedScheme>
   );
 }
 
-const makeStyles = (c: ThemeColors) =>
+const makeStyles = () =>
   StyleSheet.create({
-    flex: { flex: 1, backgroundColor: c.loginBackground },
-    content: {
-      alignItems: 'center',
-      flexGrow: 1,
-      justifyContent: 'center',
-      paddingHorizontal: spacing.xxl,
-    },
-    title: {
-      color: '#FFFFFF',
-      fontSize: typography.h1,
-      fontWeight: '800',
-      letterSpacing: 0.3,
-    },
-    subtitle: {
-      color: 'rgba(255,255,255,0.82)',
-      fontSize: typography.body,
-      marginTop: spacing.sm,
-      textAlign: 'center',
-    },
-    form: {
-      backgroundColor: c.surface,
-      borderColor: c.border,
-      borderRadius: radius.xl,
-      borderWidth: StyleSheet.hairlineWidth * 2,
-      marginTop: spacing.xl,
-      padding: spacing.lg,
-      width: '100%',
-    },
-    submit: {
-      marginTop: spacing.md,
-    },
+    help: { alignItems: 'center', flexDirection: 'row', gap: 5 },
+    helpText: { color: AUTH.inkMuted, fontSize: 11.5, fontWeight: '600' },
   });

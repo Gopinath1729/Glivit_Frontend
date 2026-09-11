@@ -37,13 +37,13 @@ function ThemedStatusBar() {
     // Fallback if called during boot before router is initialized
   }
 
-  // The map screen is transparent/light in light mode and dark in dark mode.
-  // When we are on the map screen, status bar style follows the theme mode.
-  const isMapScreen = segments.length >= 2 && segments.includes('map');
-
-  // In all other cases (e.g. green gradient headers or dark screens like login/device-profile),
-  // we require light text and icons for maximum readability.
-  const statusBarStyle = (isMapScreen && !isDark) ? 'dark' : 'light';
+  // Light mode keeps the system area pale above the inset hero card, matching
+  // the reference header. Dark mode retains light glyphs on its dark surface.
+  const hasAppHero = segments.includes('(app)');
+  const isPublicMap = segments.includes('shared-trip');
+  const statusBarStyle = hasAppHero
+    ? isDark ? 'light' : 'dark'
+    : isPublicMap && !isDark ? 'dark' : 'light';
 
   return (
     <StatusBar
@@ -142,6 +142,7 @@ function RootNavigator() {
     <NavigationThemeProvider value={navTheme}>
       <Stack screenOptions={{ headerShown: false, animation: 'fade' }}>
         <Stack.Screen name="index" />
+        <Stack.Screen name="shared-trip" />
         <Stack.Protected guard={!hasTenant}>
           <Stack.Screen name="company-code" />
         </Stack.Protected>
@@ -154,7 +155,7 @@ function RootNavigator() {
           <Stack.Screen name="forgot-password" />
         </Stack.Protected>
         <Stack.Protected guard={authenticated}>
-          <Stack.Screen name="device-profile" />
+          <Stack.Screen name="vehicle-documents" />
           <Stack.Screen name="live-track" />
           {/* Turns this phone into one of the fleet's trackers. Registered here
               rather than under (app) because it keeps reporting while the tab

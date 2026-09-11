@@ -32,6 +32,7 @@ const configuredBackendBaseUrl = (process.env.EXPO_PUBLIC_BACKEND_BASE_URL || ''
   /\/+$/,
   ''
 );
+const configuredShareBaseUrl = (process.env.EXPO_PUBLIC_SHARE_BASE_URL || '').replace(/\/+$/, '');
 // An explicit value always wins, so pointing at a remote backend still works.
 const rawBackendBaseUrl = configuredBackendBaseUrl || metroDerivedBaseUrl();
 
@@ -130,4 +131,6 @@ export const env = {
   isBackendConfigured,
   backendConfigurationError,
   geoapifyApiKey: geoapifyTilesApiKey,
+  /** Public web origin hosting `/shared-trip`; native falls back to the app deep link. */
+  shareBaseUrl: configuredShareBaseUrl,
 };

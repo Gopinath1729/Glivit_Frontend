@@ -9,11 +9,18 @@ export type EmbeddedWebViewMessageEvent = {
 };
 
 type EmbeddedWebViewProps = {
+  allowFileAccess?: boolean;
+  allowFileAccessFromFileURLs?: boolean;
+  allowUniversalAccessFromFileURLs?: boolean;
+  allowingReadAccessToURL?: string;
+  domStorageEnabled?: boolean;
+  javaScriptEnabled?: boolean;
   onError?: (event: { nativeEvent: { description?: string } }) => void;
   onHttpError?: (event: { nativeEvent: { statusCode: number } }) => void;
   onLoadStart?: () => void;
   onMessage?: (event: EmbeddedWebViewMessageEvent) => void;
-  source: { html: string };
+  source: { html: string; baseUrl?: string };
+  originWhitelist?: string[];
   style?: unknown;
 };
 

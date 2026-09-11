@@ -139,7 +139,7 @@ export const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
         coordinate={coordinateRef.current}
         anchor={{ x: 0.5, y: 0.5 }}
         flat
-        image={vehicleSprite(device.state, isSelected)}
+        image={vehicleSprite(device.state, false)}
         rotation={heading}
         // Nothing is rasterised from a view, so there is no bitmap to re-bake.
         tracksViewChanges={false}

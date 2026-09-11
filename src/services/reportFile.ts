@@ -1,6 +1,4 @@
 import { Paths } from 'expo-file-system';
-import * as LegacyFileSystem from 'expo-file-system/legacy';
-import * as SecureStore from 'expo-secure-store';
 import { Platform } from 'react-native';
 
 import type { ReportContent } from '@/src/types/api';
@@ -13,17 +11,6 @@ export type SavedReportFile = {
 };
 
 export type ReportFormat = 'PDF' | 'EXCEL' | 'CSV';
-
-/**
- * Where Android reports are written.
- *
- * Android 11+ has no supported way to write an arbitrary file straight into
- * public Downloads: the old WRITE_EXTERNAL_STORAGE permission is ignored, and
- * expo-file-system exposes only app-private directories plus the Storage Access
- * Framework. The grant SAF returns is persistable, though -- so the folder is
- * chosen once and every export after that writes silently, with no picker.
- */
-const SAF_GRANT_KEY = 'glivt.reports.saf-directory';
 
 const EXTENSIONS: Record<ReportFormat, string> = {
   PDF: 'pdf',
@@ -78,61 +65,21 @@ function saveInBrowser(content: string, contentType: string, fileName: string): 
   return { fileName, uri: null, location: 'Downloads' };
 }
 
-async function readGrantedDirectory(): Promise<string | null> {
-  try {
-    return await SecureStore.getItemAsync(SAF_GRANT_KEY);
-  } catch {
-    return null;
-  }
-}
-
-async function rememberGrantedDirectory(uri: string | null): Promise<void> {
-  try {
-    if (uri) await SecureStore.setItemAsync(SAF_GRANT_KEY, uri);
-    else await SecureStore.deleteItemAsync(SAF_GRANT_KEY);
-  } catch {
-    // Losing the grant only costs one extra prompt next time.
-  }
-}
-
 /**
- * Asks once for a download folder, seeded at Downloads, and remembers it.
+ * Writes a report to the device. Nothing is asked of the user.
  *
- * Only reached when there is no usable grant already; every later export uses
- * the stored one and shows nothing.
- */
-async function requestDownloadDirectory(): Promise<string | null> {
-  const { StorageAccessFramework } = LegacyFileSystem;
-  const initial = StorageAccessFramework.getUriForDirectoryInRoot('Download');
-  const permission = await StorageAccessFramework.requestDirectoryPermissionsAsync(initial);
-  if (!permission.granted) return null;
-  await rememberGrantedDirectory(permission.directoryUri);
-  return permission.directoryUri;
-}
-
-async function writeIntoDirectory(
-  directoryUri: string,
-  fileName: string,
-  mimeType: string,
-  content: string,
-  binary: boolean
-): Promise<string> {
-  const { StorageAccessFramework } = LegacyFileSystem;
-  const fileUri = await StorageAccessFramework.createFileAsync(directoryUri, fileName, mimeType);
-  await StorageAccessFramework.writeAsStringAsync(fileUri, content, {
-    encoding: binary ? 'base64' : 'utf8',
-  });
-  return fileUri;
-}
-
-/**
- * Saves a report to the device without prompting.
+ * <p>Export used to open the Storage Access Framework directory picker so the
+ * file could land in the public Downloads folder. That is the only supported
+ * route to public Downloads on Android 11+ — `WRITE_EXTERNAL_STORAGE` is
+ * ignored and `expo-file-system` exposes no public directory — but it meant
+ * "Export PDF" opened a file browser and asked the operator to pick a folder
+ * before anything downloaded, which is not what a download button should do.
  *
- * On Android the folder is remembered from a one-time grant, so a tap on Export
- * writes the file and nothing appears on screen. On iOS the file goes to the
- * app's Documents folder -- reachable from Files under On My iPhone -- because
- * iOS has no shared Downloads directory and the alternative, a share sheet, is
- * the "Save As" dialog this is meant to avoid.
+ * <p>So the file is written straight into the app's own documents directory,
+ * which needs no permission and no prompt. The caller is handed the `uri` and
+ * offers to open or share it afterwards, which is also how a file reaches
+ * Downloads or Drive if the operator wants it there — but as a choice made
+ * after the export, not a toll gate in front of it.
  */
 export async function saveReportFile(
   payload: ReportContent,
@@ -151,48 +98,32 @@ export async function saveReportFile(
     return saveInBrowser(payload.content, contentType, fileName);
   }
 
-  if (Platform.OS === 'ios') {
-    const file = Paths.document.createFile(fileName, contentType);
-    file.write(payload.content, { encoding: binary ? 'base64' : 'utf8' });
-    const info = file.info();
-    if (!info.exists || !info.size) {
-      throw new Error('The report could not be written or is empty');
-    }
-    return { fileName, uri: file.uri, location: 'Files › On My iPhone › GLIVT' };
+  const file = Paths.document.createFile(fileName, contentType);
+  file.write(payload.content, { encoding: binary ? 'base64' : 'utf8' });
+  const info = file.info();
+  if (!info.exists || !info.size) {
+    throw new Error('The report could not be written or is empty');
   }
 
-  // Android: reuse the remembered folder, and only ask if there is not one.
-  let directoryUri = await readGrantedDirectory();
-  if (directoryUri) {
-    try {
-      return {
-        fileName,
-        uri: await writeIntoDirectory(directoryUri, fileName, contentType, payload.content, binary),
-        location: 'Downloads',
-      };
-    } catch {
-      // The grant can be revoked, or the folder removed, long after it was
-      // stored. Drop it and fall through to ask once more rather than failing.
-      await rememberGrantedDirectory(null);
-      directoryUri = null;
-    }
-  }
-
-  directoryUri = await requestDownloadDirectory();
-  if (!directoryUri) {
-    throw new Error('DOWNLOAD_FOLDER_NOT_GRANTED');
-  }
   return {
     fileName,
-    uri: await writeIntoDirectory(directoryUri, fileName, contentType, payload.content, binary),
-    location: 'Downloads',
+    uri: file.uri,
+    location:
+      Platform.OS === 'ios' ? 'Files › On My iPhone › GLIVT' : 'the app’s documents folder',
   };
 }
 
-/** True when the user dismissed the one-time folder grant. */
+/**
+ * True when the export failed because the user dismissed a system dialog.
+ *
+ * <p>Saving no longer opens one, but sharing an exported file still can, and
+ * a dismissed share sheet is a decision rather than an error to report.
+ */
 export function isFilePickerCancellation(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   const message = error.message.toLowerCase();
-  if (message.includes('download_folder_not_granted')) return true;
-  return message.includes('picker') && (message.includes('cancelled') || message.includes('canceled'));
+  return (
+    (message.includes('picker') || message.includes('share')) &&
+    (message.includes('cancelled') || message.includes('canceled') || message.includes('dismiss'))
+  );
 }

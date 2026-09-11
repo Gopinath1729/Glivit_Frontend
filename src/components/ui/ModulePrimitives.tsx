@@ -115,10 +115,10 @@ const makeStyles = (c: ThemeColors) =>
       paddingHorizontal: spacing.md,
     },
     chipActive: {
-      backgroundColor: c.primaryGreen,
-      borderColor: c.primaryGreen,
+      backgroundColor: c.accent,
+      borderColor: c.accent,
     },
-    chipText: { color: c.primaryGreen, fontSize: typography.caption, fontWeight: '700' },
+    chipText: { color: c.accent, fontSize: typography.caption, fontWeight: '700' },
     chipTextActive: { color: c.white },
     rowCard: {
       alignItems: 'center',

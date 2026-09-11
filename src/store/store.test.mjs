@@ -468,6 +468,51 @@ test('an unmatched update holds the previous matched road coordinate', () => {
   assert.equal(state.byDeviceId[1].longitude, 77.59465);
 });
 
+test('HELD_STATIONARY cannot move rotate restart or add distance', () => {
+  let state = liveVehiclesReducer(
+    undefined,
+    livePositionReceived(
+      packet({
+        matchedLatitude: 12.97165,
+        matchedLongitude: 77.59465,
+        matchConfidence: 0.9,
+        matchedSource: 'SOLVED',
+        speedKmh: 0,
+        course: 217,
+        state: 'STOPPED',
+      })
+    )
+  );
+  const before = state.byDeviceId[1];
+
+  state = liveVehiclesReducer(
+    state,
+    livePositionReceived(
+      packet({
+        latitude: 12.973,
+        longitude: 77.596,
+        matchedLatitude: 12.974,
+        matchedLongitude: 77.597,
+        matchedSource: 'HELD_STATIONARY',
+        speedKmh: 35,
+        tripDistanceKm: 99,
+        course: 25,
+        state: 'RUNNING',
+        lastGpsTime: iso(10_000),
+        deviceTime: iso(10_000),
+      })
+    )
+  );
+
+  const after = state.byDeviceId[1];
+  assert.equal(after.latitude, before.latitude);
+  assert.equal(after.longitude, before.longitude);
+  assert.equal(after.course, 217);
+  assert.equal(after.speedKmh, 0);
+  assert.equal(after.tripDistanceKm, before.tripDistanceKm);
+  assert.equal(after.state, 'STOPPED');
+});
+
 test('the polled roster seeds unknown vehicles but never moves a live one', () => {
   let state = liveVehiclesReducer(undefined, livePositionReceived(packet()));
   state = liveVehiclesReducer(

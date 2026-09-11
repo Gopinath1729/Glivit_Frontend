@@ -10,14 +10,10 @@ npm ci
 npx expo start
 ```
 
-Set `EXPO_PUBLIC_BACKEND_BASE_URL` to the Spring Boot API and set
-`EXPO_PUBLIC_GEOAPIFY_TILES_API_KEY` to a restricted, Map-Tiles-only Geoapify
-key. Never reuse the backend `GEOAPIFY_API_KEY` here. Android
-emulators reach the host at `http://10.0.2.2:8085`; production releases require
-HTTPS.
-
-The legacy public tile variable `EXPO_PUBLIC_GEOAPIFY_API_KEY` remains accepted
-during migration, but new environments should use the tiles-specific name.
+Set `EXPO_PUBLIC_BACKEND_BASE_URL` to the Spring Boot API. The frontend map uses
+key-free OpenFreeMap vector tiles through MapLibre; the backend-only Geoapify
+credential is still used for road matching. Android emulators reach the host at
+`http://10.0.2.2:8085`; production releases require HTTPS.
 
 ## Quality gate
 
@@ -32,5 +28,4 @@ npx expo export --platform android
 
 Use [the Play Store release runbook](./docs/PLAY_STORE_RELEASE.md). Production
 builds are configured in [eas.json](./eas.json) and reject a missing HTTPS
-backend or Geoapify key. Road matching remains a separately monitored backend
-service.
+backend. Road matching remains a separately monitored backend service.

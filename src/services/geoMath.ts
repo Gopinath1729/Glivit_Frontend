@@ -49,6 +49,15 @@ export function lerpAngle(a: number, b: number, t: number): number {
  */
 export const MIN_HEADING_MOVE_METERS = 3;
 
+/**
+ * Travel needed before a two-fix course can challenge the tracker-reported
+ * course. The accuracy-scaled rule below can raise this further.
+ */
+export const MIN_COURSE_CHECK_MOVE_METERS = 10;
+
+/** A larger disagreement means the reported course is stale or invalid. */
+export const MAX_REPORTED_COURSE_DISAGREEMENT_DEG = 55;
+
 /** A fix less accurate than this cannot be trusted to establish a direction. */
 export const MAX_HEADING_ACCURACY_METERS = 50;
 
@@ -152,8 +161,12 @@ export type BearingInputs = {
  *
  *   1. Nothing at all while stationary or held: the heading is frozen, so GPS
  *      drift can never spin a parked vehicle.
- *   2. The device's own reported course, when it reported one and is moving.
- *   3. The bearing between the last two accepted moving RAW coordinates.
+ *   2. Agreement between the device course and sustained coordinate travel.
+ *      If they disagree sharply, the travelled course wins; stale `0`/`90`
+ *      headings from inexpensive trackers can therefore no longer point the
+ *      vehicle across the road indefinitely.
+ *   3. Either moving signal on its own when there is not enough evidence to
+ *      cross-check it.
  *   4. The last heading displayed, held.
  *   5. North, only when nothing whatsoever is known.
  *
@@ -215,11 +228,26 @@ export function resolveVehicleBearing(params: BearingInputs): number {
       : null;
   const reported = Number.isFinite(reportedHeading) ? normalizeHeading(reportedHeading) : null;
 
-  // The device's course is preferred only when the device itself says it is
-  // moving. When it reports a stopped vehicle that has nonetheless covered real
-  // ground - a phone creeping in traffic, where the speedometer lags - the
-  // coordinates are the better witness.
-  const direction = movingBySpeed && reported != null ? reported : travelled ?? reported;
+  // A short coordinate delta is noisier than the tracker's course. Once the
+  // vehicle has moved farther than both a physical floor and twice the fix's
+  // stated accuracy, however, it becomes an independent witness. This catches
+  // the common stale-course failure without replacing good headings with GPS
+  // jitter at traffic lights or on one-second samples.
+  const courseCheckMeters = Math.max(
+    MIN_COURSE_CHECK_MOVE_METERS,
+    Number.isFinite(accuracyMeters) ? Math.max(0, accuracyMeters as number) * 2 : 0
+  );
+  let direction = movingBySpeed && reported != null ? reported : travelled ?? reported;
+  if (movingBySpeed && reported != null && travelled != null && movedMeters >= courseCheckMeters) {
+    const disagreement = Math.abs(angleDeltaDeg(reported, travelled));
+    if (disagreement > MAX_REPORTED_COURSE_DISAGREEMENT_DEG) {
+      direction = travelled;
+    } else if (disagreement > 22) {
+      // Moderate disagreement is normally GPS quantisation through a bend.
+      // Blend on the shortest arc instead of choosing a side and snapping.
+      direction = lerpAngle(reported, travelled, 0.4);
+    }
+  }
   if (direction == null) return heldHeading;
 
   return alignToRoad(direction, roadBearing);

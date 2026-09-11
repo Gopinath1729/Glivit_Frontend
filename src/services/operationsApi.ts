@@ -121,8 +121,11 @@ export const operationsApi = baseApi.injectEndpoints({
       transformResponse: (response: ApiResponse<EventDto>) => unwrap(response),
       invalidatesTags: ['Event'],
     }),
-    getGeofences: build.query<PageResponse<GeofenceDto>, { page?: number; size?: number }>({
-      query: ({ page = 0, size = 20 }) => ({ url: '/geofences', params: { page, size } }),
+    getGeofences: build.query<PageResponse<GeofenceDto>, { search?: string; page?: number; size?: number }>({
+      query: ({ search, page = 0, size = 20 }) => ({
+        url: '/geofences',
+        params: { ...(search ? { search } : {}), page, size },
+      }),
       transformResponse: (response: ApiResponse<PageResponse<GeofenceDto>>) => unwrap(response),
       providesTags: ['Geofence'],
     }),

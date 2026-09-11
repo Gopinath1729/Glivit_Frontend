@@ -38,6 +38,28 @@ test('a valid device heading is preferred while the vehicle is moving', () => {
   assert.ok(Math.abs(angleDeltaDeg(heading, 90)) < 1, `expected ~90, got ${heading}`);
 });
 
+test('sustained coordinate travel rejects a stale reported direction', () => {
+  const heading = resolveVehicleBearing({
+    previous: at(0),
+    ...at(0, 60),
+    reportedHeading: 0,
+    ...MOVING,
+    lastHeading: 0,
+  });
+  assert.ok(Math.abs(angleDeltaDeg(heading, 90)) < 2, `expected ~90 (east), got ${heading}`);
+});
+
+test('a short noisy step cannot overrule a valid reported direction', () => {
+  const heading = resolveVehicleBearing({
+    previous: at(0),
+    ...at(0, 7),
+    reportedHeading: 12,
+    ...MOVING,
+    lastHeading: 12,
+  });
+  assert.equal(heading, 12);
+});
+
 test('without a device heading the bearing comes from the last two accepted points', () => {
   const north = resolveVehicleBearing({
     previous: at(0),

@@ -3,14 +3,6 @@ const appJson = require('./app.json');
 module.exports = ({ config }) => {
   const easBuild = Boolean(process.env.EAS_BUILD_PROFILE);
   const backendBaseUrl = process.env.EXPO_PUBLIC_BACKEND_BASE_URL || '';
-  // The old EXPO_PUBLIC_GEOAPIFY_API_KEY name was already deployed as the
-  // public Map Tiles credential. Keep it as a migration alias so existing
-  // local/EAS environments do not produce an empty apiKey request. Neither
-  // name reads the backend-only GEOAPIFY_API_KEY used for map matching.
-  const geoapifyApiKey =
-    process.env.EXPO_PUBLIC_GEOAPIFY_TILES_API_KEY ||
-    process.env.EXPO_PUBLIC_GEOAPIFY_API_KEY ||
-    '';
   const googleMapsApiKey =
     process.env.GOOGLE_MAPS_API_KEY || process.env.EXPO_PUBLIC_GOOGLE_MAPS_ANDROID_API_KEY || '';
 
@@ -27,11 +19,6 @@ module.exports = ({ config }) => {
         'EXPO_PUBLIC_BACKEND_BASE_URL (an https:// URL). Set it in eas.json for ' +
           'this profile, or with `npx eas-cli env:create`. Note that .env is ' +
           'gitignored and is NOT uploaded to EAS.'
-      );
-    }
-    if (!geoapifyApiKey || /^(your_|geoapify_api_key)/i.test(geoapifyApiKey.trim())) {
-      missing.push(
-        'EXPO_PUBLIC_GEOAPIFY_TILES_API_KEY. This public, restricted tile key is separate from the backend map-matching key.'
       );
     }
     // Road matching is configured on the backend, not here: the app no longer

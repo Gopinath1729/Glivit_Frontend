@@ -2,6 +2,7 @@ import {
   distanceBetween,
   coordinateOf,
   GPS_LIMITS,
+  matchedStepLimitFor,
   segmentConnectivity,
   type LatLng,
   type SegmentBreakReason,
@@ -78,7 +79,23 @@ export type LiveCoordinate = LatLng;
  * follow the same rule here - the marker may use it, the route may not grow
  * from it.
  */
-export type LiveMatchedSource = 'SOLVED' | 'HELD' | 'CARRIED' | 'NONE';
+export type LiveMatchedSource =
+  | 'SOLVED'
+  | 'HELD_STATIONARY'
+  | 'PREVIOUS_TRUSTED'
+  | 'HELD'
+  | 'CARRIED'
+  | 'NONE';
+
+/** A retained coordinate may move the marker neither spatially nor along a route. */
+export function isHeldMatchedSource(source: LiveMatchedSource | null | undefined): boolean {
+  return (
+    source === 'HELD_STATIONARY' ||
+    source === 'PREVIOUS_TRUSTED' ||
+    source === 'HELD' ||
+    source === 'CARRIED'
+  );
+}
 
 /** Vertices retained across all runs before the oldest are dropped. */
 export const MAX_TRAIL_VERTICES = 4000;
@@ -516,7 +533,7 @@ export function travelledSegment(params: {
   // CARRIED / HELD: the matcher produced no new road. The marker keeps the
   // carried coordinate; the route grows by nothing, because inventing the road
   // between two carried points is exactly the fabrication being removed.
-  if (matchedSource === 'HELD' || matchedSource === 'CARRIED') {
+  if (isHeldMatchedSource(matchedSource)) {
     return {
       vertices: [],
       diagnosticVertices: [],
@@ -565,7 +582,17 @@ export function travelledSegment(params: {
     const shortTail = usable < 2;
     const step =
       previousDisplay == null ? 0 : distanceBetween(previousDisplay, currentDisplay);
-    if (shortTail && (startsRun || step <= limits.maxMatchedSegmentStepMeters)) {
+    // Scaled to this device's cadence rather than a flat 30 m. A 1 Hz phone
+    // steps ~6 m at 20 km/h, but one multipath sample displaces a fix by 30 m
+    // without the vehicle doing anything unusual, and the flat bound turned
+    // that single noisy sample into a visible hole in a continuous road.
+    // Until the device's cadence is known the caller's floor is the whole rule,
+    // so a test can still state a tighter bound in its own terms.
+    const stepLimit =
+      expectedIntervalMs == null
+        ? limits.maxMatchedSegmentStepMeters
+        : Math.max(limits.maxMatchedSegmentStepMeters, matchedStepLimitFor(expectedIntervalMs));
+    if (shortTail && (startsRun || step <= stepLimit)) {
       return {
         vertices: startsRun
           ? [currentDisplay]

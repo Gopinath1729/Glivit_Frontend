@@ -2,12 +2,35 @@ import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 import type { MapStyleElement } from 'react-native-maps';
 
-import { env } from '@/src/config/env';
-
 export type MapStyleSpec = string | Record<string, unknown>;
 export type MapStyleVariant = 'street' | 'bright' | 'dark' | 'satellite';
 export type NativeMapProvider = 'google-apple';
-export type WebMapProvider = 'geoapify';
+export type WebMapProvider = 'openfreemap';
+
+/**
+ * Shared presentation tokens for the fleet basemap. OpenFreeMap supplies
+ * OpenStreetMap vector data; FleetWebMap applies these values to the
+ * loaded MapLibre source layers, rather than applying a colour filter to a
+ * raster image. Keeping the values here also prevents route overlays and the
+ * native fallback from drifting away from the basemap palette.
+ */
+export const PREMIUM_FLEET_MAP_PALETTE = {
+  background: '#F5F7F5',
+  building: '#E3E9E9',
+  minorRoad: '#FFFFFF',
+  mainRoad: '#F7D889',
+  roadBorder: '#CED5D3',
+  water: '#CFEAF4',
+  waterEdge: '#B7DCE9',
+  park: '#DCEEDB',
+  primaryLabel: '#263746',
+  secondaryLabel: '#65758B',
+  selectedRoute: '#1B66C9',
+  selectedRouteOutline: '#174EA6',
+  alternativeRouteGray: '#7C8794',
+  alternativeRouteBlue: '#6F8FAA',
+  alternativeRouteSlate: '#9AA6B2',
+} as const;
 
 export type MapStyleIssue = {
   code: 'missing_geoapify_key' | 'placeholder_geoapify_key' | 'insecure_style_url';
@@ -45,27 +68,29 @@ const DARK_MAP_STYLE: MapStyleElement[] = [
   { featureType: 'water', elementType: 'labels.text.stroke', stylers: [{ color: '#17263c' }] },
 ];
 
-// Cool, low-noise navigation styling. It keeps Google/Apple as the map
-// provider, but gives pitched fleet views cleaner road hierarchy and stronger
-// vehicle contrast than the provider default.
+// Native fallback equivalent of the MapLibre fleet theme. The production Live
+// Map uses semantic vector-layer styling in FleetWebMap; these rules keep the
+// dormant Google/Apple fallback visually consistent.
 const STREET_MAP_STYLE: MapStyleElement[] = [
-  { elementType: 'geometry', stylers: [{ color: '#E8EDF2' }] },
-  { elementType: 'labels.icon', stylers: [{ saturation: -70 }, { lightness: 8 }] },
-  { elementType: 'labels.text.fill', stylers: [{ color: '#53677A' }] },
-  { elementType: 'labels.text.stroke', stylers: [{ color: '#F4F7FA' }, { weight: 3 }] },
-  { featureType: 'administrative', elementType: 'geometry.stroke', stylers: [{ color: '#C8D3DD' }] },
-  { featureType: 'landscape.natural', elementType: 'geometry', stylers: [{ color: '#DFE9E6' }] },
-  { featureType: 'poi', elementType: 'geometry', stylers: [{ color: '#DCE6E2' }] },
+  { elementType: 'geometry', stylers: [{ color: PREMIUM_FLEET_MAP_PALETTE.background }] },
+  { elementType: 'labels.icon', stylers: [{ visibility: 'off' }] },
+  { elementType: 'labels.text.fill', stylers: [{ color: PREMIUM_FLEET_MAP_PALETTE.secondaryLabel }] },
+  { elementType: 'labels.text.stroke', stylers: [{ color: PREMIUM_FLEET_MAP_PALETTE.background }, { weight: 3 }] },
+  { featureType: 'administrative.locality', elementType: 'labels.text.fill', stylers: [{ color: PREMIUM_FLEET_MAP_PALETTE.primaryLabel }] },
+  { featureType: 'administrative', elementType: 'geometry.stroke', stylers: [{ color: PREMIUM_FLEET_MAP_PALETTE.roadBorder }] },
+  { featureType: 'landscape.natural', elementType: 'geometry', stylers: [{ color: PREMIUM_FLEET_MAP_PALETTE.background }] },
+  { featureType: 'landscape.man_made', elementType: 'geometry', stylers: [{ color: PREMIUM_FLEET_MAP_PALETTE.building }] },
+  { featureType: 'poi', elementType: 'geometry', stylers: [{ color: PREMIUM_FLEET_MAP_PALETTE.park }] },
   { featureType: 'poi.business', stylers: [{ visibility: 'off' }] },
-  { featureType: 'poi.park', elementType: 'geometry', stylers: [{ color: '#CFE3D7' }] },
-  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#FFFFFF' }] },
-  { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#D5DEE6' }] },
-  { featureType: 'road.arterial', elementType: 'geometry', stylers: [{ color: '#F8FAFC' }] },
-  { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#CBDCE8' }] },
-  { featureType: 'road.highway', elementType: 'geometry.stroke', stylers: [{ color: '#AABFCE' }] },
+  { featureType: 'poi.park', elementType: 'geometry', stylers: [{ color: PREMIUM_FLEET_MAP_PALETTE.park }] },
+  { featureType: 'road', elementType: 'geometry', stylers: [{ color: PREMIUM_FLEET_MAP_PALETTE.minorRoad }] },
+  { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: PREMIUM_FLEET_MAP_PALETTE.roadBorder }] },
+  { featureType: 'road.arterial', elementType: 'geometry', stylers: [{ color: PREMIUM_FLEET_MAP_PALETTE.mainRoad }] },
+  { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: PREMIUM_FLEET_MAP_PALETTE.mainRoad }] },
+  { featureType: 'road.highway', elementType: 'geometry.stroke', stylers: [{ color: PREMIUM_FLEET_MAP_PALETTE.roadBorder }] },
   { featureType: 'transit', stylers: [{ visibility: 'off' }] },
-  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#B9D8E8' }] },
-  { featureType: 'water', elementType: 'labels.text.fill', stylers: [{ color: '#5E8195' }] },
+  { featureType: 'water', elementType: 'geometry', stylers: [{ color: PREMIUM_FLEET_MAP_PALETTE.water }] },
+  { featureType: 'water', elementType: 'labels.text.fill', stylers: [{ color: PREMIUM_FLEET_MAP_PALETTE.secondaryLabel }] },
 ];
 
 const BRIGHT_MAP_STYLE: MapStyleElement[] = [
@@ -75,37 +100,14 @@ const BRIGHT_MAP_STYLE: MapStyleElement[] = [
   { featureType: 'transit', stylers: [{ visibility: 'off' }] },
 ];
 
-const GEOAPIFY_STYLES: Record<MapStyleVariant, string> = {
-  street: 'osm-bright',
-  bright: 'osm-bright-grey',
-  dark: 'dark-matter',
-  satellite: 'osm-bright',
+const OPEN_FREE_MAP_STYLES: Record<MapStyleVariant, string> = {
+  street: 'liberty',
+  bright: 'bright',
+  dark: 'fiord',
+  // Satellite/map-type switching is intentionally gone. Legacy callers that
+  // still request it get the same coherent automotive vector scene.
+  satellite: 'liberty',
 };
-
-function isPlaceholderKey(key: string): boolean {
-  const normalized = key.trim().toLowerCase();
-  return (
-    normalized === 'your_geoapify_key' ||
-    normalized === 'your_api_key' ||
-    normalized === 'your_api_key_here' ||
-    normalized === 'geoapify_api_key'
-  );
-}
-
-function configurationErrorStyle(message: string): Record<string, unknown> {
-  return {
-    version: 8,
-    metadata: { glivtConfigurationError: message },
-    sources: {},
-    layers: [
-      {
-        id: 'configuration-background',
-        type: 'background',
-        paint: { 'background-color': '#EDF4F7' },
-      },
-    ],
-  };
-}
 
 function getWebStyleInfo(variant: MapStyleVariant): {
   provider: WebMapProvider;
@@ -113,50 +115,13 @@ function getWebStyleInfo(variant: MapStyleVariant): {
   styleUrl: string;
   issues: MapStyleIssue[];
 } {
-  const issues: MapStyleIssue[] = [];
-  const configuredKey = env.geoapifyApiKey.trim();
-  const key = configuredKey && !isPlaceholderKey(configuredKey) ? configuredKey : '';
-
-  if (!configuredKey) {
-    issues.push({
-      blocking: true,
-      code: 'missing_geoapify_key',
-      message:
-        'This build has no Geoapify tile key. Set EXPO_PUBLIC_GEOAPIFY_TILES_API_KEY and rebuild the app.',
-    });
-  } else if (!key) {
-    issues.push({
-      blocking: true,
-      code: 'placeholder_geoapify_key',
-      message:
-        'The Geoapify tile key is still a placeholder. Set EXPO_PUBLIC_GEOAPIFY_TILES_API_KEY to a real restricted tile key and rebuild the app.',
-    });
-  }
-
-  // Never issue a request containing `apiKey=`. When configuration is missing,
-  // FleetWebMap recognises this local sentinel and shows the actionable issue
-  // without contacting Geoapify. Release builds are rejected even earlier by
-  // app.config.js.
-  const styleUrl = key
-    ? `https://maps.geoapify.com/v1/styles/${GEOAPIFY_STYLES[variant]}/style.json?apiKey=${encodeURIComponent(key)}`
-    : '';
-  const style = styleUrl
-    ? styleUrl
-    : configurationErrorStyle(issues[0]?.message || 'Geoapify map configuration is missing.');
-
-  if (styleUrl && !styleUrl.startsWith('https://')) {
-    issues.push({
-      blocking: true,
-      code: 'insecure_style_url',
-      message: 'Map style URL must use HTTPS so web map tiles can load securely.',
-    });
-  }
+  const styleUrl = `https://tiles.openfreemap.org/styles/${OPEN_FREE_MAP_STYLES[variant]}`;
 
   return {
-    provider: 'geoapify',
-    style,
+    provider: 'openfreemap',
+    style: styleUrl,
     styleUrl,
-    issues,
+    issues: [],
   };
 }
 

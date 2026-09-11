@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import {
   buildPlaybackTrack,
+  isPlaybackVehicleVisible,
+  playbackActivityAt,
   haversineKm,
   routeSegments,
   sampleAt,
@@ -356,4 +358,40 @@ test('a closed loop does not teleport the marker to the finish on the second fix
     reachedFarCorner < 400,
     `midway through the loop the marker was ${Math.round(reachedFarCorner)} m from the far corner`
   );
+});
+
+test('playback hides the vehicle throughout stopped and no-data timeline spans', () => {
+  const track = buildPlaybackTrack([point(0), point(1), point(2), point(3), point(4)], {
+    pointsAreClean: true,
+  });
+  const segment = (type, fromIndex, toIndex) => ({
+    type,
+    from: point(fromIndex).t,
+    to: point(toIndex).t,
+    seconds: (toIndex - fromIndex) * 10,
+    distanceKm: 0,
+    startLat: BASE_LAT,
+    startLng: BASE_LNG,
+    endLat: BASE_LAT,
+    endLng: BASE_LNG,
+    averageSpeedKmh: type === 'MOVING' ? 30 : 0,
+    maxSpeedKmh: type === 'MOVING' ? 30 : 0,
+  });
+  const timeline = [
+    segment('MOVING', 0, 1),
+    segment('STOPPED', 1, 2),
+    segment('NO_DATA', 2, 3),
+    segment('MOVING', 3, 4),
+  ];
+
+  assert.equal(playbackActivityAt(track, timeline, 5_000), 'MOVING');
+  assert.equal(isPlaybackVehicleVisible(track, timeline, 5_000), true);
+  assert.equal(playbackActivityAt(track, timeline, 15_000), 'STOPPED');
+  // Parked is a KNOWN position: the vehicle is drawn standing at it, which is
+  // what the stop card is drawn over. Hiding it read as lost signal instead.
+  assert.equal(isPlaybackVehicleVisible(track, timeline, 15_000), true);
+  assert.equal(playbackActivityAt(track, timeline, 25_000), 'NO_DATA');
+  // An outage recorded no position, so there is nothing to stand the marker on.
+  assert.equal(isPlaybackVehicleVisible(track, timeline, 25_000), false);
+  assert.equal(isPlaybackVehicleVisible(track, timeline, 35_000), true);
 });

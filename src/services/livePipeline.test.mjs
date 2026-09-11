@@ -609,6 +609,49 @@ test('a HELD frame keeps the marker on its road and appends no route', () => {
   );
 });
 
+test('HELD_STATIONARY freezes marker heading route points speed and distance', () => {
+  let state = applyLiveEvent(
+    EMPTY_LIVE_STATE,
+    resolvedFrame({
+      positionId: 451,
+      raw: at(0, 0),
+      display: at(0, 8),
+      bearing: 31,
+      atMs: T0,
+      speedKmh: 0,
+    }),
+    T0
+  );
+  const drawn = state.displayPosition;
+  const heading = state.displayHeading;
+  const points = state.points;
+  const trail = state.trail;
+  const distance = state.tripDistanceKm;
+
+  const noisy = {
+    ...resolvedFrame({
+      positionId: 452,
+      raw: at(18, 9),
+      display: at(70, 40),
+      matched: at(70, 40),
+      geometry: [at(0, 8), at(70, 40)],
+      source: 'HELD_STATIONARY',
+      bearing: 250,
+      atMs: T0 + 10_000,
+      speedKmh: 0,
+    }),
+    tripDistanceKm: 99,
+  };
+  state = applyLiveEvent(state, noisy, T0 + 10_000);
+
+  assert.deepEqual(state.displayPosition, drawn);
+  assert.equal(state.displayHeading, heading);
+  assert.equal(state.speedKmh, 0);
+  assert.equal(state.tripDistanceKm, distance);
+  assert.strictEqual(state.points, points, 'no playback/route point is appended');
+  assert.strictEqual(state.trail, trail, 'no road geometry is appended');
+});
+
 test('the road geometry between two display positions is what the route draws', () => {
   let state = applyLiveEvent(
     EMPTY_LIVE_STATE,

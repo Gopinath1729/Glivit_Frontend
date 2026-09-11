@@ -1,4 +1,5 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useIsFocused } from '@react-navigation/native';
 import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, useRouter, useNavigation } from 'expo-router';
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -13,7 +14,6 @@ import {
   Modal,
   PanResponder,
   type PanResponderInstance,
-  PermissionsAndroid,
   Platform,
   Pressable,
   ScrollView,
@@ -31,6 +31,7 @@ import {
   DEFAULT_MAP_PREFERENCES,
 } from '@/src/services/mapPreferencesStorage';
 
+import { DriveSpeedGauge } from '@/src/components/DriveSpeedGauge';
 import { StatusPill } from '@/src/components/ui/StatusPill';
 import {
   FleetWebMap,
@@ -73,6 +74,7 @@ import {
   type LiveTrailRun,
 } from '@/src/services/liveRouteTrail';
 import { useLivePositions, useLiveRoadMotion } from '@/src/services/livePositions';
+import { vehicleBodyType } from '@/src/services/vehicleCategory';
 
 import type { DeviceSummary, PlaybackTrackPoint } from '@/src/types/api';
 
@@ -84,7 +86,6 @@ const LIVE_VEHICLE_SIZE = 52;
  * marker bitmap at 64x64 and cropped the overflow.
  */
 const LIVE_MARKER_SIZE = vehicleMarkerCanvas(LIVE_VEHICLE_SIZE);
-const LIVE_STATUS_CIRCLE_SIZE = 56;
 /** Single spacing unit for every floating map layer (header, rails, pills). */
 const OVERLAY_GAP = 10;
 /** Height assumed for the collapsed sheet before it has been measured. */
@@ -139,8 +140,8 @@ const CAMERA_MODES: Record<
   }
 > = {
   follow: { label: 'Follow', icon: 'navigation-variant', pitch: 28, zoom: 15.2, forwardMeters: 0, bearingFollowsHeading: false },
-  chase: { label: 'Chase', icon: 'car-sports', pitch: 52, zoom: 15.8, forwardMeters: 28, bearingFollowsHeading: true },
-  cinematic: { label: 'Cinema', icon: 'movie-open', pitch: 62, zoom: 15.5, forwardMeters: 44, bearingFollowsHeading: true },
+  chase: { label: 'Drive', icon: 'car-sports', pitch: 64, zoom: 17, forwardMeters: 18, bearingFollowsHeading: true },
+  cinematic: { label: 'Cinema', icon: 'movie-open', pitch: 68, zoom: 17.2, forwardMeters: 24, bearingFollowsHeading: true },
   top: { label: 'Top', icon: 'crosshairs-gps', pitch: 0, zoom: 16, forwardMeters: 0, bearingFollowsHeading: false },
   drone: { label: 'Drone', icon: 'orbit', pitch: 42, zoom: 14.2, forwardMeters: 34, bearingFollowsHeading: true },
   overview: { label: 'Overview', icon: 'fit-to-page-outline', pitch: 0, zoom: 12, forwardMeters: 0, bearingFollowsHeading: false },
@@ -192,9 +193,9 @@ const ROUTE_BLUE_AURA = 'rgba(45, 174, 255, 0.30)';
 const ROUTE_GPS_ONLY = '#F59E0B';
 
 const BRAND = {
-  green: '#118a36',
-  greenDark: '#05652a',
-  greenGlow: '#2be69e',
+  green: '#1B66C9',
+  greenDark: '#174EA6',
+  greenGlow: '#8AB4F8',
   orange: '#ff7900',
   red: '#fb2f32',
   ink: '#16202c',
@@ -285,7 +286,6 @@ type LiveVehicleMapMarkerProps = {
   category: string;
   coordinate: Coordinate;
   heading: number;
-  showStatusCircle: boolean;
   state: string;
   statusColor: string;
 };
@@ -299,7 +299,6 @@ const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
   category,
   coordinate,
   heading,
-  showStatusCircle,
   state,
   statusColor,
 }: LiveVehicleMapMarkerProps) {
@@ -319,7 +318,7 @@ const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
     // static image, and permanent rasterisation costs a redraw every frame.
     const timer = setTimeout(() => setTracksViewChanges(false), imageLoaded ? 120 : 1500);
     return () => clearTimeout(timer);
-  }, [showStatusCircle, statusColor, headingBucket, imageLoaded, moving]);
+  }, [statusColor, headingBucket, imageLoaded, moving]);
 
   // The vector marker draws its own heading cone into a billboard the SDK never
   // turns, so it must be given the bearing relative to the camera. A flat
@@ -340,7 +339,7 @@ const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
         coordinate={coordinate}
         flat
         identifier="live-vehicle"
-        image={vehicleSprite(state, showStatusCircle)}
+        image={vehicleSprite(state, false)}
         rotation={mapRotation}
         tappable={false}
         tracksViewChanges={false}
@@ -360,9 +359,6 @@ const LiveVehicleMapMarker = memo(function LiveVehicleMapMarker({
       tracksViewChanges={tracksViewChanges}
       zIndex={40}>
       <View collapsable={false} style={styles.liveVehicleMarker}>
-        {showStatusCircle ? (
-          <View style={[styles.markerStatusCircle, { borderColor: statusColor }]} />
-        ) : null}
         <VehicleMarker
           category={markerCategoryFor(category)}
           color={statusColor}
@@ -390,7 +386,7 @@ export default function VehicleTrackerScreen() {
   // A real, tenant-scoped device is selected.
   const hasRealDevice = deviceId != null && !Number.isNaN(deviceId);
   const validDeviceId = deviceId != null && !Number.isNaN(deviceId);
-  const { data: deviceDetail, refetch: refetchDevice } = useGetDeviceQuery(deviceId as number, {
+  const { data: deviceDetail } = useGetDeviceQuery(deviceId as number, {
     skip: !validDeviceId,
   });
   // No fabricated fallbacks. A hardcoded registration and address here read as
@@ -399,7 +395,7 @@ export default function VehicleTrackerScreen() {
   // loaded yet.
   const vehicleName = params.name ?? deviceDetail?.name ?? 'Vehicle';
   const vehicleSubtitle = params.subtitle ?? deviceDetail?.address ?? 'Locating…';
-  const vehicleCategory = params.category ?? deviceDetail?.category ?? 'CAR';
+  const vehicleCategory = vehicleBodyType(params.category ?? deviceDetail?.category);
   // The tenant's live SSE stream, filtered to this device. This is the ONLY
   // source of movement on this LIVE screen: there is no simulator, no demo
   // route and no synthesised track behind it. The current trip's already
@@ -572,6 +568,8 @@ export default function VehicleTrackerScreen() {
         : live.tripDistanceKm;
   const totalDistanceKm = tripDistanceKm;
   const insets = useSafeAreaInsets();
+  // Kept warm but idle while another screen is on top of this one.
+  const isScreenFocused = useIsFocused();
   const { height, width } = useWindowDimensions();
   const mapRef = useRef<MapView>(null);
   const webMapRef = useRef<FleetWebMapHandle>(null);
@@ -616,7 +614,7 @@ export default function VehicleTrackerScreen() {
   const [liveAgeSec, setLiveAgeSec] = useState<number | null>(null);
   const [isFollowing, setIsFollowing] = useState(true);
   const [autoFollowSuspended, setAutoFollowSuspended] = useState(false);
-  const [cameraMode, setCameraMode] = useState<CameraMode>('follow');
+  const [cameraMode, setCameraMode] = useState<CameraMode>('chase');
   const [cinematicMode] = useState(false);
   const [markerCategoryOverride] = useState<string | null>(null);
   // Bottom sheet detent: collapsed shows only the summary; expanded shows all.
@@ -685,7 +683,6 @@ export default function VehicleTrackerScreen() {
     });
     return sub;
   }, [navigation]);
-  const [showsUserLocation, setShowsUserLocation] = useState(false);
   // Full screen was removed with its control; the layout is always windowed.
   const isFullScreen = false;
   const [mapSize, setMapSize] = useState({ height, width });
@@ -1029,20 +1026,17 @@ export default function VehicleTrackerScreen() {
     manualInteractionRef.current = false;
     setAutoFollowSuspended(false);
     setIsFollowing(true);
-    if (cameraMode === 'overview') setCameraMode('follow');
+    if (cameraMode === 'overview') setCameraMode('chase');
     setIsLiveFollowing(true);
   }, [cameraMode]);
-  const mapStyleInfo = useMemo(
-    () => getMapStyleInfo(isNightMode ? 'dark' : isSatelliteMode ? 'bright' : 'street'),
-    [isNightMode, isSatelliteMode]
-  );
-  // Geoapify/MapLibre is the map renderer on Android, iOS and web. Keeping the
+  const mapStyleInfo = useMemo(() => getMapStyleInfo('street'), []);
+  // OpenFreeMap/MapLibre is the map renderer on Android, iOS and web. Keeping the
   // provider identical across platforms removes the Google-key crash path and
   // makes route/camera behaviour consistent on the phone that supplies GPS.
   const useNativeMap = false;
   const blockingMapIssue = mapStyleInfo.issues.find((issue) => issue.blocking);
   const mapProviderLabel = useMemo(() => {
-    return 'Geoapify';
+    return 'OpenFreeMap';
   }, []);
   // One gap constant for every floating layer, so the header, camera rail,
   // control rail and sheet read as an evenly spaced stack on any screen size
@@ -1592,90 +1586,6 @@ export default function VehicleTrackerScreen() {
     showToast('Centered on vehicle');
   }, [cameraMode, haptic, showToast, useNativeMap]);
 
-  // ---------------------------------------------------------------------------
-  // Map controls. Every handler has a stable identity so the control rail (and
-  // the memoised bottom sheet) are not re-rendered by the live position ticks.
-  // ---------------------------------------------------------------------------
-
-  const toggleUserLocation = useCallback(async () => {
-    haptic();
-    if (showsUserLocation) {
-      setShowsUserLocation(false);
-      showToast('My location hidden');
-      return;
-    }
-
-    if (Platform.OS === 'android') {
-      try {
-        const granted = await PermissionsAndroid.request(
-          PermissionsAndroid.PERMISSIONS.ACCESS_FINE_LOCATION
-        );
-        if (granted !== PermissionsAndroid.RESULTS.GRANTED) {
-          showToast('Location permission denied');
-          return;
-        }
-      } catch {
-        showToast('Location permission unavailable');
-        return;
-      }
-    }
-
-    setShowsUserLocation(true);
-    showToast('Showing my location');
-
-    if (typeof navigator !== 'undefined' && navigator.geolocation) {
-      navigator.geolocation.getCurrentPosition(
-        (pos) => {
-          if (useNativeMap && mapRef.current) {
-            mapRef.current.animateCamera(
-              {
-                center: { latitude: pos.coords.latitude, longitude: pos.coords.longitude },
-                zoom: 15,
-              },
-              { duration: 500 }
-            );
-          }
-        },
-        () => undefined,
-        { enableHighAccuracy: true, timeout: 5000 }
-      );
-    }
-  }, [haptic, showToast, showsUserLocation, useNativeMap]);
-
-  const refreshMap = useCallback(async () => {
-    haptic();
-    showToast('Refreshing live data');
-    try {
-      await refetchDevice();
-      if (useNativeMap) {
-        void syncNativeProjectionRef.current(true);
-      }
-      showToast('Refreshed live map');
-    } catch {
-      showToast('Refresh failed');
-    }
-  }, [haptic, refetchDevice, showToast, useNativeMap]);
-
-  const openStreetView = useCallback(async () => {
-    haptic();
-    const { coordinate } = liveRef.current;
-    if (!coordinate || (coordinate.latitude === 0 && coordinate.longitude === 0)) {
-      showToast('Location unavailable for Street View');
-      return;
-    }
-    const url = `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${coordinate.latitude},${coordinate.longitude}`;
-    try {
-      const supported = await Linking.canOpenURL(url);
-      if (supported) {
-        await Linking.openURL(url);
-      } else {
-        showToast('Street View unavailable on this device');
-      }
-    } catch {
-      showToast('Could not open Street View');
-    }
-  }, [haptic, showToast]);
-
   const measureOverlay = useCallback(
     (key: keyof typeof overlayHeights, event: LayoutChangeEvent) => {
       const next = Math.ceil(event.nativeEvent.layout.height);
@@ -2088,12 +1998,18 @@ export default function VehicleTrackerScreen() {
         heading,
         label: vehicleName,
         moving: resolvedState.state === 'RUNNING' && currentSpeed > 0,
+        speedKph: currentSpeed,
+        // Local monotonic sample time from the one road-motion clock. It lets
+        // the WebView fill the 50ms between React publishes without deriving a
+        // second position or heading of its own.
+        sourceTime: motion.sourceTime,
       },
     ],
     [
       currentSpeed,
       heading,
       markerCategory,
+      motion.sourceTime,
       resolvedState.state,
       statusColor,
       vehicleCoordinate,
@@ -2213,13 +2129,12 @@ export default function VehicleTrackerScreen() {
   const isMapLoading = useNativeMap && (mapLoadState === 'loading' || !mapContainerReady);
 
   /**
-   * The four map controls, in one rail.
+   * The two map controls that belong in a driving view.
    *
    * Zoom, map type, traffic and full screen are gone: pinch and rotate already
    * do the first, and the rest were three taps of chrome over a tracking screen
-   * whose job is to show one vehicle. What is left is the four things an
-   * operator actually reaches for, in a single evenly spaced column rather than
-   * two half-empty ones.
+   * whose job is to show one vehicle. Recenter and Playback are the two actions
+   * an operator needs without opening another utility panel.
    */
   const mapControls = useMemo<MapControl[]>(
     () => [
@@ -2229,23 +2144,13 @@ export default function VehicleTrackerScreen() {
         label: 'Recenter on vehicle',
         onPress: resumeCinematicTracking,
       },
-      {
-        active: showsUserLocation,
-        icon: 'account-circle-outline',
-        label: 'My location',
-        onPress: () => void toggleUserLocation(),
-      },
-      { icon: 'panorama-variant-outline', label: 'Map preview', onPress: openStreetView },
-      { icon: 'refresh', label: 'Refresh map', onPress: refreshMap },
+      { icon: 'history', label: 'Route playback', onPress: () => handleRouteTool('history') },
     ],
     [
       autoFollowSuspended,
+      handleRouteTool,
       isFollowing,
-      openStreetView,
-      refreshMap,
       resumeCinematicTracking,
-      showsUserLocation,
-      toggleUserLocation,
     ]
   );
 
@@ -2329,7 +2234,6 @@ export default function VehicleTrackerScreen() {
           showsCompass={false}
           showsMyLocationButton={false}
           showsTraffic={mapPreferences.details.traffic}
-          showsUserLocation={showsUserLocation}
           style={styles.mapCanvas}
           toolbarEnabled={false}
           zoomEnabled>
@@ -2373,10 +2277,6 @@ export default function VehicleTrackerScreen() {
               category={markerCategory}
               coordinate={vehicleCoordinate}
               heading={heading}
-              showStatusCircle={
-                liveEnabled &&
-                (!live.connected || isLiveStale || isLowAccuracy || hasInvalidLiveFix)
-              }
               state={resolvedState.state || status}
               statusColor={statusColor}
             />
@@ -2388,6 +2288,7 @@ export default function VehicleTrackerScreen() {
           cameraMode={cameraMode}
           followSelected={isFollowing}
           mapStyle={mapStyleInfo.webStyle}
+          premiumVectorTheme
           markers={fallbackMarkers}
           onInteraction={handleManualMapInteraction}
           onProjectionChange={handleWebProjection}
@@ -2395,6 +2296,11 @@ export default function VehicleTrackerScreen() {
           polylines={fallbackPolylines}
           selectedId="vehicle"
           style={styles.mapCanvas}
+          // The same insets the native map was already given: header and camera
+          // rail above, details sheet below. The follow camera frames the
+          // vehicle inside what is left rather than behind the sheet.
+          viewportPadding={mapPadding}
+          active={isScreenFocused}
         />
       )}
 
@@ -2795,7 +2701,7 @@ const MapControlRail = memo(function MapControlRail({
                   pressed && styles.pressedControl,
                 ]}>
                 <MaterialCommunityIcons
-                  color={control.danger ? BRAND.orange : control.active ? '#07121B' : '#DCE9F4'}
+                  color={control.danger ? BRAND.orange : control.active ? '#07121B' : '#17352D'}
                   name={control.icon}
                   size={20}
                   style={
@@ -2989,6 +2895,12 @@ const LiveDetailsSheet = memo(function LiveDetailsSheet({
         {/* No flex: the body reports its NATURAL height so the sheet can size
             to it. Stretching it to fill was what produced the empty space. */}
         <View onLayout={(event) => recordBodyHeight(event.nativeEvent.layout.height)}>
+          {/* Speed leads as an instrument rather than as one more table cell.
+              `speed` is already quantised by the parent, so the dial redraws
+              once per accepted fix and never per animation frame. */}
+          <View style={styles.sheetCluster}>
+            <DriveSpeedGauge caption={status} size={126} speedKph={speed} />
+          </View>
           <View style={styles.sheetStats}>
             <Metric
               icon="clock-outline"
@@ -3212,8 +3124,8 @@ const styles = StyleSheet.create({
   },
   headerCard: {
     alignItems: 'center',
-    backgroundColor: 'rgba(7, 15, 27, 0.94)',
-    borderColor: 'rgba(255, 255, 255, 0.14)',
+    backgroundColor: 'rgba(255, 255, 255, 0.96)',
+    borderColor: '#DCE8E3',
     borderRadius: 20,
     borderWidth: 1,
     elevation: 8,
@@ -3225,9 +3137,9 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     position: 'absolute',
     right: OVERLAY_GAP + 4,
-    shadowColor: '#020712',
+    shadowColor: '#18382D',
     shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.34,
+    shadowOpacity: 0.18,
     shadowRadius: 20,
   },
   headerIconButton: {
@@ -3269,13 +3181,13 @@ const styles = StyleSheet.create({
     minWidth: 0,
   },
   headerTitle: {
-    color: '#F3F8FD',
+    color: '#102A23',
     fontSize: 18,
     fontWeight: '900',
     letterSpacing: 0,
   },
   headerSubtitle: {
-    color: '#8FA5B9',
+    color: '#71827C',
     fontSize: 11,
     fontWeight: '600',
     letterSpacing: 0,
@@ -3375,8 +3287,8 @@ const styles = StyleSheet.create({
     paddingVertical: 11,
   },
   pickerRowActive: {
-    backgroundColor: 'rgba(43, 230, 158, 0.12)',
-    borderColor: 'rgba(43, 230, 158, 0.55)',
+    backgroundColor: 'rgba(138, 180, 248, 0.12)',
+    borderColor: 'rgba(138, 180, 248, 0.55)',
   },
   pickerDot: { borderRadius: 5, height: 10, width: 10 },
   pickerRowText: { flex: 1, minWidth: 0 },
@@ -3395,16 +3307,16 @@ const styles = StyleSheet.create({
   controlStack: { gap: OVERLAY_GAP, paddingBottom: 2 },
   controlButton: {
     alignItems: 'center',
-    backgroundColor: 'rgba(9, 18, 31, 0.92)',
-    borderColor: 'rgba(255,255,255,0.16)',
+    backgroundColor: 'rgba(255,255,255,0.96)',
+    borderColor: '#DCE8E3',
     borderRadius: 14,
     borderWidth: 1,
     elevation: 5,
     height: CONTROL_BUTTON_SIZE,
     justifyContent: 'center',
-    shadowColor: '#020712',
+    shadowColor: '#18382D',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.34,
+    shadowOpacity: 0.18,
     shadowRadius: 10,
     width: CONTROL_BUTTON_SIZE,
   },
@@ -3541,16 +3453,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     width: LIVE_MARKER_SIZE,
   },
-  markerStatusCircle: {
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderRadius: LIVE_STATUS_CIRCLE_SIZE / 2,
-    borderWidth: 2,
-    height: LIVE_STATUS_CIRCLE_SIZE,
-    left: (LIVE_MARKER_SIZE - LIVE_STATUS_CIRCLE_SIZE) / 2,
-    position: 'absolute',
-    top: (LIVE_MARKER_SIZE - LIVE_STATUS_CIRCLE_SIZE) / 2,
-    width: LIVE_STATUS_CIRCLE_SIZE,
-  },
   markerShadow: {
     backgroundColor: 'rgba(3, 10, 18, 0.32)',
     borderRadius: 18,
@@ -3628,8 +3530,8 @@ const styles = StyleSheet.create({
   },
   deviceAvatar: {
     alignItems: 'center',
-    backgroundColor: 'rgba(43, 230, 158, 0.1)',
-    borderColor: 'rgba(43, 230, 158, 0.22)',
+    backgroundColor: 'rgba(138, 180, 248, 0.1)',
+    borderColor: 'rgba(138, 180, 248, 0.22)',
     borderRadius: 16,
     borderWidth: 1,
     height: 64,
@@ -3776,8 +3678,8 @@ const styles = StyleSheet.create({
     paddingVertical: 7,
   },
   mapToolActive: {
-    backgroundColor: 'rgba(43,230,158,0.1)',
-    borderColor: 'rgba(43,230,158,0.5)',
+    backgroundColor: 'rgba(138, 180, 248,0.1)',
+    borderColor: 'rgba(138, 180, 248,0.5)',
   },
   mapToolDanger: {
     backgroundColor: 'rgba(251,47,50,0.09)',
@@ -3796,7 +3698,7 @@ const styles = StyleSheet.create({
   },
   optionPanel: {
     backgroundColor: 'rgba(255,255,255,0.045)',
-    borderColor: 'rgba(43, 230, 158, 0.18)',
+    borderColor: 'rgba(138, 180, 248, 0.18)',
     borderRadius: 14,
     borderWidth: 1,
     marginTop: 12,
@@ -3872,6 +3774,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
     textTransform: 'uppercase',
   },
+  sheetCluster: { alignItems: 'center', paddingTop: 10 },
   sheetStats: {
     borderColor: '#E2ECE8',
     borderTopWidth: 1,
@@ -4348,7 +4251,7 @@ const styles = StyleSheet.create({
     width: 24,
   },
   histRailLine: {
-    backgroundColor: 'rgba(39,211,77,0.45)',
+    backgroundColor: 'rgba(26, 115, 232,0.45)',
     flex: 1,
     width: 2,
   },
@@ -4564,7 +4467,7 @@ const styles = StyleSheet.create({
   },
   journeyStartMarker: {
     alignItems: 'center',
-    backgroundColor: '#27D34D',
+    backgroundColor: '#1A73E8',
     borderColor: '#FFFFFF',
     borderRadius: 11,
     borderWidth: 1.5,
@@ -4635,7 +4538,7 @@ const tooltipStyles = StyleSheet.create({
     width: TOOLTIP_W,
     height: TOOLTIP_H,
     backgroundColor: 'rgba(9, 24, 15, 0.95)',
-    borderColor: 'rgba(34, 197, 94, 0.6)',
+    borderColor: 'rgba(26, 115, 232, 0.6)',
     borderWidth: 1.5,
     borderRadius: 10,
     paddingHorizontal: 8,
@@ -4654,7 +4557,7 @@ const tooltipStyles = StyleSheet.create({
     marginBottom: 2,
   },
   statusText: {
-    color: '#2BE69E',
+    color: '#8AB4F8',
     fontSize: 11,
     fontWeight: '900',
   },

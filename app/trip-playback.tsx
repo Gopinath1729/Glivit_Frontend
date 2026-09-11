@@ -1,4 +1,5 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
+import { useIsFocused } from '@react-navigation/native';
 import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -15,6 +16,8 @@ import {
   Text,
   useWindowDimensions,
   View,
+  type StyleProp,
+  type ViewStyle,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -37,9 +40,20 @@ import { apiErrorMessage } from '@/src/services/apiError';
 import { coordinateOf } from '@/src/services/gpsPipeline';
 import { useGetDevicePlaybackQuery } from '@/src/services/devicesApi';
 import { getMapStyleInfo } from '@/src/services/mapStyle';
+import { buildPlaybackRoute, routeProgressAt } from '@/src/services/playbackRoute';
+import { usePlaybackStopsMode } from '@/src/services/playbackPreferences';
+import {
+  buildPlaybackSchedule,
+  formatStopDuration,
+  playbackAtRecorded,
+  recordedAtPlayback,
+  stopAtRecorded,
+} from '@/src/services/playbackSchedule';
 import { advancePlaybackElapsed } from '@/src/services/playbackClock';
 import {
   haversineKm,
+  isPlaybackVehicleVisible,
+  playbackActivityAt,
   sampleAt,
   routeSegments,
   travelledRouteSegments,
@@ -71,12 +85,13 @@ import {
  */
 const SPEEDS = [0.5, 1, 2, 4] as const;
 /**
- * How often the playhead is published to React (~25/s).
+ * How often the playhead is published to React (~15/s).
  *
- * The clock itself runs per frame; this only throttles the re-render, because
- * publishing drives the map, the travelled polyline and the readouts.
+ * The clock and WebView interpolation still run per frame. Publishing fewer
+ * React trees keeps the JS/UI bridge clear for gestures and map tiles on
+ * mid-range phones without making either the vehicle or route reveal step.
  */
-const UI_PUBLISH_INTERVAL_MS = 40;
+const UI_PUBLISH_INTERVAL_MS = 66;
 
 /**
  * A position on the recorded timeline as a clock readout.
@@ -120,12 +135,8 @@ const ROUTE_BLUE_BASE = 'rgba(52, 122, 214, 0.85)';
 const ROUTE_GPS_ONLY = '#F59E0B';
 type CameraMode = 'follow' | 'chase' | 'cinematic' | 'drone' | 'top' | 'overview';
 const CAMERAS: { id: CameraMode; icon: string; label: string }[] = [
-  { id: 'follow', icon: 'navigation-variant', label: 'Follow' },
-  { id: 'chase', icon: 'car-sports', label: 'Chase' },
-  { id: 'cinematic', icon: 'movie-open', label: 'Cinematic' },
-  { id: 'drone', icon: 'orbit', label: 'Drone' },
-  { id: 'top', icon: 'crosshairs-gps', label: 'Top' },
-  { id: 'overview', icon: 'fit-to-page-outline', label: 'Overview' },
+  { id: 'chase', icon: 'car-sports', label: 'Drive' },
+  { id: 'overview', icon: 'map-outline', label: 'Trip' },
 ];
 
 const G = {
@@ -218,6 +229,15 @@ function formatHistoryTime(value: string | null | undefined): string {
   });
 }
 
+/** A stop's clock times, in the reader's own locale and timezone. */
+function formatStopClock(timestamp: number): string {
+  if (!Number.isFinite(timestamp)) return '—';
+  return new Date(timestamp).toLocaleTimeString(undefined, {
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+}
+
 function timelinePresentation(segment: PlaybackTimelineSegment) {
   switch (segment.type) {
     case 'STOPPED':
@@ -225,7 +245,7 @@ function timelinePresentation(segment: PlaybackTimelineSegment) {
     case 'NO_DATA':
       return { color: '#64748B', icon: 'signal-off', label: 'No GPS signal' } as const;
     default:
-      return { color: '#087C73', icon: 'navigation-variant-outline', label: 'Moving' } as const;
+      return { color: '#1A73E8', icon: 'navigation-variant-outline', label: 'Moving' } as const;
   }
 }
 
@@ -283,12 +303,8 @@ export default function TripPlaybackScreen() {
       router.back();
       return;
     }
-    if (deviceId != null) {
-      router.replace({ pathname: '/device-profile', params: { id: String(deviceId) } });
-      return;
-    }
-    router.replace('/(app)/map');
-  }, [deviceId, router]);
+    router.replace('/(app)/vehicles');
+  }, [router]);
 
   // Date-range filter — defaults to today.
   const today = todayStr();
@@ -326,11 +342,18 @@ export default function TripPlaybackScreen() {
 
   const [playing, setPlaying] = useState(false);
   const [appActive, setAppActive] = useState(() => isForeground(AppState.currentState));
+  // The map document is kept warm behind a modal or another screen, but idle.
+  const isFocused = useIsFocused();
   const [speed, setSpeed] = useState<(typeof SPEEDS)[number]>(1);
-  const [camera, setCamera] = useState<CameraMode>('cinematic');
+  const [camera, setCamera] = useState<CameraMode>('chase');
+  const [cameraMenuOpen, setCameraMenuOpen] = useState(false);
   const [cameraCommandId, setCameraCommandId] = useState(0);
   const [showHistoryDetails, setShowHistoryDetails] = useState(false);
-  const [ui, setUi] = useState(0); // throttled progress for UI (0..1)
+  const [ui, setUi] = useState(0); // throttled RECORDED progress for UI (0..1)
+  const [stopsMode, setStopsMode] = usePlaybackStopsMode();
+  // The stop card floats clear of the control deck, whose height depends on
+  // the safe area and on the width the speed chips wrap at.
+  const [deckHeight, setDeckHeight] = useState(0);
 
   const progressRef = useRef(0);
   /**
@@ -343,8 +366,14 @@ export default function TripPlaybackScreen() {
    * than time — a seek, a restart, a pause, the app leaving the foreground — and
    * re-taken automatically when the speed chip changes, so a chip change resumes
    * from the current position instead of re-scaling the time already played.
+   *
+   * It is measured in ANIMATION time, not recorded time. The two are the same
+   * thing while the vehicle is moving and deliberately are not while it is
+   * parked — see `playbackSchedule`. `progressRef` remains the recorded
+   * position and is the value everything else is derived from, so re-taking the
+   * anchor always converts back through the schedule.
    */
-  const clockAnchorRef = useRef<{ wallMs: number; elapsedMs: number; speed: number } | null>(null);
+  const clockAnchorRef = useRef<{ wallMs: number; playbackMs: number; speed: number } | null>(null);
   const playingRef = useRef(playing);
   const speedRef = useRef<number>(speed);
   const trackWidth = useRef(0);
@@ -393,9 +422,29 @@ export default function TripPlaybackScreen() {
    * time the marker was not standing at.
    */
   const playbackDurationMs = Math.max(1, track.totalDurationMs);
+  const playbackDurationRef = useRef(playbackDurationMs);
+  playbackDurationRef.current = playbackDurationMs;
 
   // Absolute recorded window, so event ticks land on the same timeline the
   // scrubber and the playhead share.
+  /**
+   * How this recording is played, as opposed to how it happened.
+   *
+   * Everything that reports on the journey — the distance, the timeline bands,
+   * the totals, the trip history sheet — keeps reading the recording. Only the
+   * clock that drives the animation goes through this.
+   */
+  const schedule = useMemo(
+    () =>
+      buildPlaybackSchedule(track, data?.timeline ?? [], data?.stops ?? [], {
+        compress: stopsMode === 'skip',
+        speed,
+      }),
+    [data?.stops, data?.timeline, speed, stopsMode, track]
+  );
+  const scheduleRef = useRef(schedule);
+  scheduleRef.current = schedule;
+
   const timing = useMemo(() => {
     if (points.length < 2) return { start: 0, end: 1 };
     const firstPointTime = points[0]?.t ? new Date(points[0].t).getTime() : 0;
@@ -439,25 +488,28 @@ export default function TripPlaybackScreen() {
       raf = requestAnimationFrame(tick);
       const now = Date.now();
       if (appActive && playingRef.current && points.length >= 2) {
+        const active = scheduleRef.current;
         // Re-anchor when there is no anchor (play, seek, restart, foreground)
         // or when the chip changed, so the new rate applies from here on rather
-        // than retroactively to time already played.
+        // than retroactively to time already played. The recorded position is
+        // converted into animation time here, which is also what makes toggling
+        // the stops setting mid-play resume from where the vehicle actually is.
         const anchor =
           clockAnchorRef.current && clockAnchorRef.current.speed === speedRef.current
             ? clockAnchorRef.current
             : (clockAnchorRef.current = {
                 wallMs: now,
-                elapsedMs: progressRef.current * playbackDurationMs,
+                playbackMs: playbackAtRecorded(active, progressRef.current * playbackDurationMs),
                 speed: speedRef.current,
               });
-        const nextElapsedMs = advancePlaybackElapsed(
-          anchor.elapsedMs,
+        const nextPlaybackMs = advancePlaybackElapsed(
+          anchor.playbackMs,
           now - anchor.wallMs,
-          playbackDurationMs,
+          active.totalPlaybackMs,
           anchor.speed
         );
-        progressRef.current = nextElapsedMs / playbackDurationMs;
-        if (progressRef.current >= 1) {
+        progressRef.current = recordedAtPlayback(active, nextPlaybackMs) / playbackDurationMs;
+        if (nextPlaybackMs >= active.totalPlaybackMs) {
           progressRef.current = 1;
           clockAnchorRef.current = null;
           setPlaying(false);
@@ -482,7 +534,7 @@ export default function TripPlaybackScreen() {
       cancelled = true;
       cancelAnimationFrame(raf);
     };
-  }, [appActive, playbackDurationMs, points.length]);
+  }, [appActive, playbackDurationMs, points.length, schedule]);
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
@@ -491,15 +543,31 @@ export default function TripPlaybackScreen() {
     return () => subscription.remove();
   }, []);
 
-  const seek = (frac: number) => {
-    const clamped = Math.max(0, Math.min(1, frac));
+  /**
+   * Scrub to a point in the RECORDING.
+   *
+   * The strip is drawn against recorded time, so a five-hour stop still takes
+   * five hours of it and dragging into one means what it looks like. It is
+   * converted straight back out again so a scrub that lands inside a skipped
+   * stop settles at the start of that stop, showing its card, rather than
+   * dropping the playhead somewhere the animation cannot be.
+   */
+  const seek = useCallback((frac: number) => {
+    const requested = Math.max(0, Math.min(1, frac));
+    const active = scheduleRef.current;
+    // Both the schedule and the duration are read through refs so this stays
+    // referentially stable: the pan responder below is built once, and a
+    // gesture in progress must not be handed a replacement mid-drag.
+    const duration = playbackDurationRef.current;
+    const playbackMs = playbackAtRecorded(active, requested * duration);
+    const clamped = Math.max(0, Math.min(1, recordedAtPlayback(active, playbackMs) / duration));
     progressRef.current = clamped;
     // The anchor describes a playhead that is no longer where it was, so it is
     // dropped: keeping it would snap the marker straight back to the scrubbed-
     // from position on the very next frame.
     clockAnchorRef.current = null;
     setUi(clamped);
-  };
+  }, []);
 
   const pan = useMemo(
     () =>
@@ -513,7 +581,7 @@ export default function TripPlaybackScreen() {
           if (trackWidth.current > 0) seek(e.nativeEvent.locationX / trackWidth.current);
         },
       }).panHandlers,
-    []
+    [seek]
   );
 
   const onTrackLayout = (e: LayoutChangeEvent) => {
@@ -524,7 +592,7 @@ export default function TripPlaybackScreen() {
     haptic();
     seek(0);
     setPlaying(true);
-  }, [haptic]);
+  }, [haptic, seek]);
   const togglePlay = useCallback(() => {
     haptic();
     if (progressRef.current >= 1) restart();
@@ -588,6 +656,47 @@ export default function TripPlaybackScreen() {
     }
   }, [haptic]);
 
+  /**
+   * The coloured bands under the scrubber.
+   *
+   * Memoised because it parses three date strings per segment and the playhead
+   * publishes twenty-five times a second — none of which can move a band, since
+   * a band is a property of the recording rather than of where you are in it.
+   */
+  const activityBands = useMemo(
+    () =>
+      (data?.timeline ?? []).flatMap((segment, index) => {
+        const trackStart = Date.parse(track.points[0]?.t ?? '');
+        const from = Date.parse(segment.from);
+        const to = Date.parse(segment.to);
+        if (!Number.isFinite(trackStart) || !Number.isFinite(from) || !Number.isFinite(to)) {
+          return [];
+        }
+        const left = Math.max(0, Math.min(1, (from - trackStart) / playbackDurationMs));
+        const right = Math.max(left, Math.min(1, (to - trackStart) / playbackDurationMs));
+        return [{
+          color: timelinePresentation(segment).color,
+          key: `${segment.type}-${segment.from}-${index}`,
+          left,
+          type: segment.type,
+          width: Math.max(0.003, right - left),
+        }];
+      }),
+    [data?.timeline, playbackDurationMs, track.points]
+  );
+
+  /**
+   * The stop the playhead is standing in, if it is standing in one.
+   *
+   * Read off the RECORDED clock, so it is the same stop the timeline band and
+   * the trip history sheet are describing — not an artefact of how the
+   * animation happens to be paced.
+   */
+  const activeStop = useMemo(
+    () => stopAtRecorded(schedule, ui * playbackDurationMs),
+    [playbackDurationMs, schedule, ui]
+  );
+
   if (deviceId == null) {
     return <Center onBack={goBack} text="No vehicle selected." />;
   }
@@ -595,7 +704,11 @@ export default function TripPlaybackScreen() {
   const currentSample = hasTrack ? sampleAt(track, ui * playbackDurationMs) : null;
   const curSpeed = Math.round(currentSample?.speed ?? 0);
   const elapsedMs = hasTrack ? ui * playbackDurationMs : 0;
+  const currentActivity = data
+    ? playbackActivityAt(track, data.timeline ?? [], elapsedMs)
+    : null;
   const coveredDistanceKm = currentSample?.distanceKm ?? 0;
+  const remainingMs = Math.max(0, playbackDurationMs - elapsedMs);
   /**
    * Share of the ROUTE covered, not of the timeline.
    *
@@ -613,7 +726,54 @@ export default function TripPlaybackScreen() {
   // rendered road geometry or the simplified client track inflates distance
   // and can shift durations around stops.
   const journeyDistanceKm = data?.summary?.distanceKm ?? data?.distanceKm ?? 0;
+  /**
+   * GPS fixes this trip is built from.
+   *
+   * <p>NOT `returnedPoints`, which is the Douglas-Peucker subset the payload
+   * carries for drawing - on a 318-fix trip that is about 14 vertices, and
+   * reporting it as "14 GPS pts · 14 valid of 318 received" told the operator
+   * their tracker had lost 96% of its fixes when nothing had been rejected at
+   * all. `rejectedPoints` is the count of fixes validation actually refused.
+   */
+  const acceptedPoints = Math.max(
+    0,
+    (data?.totalPoints ?? 0) -
+      Object.values(data?.rejectedPoints ?? {}).reduce(
+        (total, count) => total + (Number(count) || 0),
+        0
+      )
+  );
   const journeySeconds = data?.summary?.totalSeconds ?? Math.round(track.totalDurationMs / 1000);
+  /**
+   * The one line worth putting over the map, or nothing at all.
+   *
+   * Only states the playhead is in that the transport deck cannot show: the
+   * end of the route, a stop the vehicle is standing in, and a stretch with no
+   * telemetry, where the marker is deliberately absent rather than lost.
+   */
+  const sceneNotice =
+    ui >= 1
+      ? { eyebrow: 'ROUTE COMPLETE', detail: 'Whole trip played', tone: '#1A73E8' }
+      : currentActivity === 'STOPPED'
+        ? { eyebrow: 'STOPPED', detail: 'Holding the last recorded position', tone: '#DC2626' }
+        : currentActivity === 'NO_DATA'
+          ? { eyebrow: 'NO TELEMETRY', detail: 'Nothing was recorded here', tone: '#64748B' }
+          : null;
+  /**
+   * The screen's own chrome, handed to the map.
+   *
+   * The transport deck covers the bottom of the map and the header the top, and
+   * the camera used to centre the vehicle in the CONTAINER - which put the car
+   * and the head of the route behind the deck for the whole of every trip. The
+   * deck measures itself, so this stays correct on any phone and with the
+   * system navigation bar included.
+   */
+  const mapViewportPadding = {
+    top: insets.top + 118,
+    bottom: (deckHeight || 220) + 12,
+    left: 16,
+    right: 16,
+  };
 
   return (
     <SafeAreaView edges={['bottom']} style={styles.root}>
@@ -639,8 +799,11 @@ export default function TripPlaybackScreen() {
           playing={appActive && playing}
           speed={speed}
           stops={data.stops ?? []}
+          timeline={data.timeline ?? []}
           track={track}
           ui={ui}
+          viewportPadding={mapViewportPadding}
+          active={appActive && isFocused}
         />
       ) : (
         <View style={styles.mapPlaceholder}>
@@ -688,7 +851,7 @@ export default function TripPlaybackScreen() {
           <Text numberOfLines={1} style={styles.title}>{vehicle.name}</Text>
           <Text numberOfLines={1} style={styles.subtitle}>
             {hasTrack && data
-              ? `${journeyDistanceKm.toFixed(1)} km · ${formatDuration(journeySeconds)} · ${data.returnedPoints} GPS pts`
+              ? `${journeyDistanceKm.toFixed(1)} km · ${formatDuration(journeySeconds)} · ${acceptedPoints} GPS pts`
               : isFetching
                 ? 'Loading route history…'
                 : isError
@@ -696,22 +859,6 @@ export default function TripPlaybackScreen() {
                   : 'No history available'}
           </Text>
         </View>
-        {/* Date-range filter trigger button. Always mounted so range can be changed anytime. */}
-        <Pressable
-          accessibilityLabel="Filter date range"
-          accessibilityRole="button"
-          onPress={openFilterModal}
-          style={styles.rangeFilterTrigger}>
-          <MaterialCommunityIcons color={colors.primary} name="calendar-range" size={16} />
-          {isFetching ? (
-            <ActivityIndicator color={colors.primary} size="small" style={{ marginHorizontal: 4 }} />
-          ) : (
-            <Text numberOfLines={1} style={styles.rangeFilterTriggerText}>
-              {formatRangeHeaderLabel(activeFromDate, activeToDate)}
-            </Text>
-          )}
-          <MaterialCommunityIcons color={G.sub} name="chevron-down" size={14} />
-        </Pressable>
         <Pressable
           accessibilityLabel="Open trip history details"
           accessibilityRole="button"
@@ -740,34 +887,72 @@ export default function TripPlaybackScreen() {
         </Pressable>
       </View>
 
-      {/* Scene, model and camera controls only make sense over a real route. */}
-      {hasTrack ? (
+      {/* The date range gets its own row rather than competing with the vehicle
+          name for the width of one. On a 360dp phone the four fixed buttons and
+          a range as long as "3 Sept - 9 Sept" left the title about thirty points
+          to render "HONDA" in. */}
+      <View style={[styles.headerTools, { top: insets.top + 56 }]}>
+        <Pressable
+          accessibilityLabel="Filter date range"
+          accessibilityRole="button"
+          onPress={openFilterModal}
+          style={styles.rangeFilterTrigger}>
+          <MaterialCommunityIcons color={colors.primary} name="calendar-range" size={16} />
+          {isFetching ? (
+            <ActivityIndicator color={colors.primary} size="small" style={{ marginHorizontal: 4 }} />
+          ) : (
+            <Text numberOfLines={1} style={styles.rangeFilterTriggerText}>
+              {formatRangeHeaderLabel(activeFromDate, activeToDate)}
+            </Text>
+          )}
+          <MaterialCommunityIcons color={G.sub} name="chevron-down" size={14} />
+        </Pressable>
+      </View>
+
+      {/* Says what the vehicle is DOING, and only when that is not simply
+          "driving": at the end of the route, standing in a stop, or missing
+          from a telemetry gap. It used to be permanent and, for most of a
+          trip, said "Drive camera" - which is what the camera button beside it
+          already says. */}
+      {hasTrack && sceneNotice ? (
         <View
           pointerEvents="none"
-          style={[styles.sceneBadge, { top: insets.top + 68 }]}>
-          <View style={styles.sceneSignal} />
-          <View>
-            <Text style={styles.sceneEyebrow}>
-              {ui >= 1 ? 'ROUTE COMPLETE' : 'GEOAPIFY DRIVE VIEW'}
-            </Text>
-            <Text style={styles.sceneMode}>
-              {ui >= 1
-                ? 'Completed · 100%'
-                : `${CAMERAS.find((item) => item.id === camera)?.label} camera`}
-            </Text>
+          style={[styles.sceneBadge, { top: insets.top + 106 }]}>
+          <View style={[styles.sceneSignal, { backgroundColor: sceneNotice.tone }]} />
+          <View style={styles.sceneBadgeBody}>
+            <Text style={styles.sceneEyebrow}>{sceneNotice.eyebrow}</Text>
+            <Text numberOfLines={1} style={styles.sceneMode}>{sceneNotice.detail}</Text>
           </View>
-          <MaterialCommunityIcons
-            color={G.text}
-            name="map-outline"
-            size={16}
-          />
         </View>
       ) : null}
 
       {/* Camera mode rail drives the existing map without remounting it. */}
       {hasTrack ? (
-        <View style={[styles.camRail, { top: insets.top + 64 }]}>
-          {CAMERAS.map((cam) => {
+        <View style={[styles.camRail, { top: insets.top + 56 }]}>
+          <Pressable
+            accessibilityLabel={`Camera: ${CAMERAS.find((item) => item.id === camera)?.label ?? camera}`}
+            accessibilityRole="button"
+            accessibilityState={{ expanded: cameraMenuOpen }}
+            onPress={() => {
+              haptic();
+              setCameraMenuOpen((open) => !open);
+            }}
+            style={[styles.camBtn, styles.camBtnActive, { backgroundColor: colors.primary, borderColor: colors.primary }]}>
+            <MaterialCommunityIcons
+              color={colors.onPrimary}
+              name={(CAMERAS.find((item) => item.id === camera)?.icon ?? 'navigation-variant') as never}
+              size={18}
+            />
+            <Text style={[styles.camLabel, { color: colors.onPrimary }]}>
+              {CAMERAS.find((item) => item.id === camera)?.label ?? 'Drive'}
+            </Text>
+            <MaterialCommunityIcons
+              color={colors.onPrimary}
+              name={cameraMenuOpen ? 'chevron-up' : 'chevron-down'}
+              size={15}
+            />
+          </Pressable>
+          {cameraMenuOpen ? CAMERAS.filter((cam) => cam.id !== camera).map((cam) => {
             const active = cam.id === camera;
             return (
               <Pressable
@@ -777,6 +962,7 @@ export default function TripPlaybackScreen() {
                   haptic();
                   setCamera(cam.id);
                   setCameraCommandId((value) => value + 1);
+                  setCameraMenuOpen(false);
                   if (__DEV__) console.debug(`[Camera] mode ${cam.id}`);
                 }}
                 style={[styles.camBtn, active && { backgroundColor: colors.primary, borderColor: colors.primary }]}>
@@ -784,7 +970,7 @@ export default function TripPlaybackScreen() {
                 <Text style={[styles.camLabel, { color: active ? colors.onPrimary : G.sub }]}>{cam.label}</Text>
               </Pressable>
             );
-          })}
+          }) : null}
         </View>
       ) : null}
 
@@ -799,30 +985,128 @@ export default function TripPlaybackScreen() {
           "exit" when the transport controls were used. The deck is absolutely
           positioned, so it does not inherit the SafeAreaView's own padding and
           has to state the inset itself. */}
-      <View style={[styles.deck, { paddingBottom: insets.bottom + 14 }]}>
+      <View
+        onLayout={(event) => {
+          const next = Math.round(event.nativeEvent.layout.height);
+          setDeckHeight((current) => (current === next ? current : next));
+        }}
+        style={[styles.deck, { paddingBottom: insets.bottom + 8 }]}>
+        <View style={styles.deckHandle} />
         <View style={styles.statRow}>
-          <View style={styles.speedBlock}>
-            <Text style={styles.speedValue}>{curSpeed}</Text>
-            <Text style={styles.speedUnit}>km/h</Text>
+          <View style={styles.speedSummary}>
+            <View style={[styles.speedRing, { borderColor: colors.primary }]}>
+              <Text style={styles.speedNumber}>{curSpeed}</Text>
+            </View>
+            <View style={styles.speedCopy}>
+              <View style={styles.speedUnitRow}>
+                <Text style={styles.speedUnit}>KM/H</Text>
+                <View
+                  style={[
+                    styles.motionDot,
+                    {
+                      backgroundColor:
+                        currentActivity === 'STOPPED'
+                          ? '#DC2626'
+                          : currentActivity === 'NO_DATA'
+                            ? '#64748B'
+                            : '#18A558',
+                    },
+                  ]}
+                />
+              </View>
+              <Text style={styles.motionText}>
+                {currentActivity === 'STOPPED'
+                  ? 'STOPPED'
+                  : currentActivity === 'NO_DATA'
+                    ? 'OFFLINE'
+                    : 'MOVING'}
+              </Text>
+            </View>
           </View>
           <View style={styles.statPair}>
-            <Stat label={hasTrack ? `of ${formatClock(playbackDurationMs)}` : 'Elapsed'} value={formatClock(elapsedMs)} />
-            <Stat label="Covered" value={`${coveredPercent}%`} />
-            <Stat label="Distance" value={`${coveredDistanceKm.toFixed(1)} km`} />
+            <Stat label="LEFT" value={formatClock(remainingMs)} />
+            <Stat label="PROG" value={`${coveredPercent}%`} />
+            <Stat label="DIST" value={`${coveredDistanceKm.toFixed(1)} km`} />
           </View>
         </View>
 
-        {/* Timeline. Scrubbing is only wired up when the day has a route. */}
+        {/* One segmented scrubber: the activity strip, route progress and touch
+            target are the same control, as on an in-car playback display. */}
         <View style={[styles.timelineWrap, !hasTrack && styles.deckDisabled]}>
           <View
-            style={styles.track}
+            accessibilityLabel="Running, stopped and offline trip segments"
             onLayout={onTrackLayout}
+            style={styles.activityTrack}
             {...(hasTrack ? pan : {})}>
-            <View style={[styles.trackFill, { width: `${ui * 100}%`, backgroundColor: colors.primary }]} />
+            {activityBands.map((band) => {
+              // Annotated because an inferred `left: string` is not the
+              // percentage type a style accepts.
+              const bandStyle: StyleProp<ViewStyle> = [
+                styles.activityBand,
+                {
+                  backgroundColor: band.color,
+                  left: `${band.left * 100}%`,
+                  opacity: band.type === 'MOVING' ? 1 : 0.55,
+                  width: `${band.width * 100}%`,
+                },
+              ];
+              // The stop keeps its real width on the strip however briefly it
+              // is played, so five hours still LOOKS like five hours — and is
+              // the thing you tap to read what happened during them.
+              if (band.type !== 'STOPPED') {
+                return <View key={band.key} style={bandStyle} />;
+              }
+              return (
+                <Pressable
+                  accessibilityHint="Opens the full trip history"
+                  accessibilityLabel="Stopped period"
+                  accessibilityRole="button"
+                  hitSlop={10}
+                  key={band.key}
+                  onPress={() => {
+                    haptic();
+                    setShowHistoryDetails(true);
+                  }}
+                  style={bandStyle}
+                />
+              );
+            })}
+            <View pointerEvents="none" style={[styles.unplayedMask, { left: `${ui * 100}%` }]} />
             {eventTicks.map((t, i) => (
               <View key={i} style={[styles.tick, { left: `${t.frac * 100}%`, backgroundColor: G.text }]} />
             ))}
-            <View style={[styles.thumb, { left: `${ui * 100}%`, borderColor: colors.primary }]} />
+            <View style={[styles.activityPlayhead, { left: `${ui * 100}%`, borderColor: colors.primary }]} />
+          </View>
+          <View style={styles.activityLegend}>
+            <ActivityKey color="#1A73E8" label="Run" />
+            <ActivityKey color="#DC2626" label="Stop" />
+            <ActivityKey color="#64748B" label="Offline" />
+            <View style={styles.legendSpacer} />
+            <Pressable
+              accessibilityHint={
+                stopsMode === 'skip'
+                  ? 'Long stops are held for a moment, then skipped'
+                  : 'Stops are played in full, at real time'
+              }
+              accessibilityLabel="Playback stops"
+              accessibilityRole="switch"
+              accessibilityState={{ checked: stopsMode === 'skip' }}
+              hitSlop={5}
+              onPress={() => {
+                haptic();
+                setStopsMode(stopsMode === 'skip' ? 'full' : 'skip');
+              }}
+              style={[styles.stopsToggle, stopsMode === 'skip' && styles.stopsToggleOn]}>
+              <MaterialCommunityIcons
+                color={stopsMode === 'skip' ? colors.primary : G.sub}
+                name={stopsMode === 'skip' ? 'debug-step-over' : 'clock-outline'}
+                size={11}
+              />
+              <Text style={[styles.stopsToggleText, { color: stopsMode === 'skip' ? colors.primary : G.sub }]}>
+                {stopsMode === 'skip' ? 'Skip' : 'Full'}
+              </Text>
+            </Pressable>
+            <Text style={styles.timelineClock}>{formatClock(elapsedMs)} / {formatClock(playbackDurationMs)}</Text>
           </View>
         </View>
 
@@ -840,8 +1124,9 @@ export default function TripPlaybackScreen() {
             accessibilityRole="button"
             disabled={!hasTrack}
             onPress={togglePlay}
-            style={[styles.playBtn, { backgroundColor: colors.primary }]}>
-            <MaterialCommunityIcons color={colors.onPrimary} name={playing ? 'pause' : 'play'} size={30} />
+            style={[styles.playBtn, { backgroundColor: colors.primary, shadowColor: colors.primary }]}>
+            <MaterialCommunityIcons color={colors.onPrimary} name={playing ? 'pause' : 'play'} size={18} />
+            <Text style={[styles.playText, { color: colors.onPrimary }]}>{playing ? 'PAUSE' : 'PLAY'}</Text>
           </Pressable>
           <View style={styles.speeds}>
             {SPEEDS.map((sp) => {
@@ -860,7 +1145,41 @@ export default function TripPlaybackScreen() {
             })}
           </View>
         </View>
+        <View style={styles.deckBottomHandle} />
       </View>
+
+      {/* The vehicle is frozen at the last road-matched position it was seen
+          in, and this says why — with the real duration and the real clock
+          times, never the seconds the animation is spending on them. */}
+      {activeStop && activeStop.mode === 'held' ? (
+        <Pressable
+          accessibilityHint="Opens the full trip history"
+          accessibilityLabel={`Stopped for ${formatStopDuration(activeStop.durationMs)}`}
+          accessibilityRole="button"
+          onPress={() => {
+            haptic();
+            setShowHistoryDetails(true);
+          }}
+          style={[styles.stopCard, { bottom: deckHeight + 14 }]}>
+          <View style={styles.stopCardIcon}>
+            <MaterialCommunityIcons color="#DC2626" name="pause-circle" size={22} />
+          </View>
+          <View style={styles.stopCardBody}>
+            <Text style={styles.stopCardTitle}>
+              Stopped · {formatStopDuration(activeStop.durationMs)}
+            </Text>
+            <Text numberOfLines={1} style={styles.stopCardTimes}>
+              {formatStopClock(activeStop.startedAt)} – {formatStopClock(activeStop.endedAt)}
+            </Text>
+            {activeStop.address ? (
+              <Text numberOfLines={1} style={styles.stopCardPlace}>
+                {activeStop.address}
+              </Text>
+            ) : null}
+          </View>
+          <MaterialCommunityIcons color={G.sub} name="chevron-right" size={20} />
+        </Pressable>
+      ) : null}
 
       {/* Date Range Filter Modal Overlay */}
       {showFilterModal ? (
@@ -1038,11 +1357,21 @@ export default function TripPlaybackScreen() {
   );
 }
 
+/** One line of the trip computer: caption on the left, figure on the right. */
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <View style={styles.stat}>
+      <Text numberOfLines={1} style={styles.statLabel}>{label}</Text>
       <Text style={styles.statValue}>{value}</Text>
-      <Text style={styles.statLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function ActivityKey({ color, label }: { color: string; label: string }) {
+  return (
+    <View style={styles.activityKey}>
+      <View style={[styles.activityKeyDot, { backgroundColor: color }]} />
+      <Text style={styles.activityKeyLabel}>{label}</Text>
     </View>
   );
 }
@@ -1084,7 +1413,7 @@ function HistoryDetails({
           <View style={styles.historySummaryGrid}>
             <HistoryMetric icon="map-marker-distance" label="Distance" value={`${distanceKm.toFixed(2)} km`} />
             <HistoryMetric icon="clock-outline" label="Total time" value={formatDuration(summary?.totalSeconds)} />
-            <HistoryMetric icon="car-arrow-right" label="Moving" value={formatDuration(summary?.movingSeconds)} tone="#087C73" />
+            <HistoryMetric icon="car-arrow-right" label="Moving" value={formatDuration(summary?.movingSeconds)} tone="#1A73E8" />
             <HistoryMetric icon="stop-circle-outline" label="Stopped" value={formatDuration(summary?.stoppedSeconds)} tone="#DC2626" />
             <HistoryMetric icon="signal-off" label="No signal" value={formatDuration(summary?.noDataSeconds)} tone="#64748B" />
             <HistoryMetric icon="map-marker-check-outline" label="Stops" value={String(summary?.stopCount ?? stops.length)} tone="#D97706" />
@@ -1093,7 +1422,7 @@ function HistoryDetails({
           <View style={styles.historySection}>
             <Text style={styles.historySectionTitle}>Journey endpoints</Text>
             <HistoryLocation
-              color="#16A34A"
+              color="#1B66C9"
               label="Started"
               time={summary?.startLocation?.time ?? summary?.startTime}
               address={summary?.startLocation?.address}
@@ -1168,14 +1497,15 @@ function HistoryDetails({
           <View style={styles.qualityCard}>
             <View style={styles.qualityTitleRow}>
               <MaterialCommunityIcons
-                color={rejectedTotal > 0 ? '#D97706' : '#16A34A'}
+                color={rejectedTotal > 0 ? '#D97706' : '#1B66C9'}
                 name={rejectedTotal > 0 ? 'shield-alert-outline' : 'shield-check-outline'}
                 size={21}
               />
               <View style={styles.qualityTitleCopy}>
                 <Text style={styles.qualityTitle}>GPS data quality</Text>
                 <Text style={styles.qualitySubtitle}>
-                  {data.returnedPoints} valid of {data.totalPoints} received · {data.matchStatus ?? 'UNMATCHED'} route
+                  {data.totalPoints - rejectedTotal} valid of {data.totalPoints} received ·{' '}
+                  {data.matchStatus ?? 'UNMATCHED'} route
                 </Text>
               </View>
             </View>
@@ -1245,7 +1575,7 @@ function Center({ text, spinner, onBack, onRetry }: { text: string; spinner?: bo
         </View>
       ) : null}
       <View style={{ alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12 }}>
-        {spinner ? <ActivityIndicator color="#22c55e" size="large" /> : (
+        {spinner ? <ActivityIndicator color="#1A73E8" size="large" /> : (
           <MaterialCommunityIcons color={G.sub} name="movie-open-outline" size={48} />
         )}
         <Text style={styles.centerText}>{text}</Text>
@@ -1306,8 +1636,13 @@ type CinematicTripMapProps = {
   playing: boolean;
   speed: number;
   stops: PlaybackStopMarker[];
+  timeline: PlaybackTimelineSegment[];
   track: PlaybackTrack;
   ui: number;
+  /** Header and control-deck space, so the camera frames the car clear of it. */
+  viewportPadding: { top: number; bottom: number; left: number; right: number };
+  /** False once this screen is behind another, or the app is backgrounded. */
+  active: boolean;
 };
 
 
@@ -1368,8 +1703,11 @@ function CinematicTripMap({
   playing,
   speed,
   stops,
+  timeline,
   track,
   ui,
+  viewportPadding,
+  active,
 }: CinematicTripMapProps) {
   /**
    * Whether the native map may be mounted AT ALL.
@@ -1450,6 +1788,12 @@ function CinematicTripMap({
       segmentIndex: sample?.segmentIndex ?? 0,
     };
   }, [playbackSample, points]);
+  const vehicleVisible = isPlaybackVehicleVisible(
+    track,
+    timeline,
+    ui * track.totalDurationMs,
+    playbackSample
+  );
   // One polyline per observed run. A coverage gap is left undrawn rather than
   // closed with a straight line across roads that were never recorded.
   // Each run is split again on the segment rule before it is drawn. The track's
@@ -1473,14 +1817,33 @@ function CinematicTripMap({
         : [],
     [hasMatchedGeometry, track]
   );
+  /**
+   * The road, measured once.
+   *
+   * Nothing here depends on the playhead, so a playing trip does not rebuild
+   * it, re-validate it, or hand the map a new copy of it. This used to be
+   * recomputed on every published frame - twenty-five times a second - which
+   * meant slicing and re-wrapping every travelled point, a haversine per point
+   * for the segment rule, and then mapping the whole thing again into the map's
+   * coordinate order, all so a head could move a few centimetres.
+   */
+  const playbackRoute = useMemo(
+    () => (hasMatchedGeometry ? buildPlaybackRoute(track) : []),
+    [hasMatchedGeometry, track]
+  );
+
+  /**
+   * Only for the native map branch, which is not the engine this screen uses.
+   * Gated so the shape it needs costs nothing while it is not being drawn.
+   */
   const travelledRouteSegs = useMemo(
     () =>
-      hasMatchedGeometry
+      useNativeMap && hasMatchedGeometry
         ? travelledRouteSegments(track, playbackSample).flatMap((segment) =>
             splitRouteCoordinates(segment)
           )
         : [],
-    [hasMatchedGeometry, playbackSample, track]
+    [hasMatchedGeometry, playbackSample, track, useNativeMap]
   );
   /**
    * Stretches with no road answer, drawn thin, dashed and amber.
@@ -1493,7 +1856,7 @@ function CinematicTripMap({
     [gpsOnlySegments]
   );
 
-  const styleInfo = getMapStyleInfo('bright');
+  const styleInfo = getMapStyleInfo('street');
   const webMarkers = useMemo<WebMapMarker[]>(
     () => [
       {
@@ -1503,17 +1866,36 @@ function CinematicTripMap({
         id: 'vehicle',
         lat: cur.lat,
         lng: cur.lng,
-        moving: playing,
+        hidden: !vehicleVisible,
+        moving: playing && vehicleVisible && cur.speed >= 2.5,
+        speedKph: cur.speed,
+        // The WebView uses this monotonic playback timestamp to distinguish a
+        // real advancing sample from a pause/re-render and interpolate only the
+        // former between React publishes.
+        sourceTime: ui * track.totalDurationMs,
       },
     ],
-    [accent, category, cur, playing]
+    [accent, category, cur, playing, track.totalDurationMs, ui, vehicleVisible]
   );
+  /**
+   * The road handed to the map: the whole of it, and only once.
+   *
+   * How much of it has been driven is `routeProgress` below, which the map
+   * applies as a paint property. The line is never replaced while a trip plays.
+   */
   const webPolylines = useMemo<[number, number][][]>(
-    () =>
-      travelledRouteSegs.map((segment) =>
-        segment.map((point) => [point.longitude, point.latitude] as [number, number])
-      ),
-    [travelledRouteSegs]
+    () => playbackRoute.map((run) => run.coordinates),
+    [playbackRoute]
+  );
+
+  /**
+   * Where the playhead sits on that road. Two numbers, computed in O(log n),
+   * off the same clock that places the vehicle - so the head of the blue line
+   * is exactly where the vehicle is drawn rather than near it.
+   */
+  const routeProgress = useMemo(
+    () => routeProgressAt(playbackRoute, ui * track.totalDurationMs),
+    [playbackRoute, track.totalDurationMs, ui]
   );
   const webDiagnosticPolylines = useMemo<[number, number][][]>(
     () =>
@@ -1795,12 +2177,16 @@ function CinematicTripMap({
           diagnosticPolylines={webDiagnosticPolylines}
           history={webHistory}
           mapStyle={styleInfo.webStyle}
+          premiumVectorTheme
           markers={webMarkers}
           onInteraction={pauseFollowing}
           onProjectionChange={handleWebProjection}
           polylines={webPolylines}
+          routeProgress={routeProgress}
           selectedId="vehicle"
           style={StyleSheet.absoluteFillObject}
+          viewportPadding={viewportPadding}
+          active={active}
         />
       ) : (
         <MapView
@@ -1885,13 +2271,13 @@ function CinematicTripMap({
               </View>
             </Marker>
           ))}
-          {!cur.hasValidPosition ? null : USE_VEHICLE_SPRITE ? (
+          {!cur.hasValidPosition || !vehicleVisible ? null : USE_VEHICLE_SPRITE ? (
             <Marker
               anchor={{ x: 0.5, y: 0.5 }}
               coordinate={{ latitude: cur.lat, longitude: cur.lng }}
               flat
               identifier="playback-vehicle"
-              image={vehicleSprite(playing ? 'RUNNING' : 'STOPPED', true)}
+              image={vehicleSprite(playing ? 'RUNNING' : 'STOPPED', false)}
               rotation={normalizeHeading(cur.heading)}
               tracksViewChanges={false}
               zIndex={60}
@@ -1935,8 +2321,8 @@ const styles = StyleSheet.create({
   root: { backgroundColor: '#EDF4F7', flex: 1 },
   center: { alignItems: 'center', backgroundColor: '#EDF4F7', flex: 1, gap: 12, justifyContent: 'center', padding: 24 },
   centerText: { color: G.sub, fontSize: 15, textAlign: 'center' },
-  retry: { borderColor: '#22c55e', borderRadius: 10, borderWidth: 1, marginTop: 8, paddingHorizontal: 20, paddingVertical: 10 },
-  retryText: { color: '#22c55e', fontWeight: '800' },
+  retry: { borderColor: '#1A73E8', borderRadius: 10, borderWidth: 1, marginTop: 8, paddingHorizontal: 20, paddingVertical: 10 },
+  retryText: { color: '#1A73E8', fontWeight: '800' },
 
   topBar: { alignItems: 'center', flexDirection: 'row', gap: 8, left: 0, paddingHorizontal: 14, position: 'absolute', right: 0, top: 0 },
   iconBtn: {
@@ -1980,34 +2366,46 @@ const styles = StyleSheet.create({
   sceneBadge: {
     alignItems: 'center',
     backgroundColor: 'rgba(255,255,255,0.94)',
-    borderColor: 'rgba(20,117,143,0.18)',
+    borderColor: G.hair,
     borderRadius: 13,
     borderWidth: 1,
     flexDirection: 'row',
     gap: 9,
     left: 14,
+    // Never wider than the camera control it sits beside, so the two cannot
+    // collide on a narrow phone.
+    maxWidth: '62%',
     paddingHorizontal: 11,
     paddingVertical: 8,
     position: 'absolute',
   },
+  sceneBadgeBody: { flexShrink: 1 },
+  // The date range and the camera control share this row, one at each edge.
+  headerTools: {
+    alignItems: 'flex-start',
+    flexDirection: 'row',
+    left: 14,
+    position: 'absolute',
+  },
   sceneSignal: {
-    backgroundColor: '#18B77B',
+    backgroundColor: '#1A73E8',
     borderRadius: 5,
     height: 9,
-    shadowColor: '#18B77B',
+    shadowColor: '#1A73E8',
     shadowOffset: { width: 0, height: 0 },
     shadowOpacity: 0.8,
     shadowRadius: 7,
     width: 9,
   },
-  sceneEyebrow: { color: '#087C73', fontSize: 8, fontWeight: '900', letterSpacing: 1.4 },
+  sceneEyebrow: { color: G.sub, fontSize: 8, fontWeight: '900', letterSpacing: 1.4 },
   sceneMode: { color: G.text, fontSize: 11, fontWeight: '800', marginTop: 1 },
-  camRail: { gap: 8, position: 'absolute', right: 14 },
+  camRail: { alignItems: 'flex-end', gap: 7, position: 'absolute', right: 14 },
   camBtn: {
     alignItems: 'center', backgroundColor: G.glass, borderColor: G.hair, borderRadius: 12, borderWidth: 1,
     elevation: 2, flexDirection: 'row', gap: 6, height: 40, justifyContent: 'flex-start', paddingHorizontal: 10,
     shadowColor: '#173E4D', shadowOffset: { height: 2, width: 0 }, shadowOpacity: 0.1, shadowRadius: 5, width: 92,
   },
+  camBtnActive: { justifyContent: 'space-between', width: 112 },
   camLabel: { fontSize: 10, fontWeight: '800' },
   carPicker: {
     backgroundColor: 'rgba(255,255,255,0.96)',
@@ -2048,7 +2446,7 @@ const styles = StyleSheet.create({
     zIndex: 30,
   },
   vehiclePulse: {
-    backgroundColor: 'rgba(34,197,94,0.16)',
+    backgroundColor: 'rgba(26, 115, 232,0.16)',
     borderRadius: 999,
     borderWidth: 2,
     height: 64,
@@ -2077,38 +2475,186 @@ const styles = StyleSheet.create({
   resumeTrackingText: { color: '#071018', fontSize: 12, fontWeight: '900' },
 
   deck: {
-    backgroundColor: G.glassStrong, borderTopColor: G.hair, borderTopLeftRadius: 22, borderTopRightRadius: 22,
-    borderTopWidth: 1, bottom: 0, elevation: 18, gap: 14, left: 0, paddingHorizontal: 18, paddingTop: 16,
-    position: 'absolute', right: 0, shadowColor: '#173E4D', shadowOffset: { height: -8, width: 0 },
-    shadowOpacity: 0.16, shadowRadius: 18,
+    backgroundColor: G.glassStrong, borderTopColor: G.hair, borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    borderTopWidth: 1, bottom: 0, elevation: 20, gap: 9, left: 0, paddingHorizontal: 14, paddingTop: 9,
+    position: 'absolute', right: 0, shadowColor: '#173E4D', shadowOffset: { height: -10, width: 0 },
+    shadowOpacity: 0.2, shadowRadius: 22,
   },
-  statRow: { alignItems: 'center', flexDirection: 'row', justifyContent: 'space-between' },
-  speedBlock: { alignItems: 'flex-end', flexDirection: 'row', gap: 4 },
-  speedValue: { color: '#087C73', fontSize: 40, fontVariant: ['tabular-nums'], fontWeight: '900', lineHeight: 42 },
-  speedUnit: { color: G.sub, fontSize: 13, marginBottom: 6 },
-  statPair: { flexDirection: 'row', gap: 18 },
-  stat: { alignItems: 'flex-end' },
-  statValue: { color: G.text, fontSize: 15, fontVariant: ['tabular-nums'], fontWeight: '800' },
-  statLabel: { color: G.sub, fontSize: 11 },
+  deckHandle: {
+    alignSelf: 'center',
+    backgroundColor: 'rgba(96,119,131,0.28)',
+    borderRadius: 999,
+    height: 3,
+    width: 42,
+  },
+  statRow: { alignItems: 'stretch', flexDirection: 'row', gap: 8 },
+  speedSummary: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(26,115,232,0.055)',
+    borderColor: G.hair,
+    borderRadius: 12,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 7,
+    minWidth: 112,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+  },
+  speedRing: {
+    alignItems: 'center',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 18,
+    borderWidth: 3,
+    height: 36,
+    justifyContent: 'center',
+    width: 36,
+  },
+  speedNumber: { color: G.text, fontSize: 13, fontVariant: ['tabular-nums'], fontWeight: '900' },
+  speedCopy: { gap: 1 },
+  speedUnitRow: { alignItems: 'center', flexDirection: 'row', gap: 4 },
+  speedUnit: { color: G.sub, fontSize: 8, fontWeight: '900', letterSpacing: 0.5 },
+  motionDot: { borderRadius: 3, height: 5, width: 5 },
+  motionText: { color: '#14834C', fontSize: 8, fontWeight: '900', letterSpacing: 0.35 },
+  // Three tiny trip-computer tiles mirror the compact automotive layout.
+  statPair: { flex: 1, flexDirection: 'row', gap: 5 },
+  stat: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(18,50,71,0.045)',
+    borderColor: G.hair,
+    borderRadius: 10,
+    borderWidth: 1,
+    flex: 1,
+    justifyContent: 'center',
+    minWidth: 0,
+    paddingHorizontal: 4,
+    paddingVertical: 5,
+  },
+  statValue: { color: G.text, fontSize: 11, fontVariant: ['tabular-nums'], fontWeight: '900', marginTop: 2 },
+  statLabel: { color: G.sub, fontSize: 7.5, fontWeight: '900', letterSpacing: 0.5 },
 
   timelineWrap: { justifyContent: 'center' },
-  track: { backgroundColor: G.track, borderRadius: 999, height: 6, justifyContent: 'center' },
-  trackFill: { borderRadius: 999, height: 6 },
-  tick: { borderRadius: 1, height: 12, marginLeft: -1, opacity: 0.7, position: 'absolute', top: -3, width: 2 },
-  thumb: {
-    backgroundColor: '#FFFFFF', borderRadius: 999, borderWidth: 3, height: 18, marginLeft: -9, position: 'absolute',
-    top: -6, width: 18,
+  activityLegend: {
+    alignItems: 'center',
+    flexDirection: 'row',
+    gap: 7,
+    marginTop: 6,
   },
+  activityKey: { alignItems: 'center', flexDirection: 'row', gap: 3 },
+  activityKeyDot: { borderRadius: 999, height: 5, width: 5 },
+  activityKeyLabel: { color: G.sub, fontSize: 8.5, fontWeight: '800' },
+  activityTrack: {
+    backgroundColor: 'rgba(100,116,139,0.12)',
+    borderRadius: 6,
+    height: 8,
+    marginHorizontal: 2,
+    marginTop: 3,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  activityBand: { bottom: 0, position: 'absolute', top: 0 },
+  unplayedMask: {
+    backgroundColor: 'rgba(255,255,255,0.34)',
+    bottom: 0,
+    position: 'absolute',
+    right: 0,
+    top: 0,
+  },
+  activityPlayhead: {
+    backgroundColor: '#FFFFFF',
+    borderRadius: 6,
+    borderWidth: 2,
+    height: 12,
+    marginLeft: -6,
+    position: 'absolute',
+    top: -2,
+    width: 12,
+  },
+  tick: { borderRadius: 1, height: 8, marginLeft: -1, opacity: 0.68, position: 'absolute', top: 0, width: 1 },
+  timelineClock: { color: G.sub, fontSize: 8, fontVariant: ['tabular-nums'], fontWeight: '800' },
 
-  controls: { alignItems: 'center', flexDirection: 'row', gap: 10, justifyContent: 'space-between' },
+  controls: { alignItems: 'center', flexDirection: 'row', gap: 8 },
   ctrlSmall: {
-    alignItems: 'center', backgroundColor: G.glass, borderColor: G.hair, borderRadius: 999, borderWidth: 1,
-    height: 46, justifyContent: 'center', width: 46,
+    alignItems: 'center', backgroundColor: 'rgba(18,50,71,0.055)', borderColor: G.hair, borderRadius: 11, borderWidth: 1,
+    height: 42, justifyContent: 'center', width: 42,
   },
-  playBtn: { alignItems: 'center', borderRadius: 999, height: 60, justifyContent: 'center', width: 60 },
-  speeds: { flexDirection: 'row', gap: 4 },
-  speedChip: { borderColor: G.hair, borderRadius: 999, borderWidth: 1, paddingHorizontal: 8, paddingVertical: 8 },
-  speedChipText: { fontSize: 13, fontWeight: '800' },
+  playBtn: {
+    alignItems: 'center', borderRadius: 12, elevation: 5, flex: 1, flexDirection: 'row', gap: 6,
+    height: 42, justifyContent: 'center', shadowOffset: { height: 3, width: 0 }, shadowOpacity: 0.28,
+    shadowRadius: 8,
+  },
+  playText: { fontSize: 11, fontWeight: '900', letterSpacing: 0.5 },
+  speeds: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(18,50,71,0.045)',
+    borderColor: G.hair,
+    borderRadius: 11,
+    borderWidth: 1,
+    flexDirection: 'row',
+    height: 42,
+    padding: 3,
+  },
+  legendSpacer: { flex: 1 },
+  stopsToggle: {
+    alignItems: 'center',
+    backgroundColor: G.glass,
+    borderColor: G.hair,
+    borderRadius: 999,
+    borderWidth: 1,
+    flexDirection: 'row',
+    gap: 2,
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+  },
+  stopsToggleOn: { backgroundColor: 'rgba(26,115,232,0.10)', borderColor: 'rgba(26,115,232,0.34)' },
+  stopsToggleText: { fontSize: 8, fontWeight: '800', letterSpacing: 0.1 },
+
+  // The stop card. Deliberately over the map and clear of the deck: it explains
+  // why the vehicle below it has stopped moving.
+  stopCard: {
+    alignItems: 'center',
+    alignSelf: 'center',
+    backgroundColor: 'rgba(255,255,255,0.97)',
+    borderColor: 'rgba(220,38,38,0.26)',
+    borderRadius: 16,
+    borderWidth: 1,
+    elevation: 12,
+    flexDirection: 'row',
+    gap: 10,
+    left: 18,
+    paddingHorizontal: 14,
+    paddingVertical: 11,
+    position: 'absolute',
+    right: 18,
+    shadowColor: '#173E4D',
+    shadowOffset: { height: 6, width: 0 },
+    shadowOpacity: 0.22,
+    shadowRadius: 16,
+  },
+  stopCardIcon: {
+    alignItems: 'center',
+    backgroundColor: 'rgba(220,38,38,0.10)',
+    borderRadius: 999,
+    height: 38,
+    justifyContent: 'center',
+    width: 38,
+  },
+  stopCardBody: { flex: 1, gap: 1, minWidth: 0 },
+  stopCardTitle: { color: '#7F1D1D', fontSize: 14, fontWeight: '900', letterSpacing: -0.2 },
+  stopCardTimes: { color: G.text, fontSize: 12, fontVariant: ['tabular-nums'], fontWeight: '700' },
+  stopCardPlace: { color: G.sub, fontSize: 11 },
+  speedChip: {
+    alignItems: 'center', borderColor: 'transparent', borderRadius: 8, borderWidth: 1, height: 34,
+    justifyContent: 'center', minWidth: 31, paddingHorizontal: 5,
+  },
+  speedChipText: { fontSize: 9.5, fontWeight: '900' },
+  deckBottomHandle: {
+    alignSelf: 'center',
+    backgroundColor: 'rgba(96,119,131,0.22)',
+    borderRadius: 999,
+    height: 5,
+    marginTop: 1,
+    width: 112,
+  },
 
   historyBackdrop: {
     ...StyleSheet.absoluteFillObject,
@@ -2144,7 +2690,7 @@ const styles = StyleSheet.create({
     padding: 18,
   },
   historyHeaderCopy: { flex: 1 },
-  historyEyebrow: { color: '#087C73', fontSize: 10, fontWeight: '900', letterSpacing: 1.4 },
+  historyEyebrow: { color: '#1A73E8', fontSize: 10, fontWeight: '900', letterSpacing: 1.4 },
   historyTitle: { color: G.text, fontSize: 22, fontWeight: '900', marginTop: 2 },
   historyRange: { color: G.sub, fontSize: 11, marginTop: 4 },
   historyClose: {
@@ -2199,7 +2745,7 @@ const styles = StyleSheet.create({
   timelineDetailDuration: { color: G.text, fontSize: 11, fontVariant: ['tabular-nums'], fontWeight: '800' },
   timelineDetailTime: { color: G.sub, fontSize: 10, marginTop: 2 },
   timelineDetailAddress: { color: G.text, fontSize: 11, lineHeight: 15, marginTop: 5 },
-  timelineDetailMeta: { color: '#087C73', fontSize: 10, fontWeight: '700', marginTop: 5 },
+  timelineDetailMeta: { color: '#1A73E8', fontSize: 10, fontWeight: '700', marginTop: 5 },
   historyEmpty: { color: G.sub, fontSize: 12, paddingVertical: 8, textAlign: 'center' },
   stopDetailRow: { flexDirection: 'row', gap: 10, paddingVertical: 8 },
   stopNumber: {
@@ -2297,8 +2843,8 @@ const styles = StyleSheet.create({
     padding: 10,
   },
   rangeFieldActive: {
-    backgroundColor: 'rgba(34, 197, 94, 0.1)',
-    borderColor: '#22c55e',
+    backgroundColor: 'rgba(26, 115, 232, 0.1)',
+    borderColor: '#1A73E8',
   },
   rangeFieldLabel: {
     color: G.sub,
@@ -2368,10 +2914,10 @@ const styles = StyleSheet.create({
     width: '14.28%',
   },
   dayCellSelected: {
-    backgroundColor: '#22c55e',
+    backgroundColor: '#1A73E8',
   },
   dayCellInRange: {
-    backgroundColor: 'rgba(34, 197, 94, 0.22)',
+    backgroundColor: 'rgba(26, 115, 232, 0.22)',
   },
   dayCellText: {
     color: G.text,
@@ -2424,14 +2970,14 @@ const styles = StyleSheet.create({
   },
   filterApplyBtn: {
     alignItems: 'center',
-    backgroundColor: '#22c55e',
+    backgroundColor: '#1A73E8',
     borderRadius: 12,
     flex: 1.5,
     height: 44,
     justifyContent: 'center',
   },
   filterApplyBtnDisabled: {
-    backgroundColor: 'rgba(34, 197, 94, 0.35)',
+    backgroundColor: 'rgba(26, 115, 232, 0.35)',
   },
   filterApplyText: {
     color: '#071018',

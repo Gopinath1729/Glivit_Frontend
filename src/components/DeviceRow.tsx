@@ -5,6 +5,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { PressableScale } from '@/src/components/ui/Motion';
 import { resolveDeviceRecordState } from '@/src/services/deviceState';
 import { useMobileGpsReadiness } from '@/src/services/mobileGpsStatus';
+import { vehicleBodyType } from '@/src/services/vehicleCategory';
 import type { DeviceSummary } from '@/src/types/api';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import { hexToRgba, radius, spacing, typography, type ThemeColors } from '@/src/theme/tokens';
@@ -18,34 +19,30 @@ import { hexToRgba, radius, spacing, typography, type ThemeColors } from '@/src/
  */
 export const DEVICE_ROW_HEIGHT = 58;
 
-const CATEGORY_ICON: Record<string, React.ComponentProps<typeof MaterialCommunityIcons>['name']> = {
+const CATEGORY_ICON: Record<'CAR' | 'BIKE' | 'TRUCK', React.ComponentProps<typeof MaterialCommunityIcons>['name']> = {
   CAR: 'car',
   TRUCK: 'truck',
-  LORRY: 'truck',
-  BUS: 'bus',
-  VAN: 'van-utility',
-  JEEP: 'car-estate',
-  MIXER_TRUCK: 'truck-cargo-container',
   BIKE: 'motorbike',
-  MOTORCYCLE: 'motorbike',
-  SCOOTER: 'motorbike',
-  AUTO: 'rickshaw',
-  RICKSHAW: 'rickshaw',
-  EXCAVATOR: 'excavator',
-  HEAVY_MACHINERY: 'excavator',
-  GPS_DEVICE: 'crosshairs-gps',
-  GPS: 'crosshairs-gps',
 };
 
 export function DeviceRow({
   device,
   onPress,
+  onEdit,
   onDelete,
   deleting = false,
   nowMs,
 }: {
   device: DeviceSummary;
   onPress: () => void;
+  /**
+   * Open this vehicle's tracker settings.
+   *
+   * Present because registering and configuring a tracker is now done from the
+   * vehicle it belongs to, rather than from a second list of the same hardware
+   * under another name.
+   */
+  onEdit?: () => void;
   onDelete?: () => void;
   deleting?: boolean;
   /**
@@ -85,7 +82,7 @@ export function DeviceRow({
       <View style={[styles.iconWrap, { backgroundColor: hexToRgba(statusColor, 0.12) }]}>
         <MaterialCommunityIcons
           color={statusColor}
-          name={CATEGORY_ICON[device.category] ?? 'crosshairs-gps'}
+          name={CATEGORY_ICON[vehicleBodyType(device.category)]}
           size={18}
         />
       </View>
@@ -117,6 +114,20 @@ export function DeviceRow({
       <Text numberOfLines={1} style={styles.age}>
         {formatAge(device.lastUpdate, nowMs)}
       </Text>
+
+      {onEdit ? (
+        <Pressable
+          accessibilityLabel={`Edit ${device.name}`}
+          accessibilityRole="button"
+          hitSlop={8}
+          onPress={(event) => {
+            event.stopPropagation();
+            onEdit();
+          }}
+          style={({ pressed }) => [styles.editButton, pressed && styles.editButtonPressed]}>
+          <MaterialCommunityIcons color={c.textMuted} name="cog-outline" size={17} />
+        </Pressable>
+      ) : null}
 
       {onDelete ? (
         <Pressable
@@ -182,6 +193,15 @@ const makeStyles = (c: ThemeColors) =>
       justifyContent: 'center',
       width: 34,
     },
+    editButton: {
+      alignItems: 'center',
+      borderRadius: radius.sm,
+      height: 30,
+      justifyContent: 'center',
+      marginLeft: -2,
+      width: 26,
+    },
+    editButtonPressed: { backgroundColor: c.surfaceAlt },
     identity: { flex: 1, gap: 2, minWidth: 0 },
     name: { color: c.textPrimary, fontSize: typography.label, fontWeight: '700' },
     secondaryLine: { alignItems: 'center', flexDirection: 'row', gap: 4 },

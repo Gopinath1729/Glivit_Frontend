@@ -28,12 +28,12 @@ interface ColorPickerModalProps {
 export function ColorPickerModal({ visible, onClose, color, onColorChange }: ColorPickerModalProps) {
   const { colors: c } = useTheme();
   const styles = useMemo(() => makeStyles(c), [c]);
-  const [tempColor, setTempColor] = React.useState(color || '#0F9D58');
+  const [tempColor, setTempColor] = React.useState(color || '#1A73E8');
 
   // Reset temp color when opened
   React.useEffect(() => {
     if (visible) {
-      setTempColor(color || '#0F9D58');
+      setTempColor(color || '#1A73E8');
     }
   }, [visible, color]);
 

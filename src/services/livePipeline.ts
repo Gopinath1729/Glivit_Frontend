@@ -17,6 +17,7 @@ import {
 } from '@/src/services/gpsPipeline';
 import {
   appendTrail,
+  isHeldMatchedSource,
   travelledSegment,
   type LiveCoordinate,
   type LiveMatchedSource,
@@ -440,7 +441,7 @@ export function validateLivePositionEvent(
   // established from movement. A road carries traffic both ways, so taking its
   // orientation on its own renders half of all vehicles facing backwards.
   const course =
-    matched.source === 'HELD' && previous
+    isHeldMatchedSource(matched.source) && previous
       ? previous.bearing
       : matched.onRoad && !validated.held
         ? alignToRoad(validated.bearing, event.roadBearing)
@@ -863,9 +864,15 @@ function applyResolvedFrame(
 ): LivePositionsState {
   const { newTrip, expectedIntervalMs, previousPoint, backendTripStartedAt, matchStatus, now } =
     context;
-  const display = authoritative.coordinate;
-  const heading = normalizeHeading(authoritative.bearing ?? validation.course);
   const matchedSource: LiveMatchedSource = event.matchedSource ?? 'NONE';
+  const retained = isHeldMatchedSource(matchedSource);
+  const stationaryHeld = matchedSource === 'HELD_STATIONARY';
+  const display = retained && previousState.displayPosition
+    ? previousState.displayPosition
+    : authoritative.coordinate;
+  const heading = retained && previousState.displayPosition
+    ? previousState.displayHeading
+    : normalizeHeading(authoritative.bearing ?? validation.course);
 
   const previousDisplay = newTrip ? null : previousState.displayPosition;
   const previousTimestampMs = newTrip ? null : (previousPoint?.timestampMs ?? null);
@@ -934,14 +941,16 @@ function applyResolvedFrame(
     gpsValid: event.gpsValid,
     gapBefore: validation.gapBefore,
   };
-  const points = newTrip ? [point] : [...previousState.points, point];
+  const points = stationaryHeld
+    ? previousState.points
+    : newTrip ? [point] : [...previousState.points, point];
 
   const nextAcceptedPoint: PreviousAcceptedLivePoint = {
     timestampMs: validation.recordedAt,
     recordedAt: validation.recordedAt,
     // A held fix keeps the previous RAW anchor. Promoting the drifted reading
     // would let a parked vehicle walk one drift radius per fix.
-    raw: validation.held && previousPoint ? previousPoint.raw : validation.raw,
+    raw: (validation.held || retained) && previousPoint ? previousPoint.raw : validation.raw,
     // The marker HAS moved by the time this returns, so the anchor's drawn
     // position is this fix's display coordinate - not the previous one, which
     // is what the two-frame pipeline had to record because the marker was still
@@ -949,7 +958,7 @@ function applyResolvedFrame(
     display,
     bearing: heading,
     course: heading,
-    speedKmh: validation.speedKmh,
+    speedKmh: stationaryHeld ? 0 : validation.speedKmh,
     ignition: event.ignition,
   };
 
@@ -995,7 +1004,9 @@ function applyResolvedFrame(
     diagnosticTrail,
     tripStartedAt:
       backendTripStartedAt ?? (newTrip ? validation.recordedAt : previousState.tripStartedAt),
-    rawPosition: { latitude: event.rawLatitude, longitude: event.rawLongitude },
+    rawPosition: stationaryHeld && previousState.rawPosition
+      ? previousState.rawPosition
+      : { latitude: event.rawLatitude, longitude: event.rawLongitude },
     validatedPosition: validation.validated,
     matchedPosition:
       event.matchedLatitude != null && event.matchedLongitude != null
@@ -1013,8 +1024,10 @@ function applyResolvedFrame(
     },
     // Nothing is outstanding: this frame WAS the answer.
     pendingMatches: [],
-    speedKmh: validation.speedKmh,
-    tripDistanceKm: event.tripDistanceKm,
+    speedKmh: stationaryHeld ? 0 : validation.speedKmh,
+    tripDistanceKm: stationaryHeld
+      ? previousState.tripDistanceKm
+      : event.tripDistanceKm,
     quality: validation.quality,
     rejectedReason: null,
     matchStatus,
@@ -1110,7 +1123,7 @@ export function applyRoadMatchEvent(
   // The heading: the road refines a direction already proven by movement, and
   // never replaces it. A road carries traffic both ways.
   const heading =
-    matched.source === 'HELD'
+    isHeldMatchedSource(matched.source)
       ? previousState.displayHeading
       : matched.onRoad
         ? alignToRoad(pending.bearing, event.roadBearing)

@@ -1,9 +1,6 @@
-import { MaterialCommunityIcons } from '@expo/vector-icons';
 import React, { useMemo, useState } from 'react';
 import {
-  Alert,
   FlatList,
-  Pressable,
   RefreshControl,
   StyleSheet,
   Text,
@@ -12,10 +9,15 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { UserFormModal } from '@/src/components/UserFormModal';
-import { Button } from '@/src/components/ui/Button';
 import { Chip } from '@/src/components/ui/ModulePrimitives';
+import {
+  ManagementActionButton,
+  ManagementCreateButton,
+} from '@/src/components/ui/ManagementPrimitives';
+import { CompactSearchBar } from '@/src/components/ui/CompactSearchBar';
+import { ListPagination } from '@/src/components/ui/ListPagination';
+import { useAppDialog } from '@/src/components/ui/useAppDialog';
 import { EmptyView, ErrorRetryView, LoadingView } from '@/src/components/ui/StateViews';
-import { TextField } from '@/src/components/ui/TextField';
 import { P } from '@/src/constants/permissions';
 import { apiErrorMessage } from '@/src/services/apiError';
 import {
@@ -32,6 +34,8 @@ import type { ManagedUserDto, Role } from '@/src/types/api';
 
 const ROLE_FILTERS: (Role | 'ALL')[] = ['ALL', 'ADMIN', 'TENANT_ADMIN', 'COMPANY_USER'];
 
+const USER_PAGE_SIZE = 10;
+
 export default function UsersScreen() {
   const { colors: c } = useTheme();
   const insets = useSafeAreaInsets();
@@ -45,17 +49,26 @@ export default function UsersScreen() {
   const [modalVisible, setModalVisible] = useState(false);
   const [editingUser, setEditingUser] = useState<ManagedUserDto | null>(null);
 
+  const [page, setPage] = useState(0);
+  const { confirm, dialogElement, notify } = useAppDialog();
+
   React.useEffect(() => {
-    const timer = setTimeout(() => setAppliedSearch(search.trim()), 250);
+    const timer = setTimeout(() => {
+      setAppliedSearch(search.trim());
+      setPage(0);
+    }, 250);
     return () => clearTimeout(timer);
   }, [search]);
+
+  // A new filter is a new result set, so it starts at its own first page.
+  React.useEffect(() => setPage(0), [roleFilter]);
 
   const queryRole = roleFilter === 'ALL' ? undefined : roleFilter;
   const usersQuery = useGetUsersQuery({
     search: appliedSearch || undefined,
     role: queryRole,
-    page: 0,
-    size: 100,
+    page,
+    size: USER_PAGE_SIZE,
   });
 
   const [createUser, createState] = useCreateUserMutation();
@@ -76,40 +89,50 @@ export default function UsersScreen() {
     try {
       if (editingUser) {
         await updateUser({ id: editingUser.id, body }).unwrap();
-        Alert.alert('User updated', `${body.name} was updated successfully.`);
-      } else {
-        await createUser(body).unwrap();
-        Alert.alert('User created', `${body.name} has been added.`);
+        setModalVisible(false);
+        setEditingUser(null);
+        notify({
+          message: `${body.name} was updated successfully.`,
+          title: 'User updated',
+          tone: 'success',
+        });
+        return;
       }
+      await createUser(body).unwrap();
       setModalVisible(false);
       setEditingUser(null);
+      notify({
+        message: `${body.name} has been added.`,
+        title: 'User created',
+        tone: 'success',
+      });
     } catch (err) {
-      Alert.alert(
-        editingUser ? 'Update failed' : 'Creation failed',
-        apiErrorMessage(err, 'Unable to save user.')
-      );
+      notify({
+        message: apiErrorMessage(err, 'Unable to save user.'),
+        title: editingUser ? 'Update failed' : 'Creation failed',
+        tone: 'danger',
+      });
     }
   };
 
   const handleDelete = (user: ManagedUserDto) => {
-    Alert.alert(
-      'Remove user?',
-      `Are you sure you want to deactivate ${user.name}? They will lose access to the system.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Deactivate',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              await deleteUser(user.id).unwrap();
-            } catch (err) {
-              Alert.alert('Could not deactivate user', apiErrorMessage(err));
-            }
-          },
-        },
-      ]
-    );
+    confirm({
+      confirmLabel: 'Deactivate',
+      message: `${user.name} will lose access to the system. Their history is kept.`,
+      onConfirm: async () => {
+        try {
+          await deleteUser(user.id).unwrap();
+        } catch (err) {
+          notify({
+            message: apiErrorMessage(err),
+            title: 'Could not deactivate user',
+            tone: 'danger',
+          });
+        }
+      },
+      title: 'Remove user?',
+      tone: 'danger',
+    });
   };
 
   if (usersQuery.isLoading && !usersQuery.data) {
@@ -126,27 +149,34 @@ export default function UsersScreen() {
   }
 
   const rows = usersQuery.data?.content ?? [];
+  const totalUsers = usersQuery.data?.totalElements ?? rows.length;
+  const totalUserPages = usersQuery.data?.totalPages ?? 1;
 
   return (
     <View style={styles.screen}>
       <View style={styles.toolbar}>
         <View style={styles.toolbarTop}>
-          <View>
+          <View style={styles.headingWrap}>
             <Text style={styles.heading}>User Management</Text>
-            <Text style={styles.subheading}>{rows.length} members in this organization</Text>
+            <Text style={styles.subheading}>
+              {totalUsers} member{totalUsers === 1 ? '' : 's'} in this organization
+            </Text>
           </View>
-          {canManage ? (
-            <Button icon="account-plus" label="Add User" onPress={openCreate} />
-          ) : null}
         </View>
 
-        <TextField
-          autoCapitalize="none"
-          clearButtonMode="while-editing"
-          onChangeText={setSearch}
-          placeholder="Search by name, email or phone…"
-          value={search}
-        />
+        <View style={styles.searchRow}>
+          <View style={styles.searchField}>
+            <CompactSearchBar
+              loading={usersQuery.isFetching && search.trim() === appliedSearch}
+              onChangeText={setSearch}
+              placeholder="Search by name, email or phone"
+              value={search}
+            />
+          </View>
+          {canManage ? (
+            <ManagementCreateButton accessibilityLabel="Add user" onPress={openCreate} />
+          ) : null}
+        </View>
 
         <View style={styles.filtersRow}>
           {ROLE_FILTERS.map((r) => (
@@ -185,6 +215,16 @@ export default function UsersScreen() {
             tintColor={c.primary}
           />
         }
+        ListFooterComponent={
+          <ListPagination
+            itemLabel="members"
+            onPageChange={setPage}
+            page={page}
+            pageSize={USER_PAGE_SIZE}
+            totalItems={totalUsers}
+            totalPages={totalUserPages}
+          />
+        }
         renderItem={({ item }) => (
           <UserCard
             canManage={canManage}
@@ -194,6 +234,8 @@ export default function UsersScreen() {
           />
         )}
       />
+
+      {dialogElement}
 
       <UserFormModal
         onClose={() => {
@@ -209,6 +251,15 @@ export default function UsersScreen() {
   );
 }
 
+/**
+ * One member, as a card.
+ *
+ * <p>Same anatomy as the Members tab: identity and account state on top, the
+ * two facts an administrator actually acts on in a footer strip, and the row
+ * actions beside them. Address and phone used to stack as full-width rows,
+ * which made a card with a long address twice the height of one without and
+ * left the list looking ragged - the footer keeps every card the same height.
+ */
 function UserCard({
   user,
   canManage,
@@ -254,68 +305,45 @@ function UserCard({
             },
           ]}>
           <View style={[styles.statusDot, { backgroundColor: statusColor }]} />
-          <Text style={[styles.statusText, { color: statusColor }]}>
-            {formatStatus(status)}
-          </Text>
+          <Text style={[styles.statusText, { color: statusColor }]}>{formatStatus(status)}</Text>
         </View>
       </View>
 
-      <View style={styles.cardMeta}>
-        <MetaRow icon="shield-outline" label="Role" value={formatRole(user.role)} />
-        {user.mobile ? (
-          <MetaRow icon="phone-outline" label="Phone" value={user.mobile} />
-        ) : null}
-        {user.address ? (
-          <MetaRow icon="map-marker-outline" label="Location" value={user.address} />
+      <View style={styles.cardFooter}>
+        <View style={styles.facts}>
+          <View style={styles.fact}>
+            <Text style={styles.factLabel}>Role</Text>
+            <Text numberOfLines={1} style={styles.factValue}>
+              {formatRole(user.role)}
+            </Text>
+          </View>
+          <View style={styles.factDivider} />
+          <View style={[styles.fact, styles.factGrow]}>
+            <Text style={styles.factLabel}>Mobile</Text>
+            <Text numberOfLines={1} style={styles.factValue}>
+              {user.mobile || 'Not set'}
+            </Text>
+          </View>
+        </View>
+
+        {canManage ? (
+          <View style={styles.cardActions}>
+            <ManagementActionButton
+              accessibilityLabel={`Edit ${user.name}`}
+              icon="pencil-outline"
+              label="Edit"
+              onPress={onEdit}
+            />
+            <ManagementActionButton
+              accessibilityLabel={`Deactivate ${user.name}`}
+              destructive
+              icon="account-off-outline"
+              label="Remove"
+              onPress={onDelete}
+            />
+          </View>
         ) : null}
       </View>
-
-      {canManage ? (
-        <View style={styles.cardActions}>
-          <Pressable
-            accessibilityLabel={`Edit ${user.name}`}
-            onPress={onEdit}
-            style={({ pressed }) => [
-              styles.actionBtn,
-              pressed && { backgroundColor: c.surfaceAlt },
-            ]}>
-            <MaterialCommunityIcons color={c.primary} name="pencil-outline" size={18} />
-            <Text style={[styles.actionBtnText, { color: c.primary }]}>Edit</Text>
-          </Pressable>
-          <Pressable
-            accessibilityLabel={`Deactivate ${user.name}`}
-            onPress={onDelete}
-            style={({ pressed }) => [
-              styles.actionBtn,
-              pressed && { backgroundColor: c.surfaceAlt },
-            ]}>
-            <MaterialCommunityIcons color={c.danger} name="account-off-outline" size={18} />
-            <Text style={[styles.actionBtnText, { color: c.danger }]}>Deactivate</Text>
-          </Pressable>
-        </View>
-      ) : null}
-    </View>
-  );
-}
-
-function MetaRow({
-  icon,
-  label,
-  value,
-}: {
-  icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
-  label: string;
-  value: string;
-}) {
-  const { colors: c } = useTheme();
-  const styles = useMemo(() => makeStyles(c), [c]);
-  return (
-    <View style={styles.metaRow}>
-      <MaterialCommunityIcons color={c.textMuted} name={icon} size={15} />
-      <Text numberOfLines={1} style={styles.metaText}>
-        <Text style={styles.metaLabel}>{label}: </Text>
-        {value}
-      </Text>
     </View>
   );
 }
@@ -340,6 +368,29 @@ function initials(name: string): string {
 const makeStyles = (c: ThemeColors) =>
   StyleSheet.create({
     screen: { backgroundColor: c.pageBackground, flex: 1 },
+    cardFooter: {
+      alignItems: 'center',
+      borderTopColor: c.border,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      flexDirection: 'row',
+      justifyContent: 'space-between',
+      marginTop: spacing.sm,
+      paddingTop: spacing.sm,
+    },
+    facts: { alignItems: 'center', flex: 1, flexDirection: 'row', gap: spacing.sm, minWidth: 0 },
+    fact: { minWidth: 0 },
+    factGrow: { flex: 1 },
+    factDivider: { backgroundColor: c.border, height: 22, width: StyleSheet.hairlineWidth * 2 },
+    factLabel: {
+      color: c.textMuted,
+      fontSize: 10,
+      fontWeight: '800',
+      textTransform: 'uppercase',
+    },
+    factValue: { color: c.textPrimary, fontSize: 12, fontWeight: '700' },
+    headingWrap: { flex: 1, minWidth: 0 },
+    searchRow: { alignItems: 'center', flexDirection: 'row', gap: 8 },
+    searchField: { flex: 1, minWidth: 0 },
     toolbar: {
       backgroundColor: c.surface,
       borderBottomColor: c.border,
@@ -403,10 +454,6 @@ const makeStyles = (c: ThemeColors) =>
     },
     statusDot: { borderRadius: 999, height: 6, width: 6 },
     statusText: { fontSize: 10, fontWeight: '900' },
-    cardMeta: { gap: 4, paddingVertical: spacing.xs },
-    metaRow: { alignItems: 'center', flexDirection: 'row', gap: 6 },
-    metaText: { color: c.textSecondary, flex: 1, fontSize: typography.caption },
-    metaLabel: { color: c.textMuted, fontWeight: '700' },
     cardActions: {
       borderTopColor: c.border,
       borderTopWidth: StyleSheet.hairlineWidth,
@@ -415,13 +462,4 @@ const makeStyles = (c: ThemeColors) =>
       gap: spacing.sm,
       paddingTop: spacing.xs + 2,
     },
-    actionBtn: {
-      alignItems: 'center',
-      borderRadius: radius.sm,
-      flexDirection: 'row',
-      gap: 4,
-      paddingHorizontal: spacing.sm,
-      paddingVertical: 6,
-    },
-    actionBtnText: { fontSize: 12, fontWeight: '700' },
   });

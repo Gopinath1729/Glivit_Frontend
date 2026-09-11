@@ -127,8 +127,8 @@ const makeStyles = (c: ThemeColors) =>
       justifyContent: 'center',
       maxWidth: 56,
     },
-    boxFilled: { borderColor: 'rgba(43,230,166,0.55)' },
-    boxActive: { borderColor: '#2BE6A6' },
+    boxFilled: { borderColor: 'rgba(138, 180, 248,0.55)' },
+    boxActive: { borderColor: '#8AB4F8' },
     boxError: { borderColor: c.danger },
     boxDisabled: { opacity: 0.5 },
     boxText: {

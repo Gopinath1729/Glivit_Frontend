@@ -2,12 +2,10 @@ import { MaterialCommunityIcons } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   Modal,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -17,20 +15,10 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import MapView, { Marker } from '@/src/components/maps/NativeMap';
-import { VehicleMarker, markerCategory } from '@/src/components/VehicleMarker';
 import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
-import { ErrorRetryView, LoadingView } from '@/src/components/ui/StateViews';
 import { P } from '@/src/constants/permissions';
+import { useAppDialog } from '@/src/components/ui/useAppDialog';
 import { apiErrorMessage } from '@/src/services/apiError';
-import {
-  formatDeviceState,
-  resolveDeviceRecordState,
-  type ResolvedDeviceState,
-} from '@/src/services/deviceState';
-import { useMobileGpsReadiness } from '@/src/services/mobileGpsStatus';
-import { useGetDeviceQuery } from '@/src/services/devicesApi';
-import { nativeMapsAvailable } from '@/src/services/mapStyle';
 import {
   MAX_VEHICLE_DOCUMENT_BYTES,
   VEHICLE_DOCUMENT_MIME_TYPES,
@@ -44,7 +32,6 @@ import {
   useUploadVehicleDocumentMutation,
 } from '@/src/services/vehicleDocumentsApi';
 import { useHasPermission } from '@/src/store/hooks';
-import { useNowTick } from '@/src/hooks/useNowTick';
 import { useTheme } from '@/src/theme/ThemeProvider';
 import {
   elevation,
@@ -54,9 +41,7 @@ import {
   typography,
   type ThemeColors,
 } from '@/src/theme/tokens';
-import type { DeviceDetail, VehicleDocumentDto } from '@/src/types/api';
-
-type ProfileSection = 'overview' | 'documents';
+import type { VehicleDocumentDto } from '@/src/types/api';
 
 const DOCUMENT_TYPES = [
   { key: 'REGISTRATION', label: 'Registration', icon: 'card-account-details-outline' },
@@ -81,299 +66,210 @@ const EMPTY_DOCUMENT_DRAFT: DocumentDraft = {
   notes: '',
 };
 
-export default function DeviceProfileScreen() {
+
+/** How long before an expiry date a document starts needing attention. */
+const EXPIRY_WARNING_DAYS = 30;
+
+type ExpiryTone = { key: 'valid' | 'soon' | 'expired'; label: string };
+
+/**
+ * What a document's expiry date means today, as something to show and a tone.
+ *
+ * A document with no expiry date is not a problem to be solved - plenty of them
+ * never expire - so it reads as valid rather than as missing something.
+ */
+function expiryTone(expiryDate?: string | null): ExpiryTone {
+  const raw = (expiryDate ?? '').trim();
+  if (!raw) return { key: 'valid', label: 'No expiry date' };
+  const expiry = Date.parse(raw);
+  if (!Number.isFinite(expiry)) return { key: 'valid', label: 'No expiry date' };
+
+  const days = Math.ceil((expiry - Date.now()) / 86_400_000);
+  const shown = formatDocumentDate(expiry);
+  if (days < 0) return { key: 'expired', label: `Expired ${shown}` };
+  if (days === 0) return { key: 'expired', label: 'Expires today' };
+  if (days <= EXPIRY_WARNING_DAYS) {
+    return { key: 'soon', label: `Expires in ${days} day${days === 1 ? '' : 's'}` };
+  }
+  return { key: 'valid', label: `Valid until ${shown}` };
+}
+
+function formatDocumentDate(timestamp: number): string {
+  const date = new Date(timestamp);
+  if (!Number.isFinite(date.getTime())) return 'unknown';
+  return date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+function documentTypeEntry(documentType: string) {
+  const key = (documentType ?? '').toUpperCase();
+  return DOCUMENT_TYPES.find((entry) => entry.key === key);
+}
+
+function documentTypeIcon(
+  documentType: string
+): React.ComponentProps<typeof MaterialCommunityIcons>['name'] {
+  return documentTypeEntry(documentType)?.icon ?? 'file-outline';
+}
+
+/** One accent per kind of paperwork, so a library is scannable by colour. */
+function documentTypeColor(documentType: string, c: ThemeColors): string {
+  switch ((documentType ?? '').toUpperCase()) {
+    case 'REGISTRATION':
+      return c.primary;
+    case 'INSURANCE':
+      return c.info;
+    case 'PERMIT':
+      return c.warningOrange;
+    case 'POLLUTION':
+      return c.success;
+    case 'SERVICE':
+      return c.secondary;
+    default:
+      return c.textMuted;
+  }
+}
+
+/** The human name for a document type, including one the server invented. */
+function formatLabel(documentType: string): string {
+  const known = documentTypeEntry(documentType);
+  if (known) return known.label;
+  const raw = (documentType ?? '').trim();
+  if (!raw) return 'Document';
+  return raw
+    .toLowerCase()
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 KB';
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const kb = bytes / 1024;
+  if (kb < 1024) return `${kb < 10 ? kb.toFixed(1) : Math.round(kb)} KB`;
+  const mb = kb / 1024;
+  return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+}
+
+/** "insurance-2027.pdf" -> "insurance-2027", so the name field starts useful. */
+function stripExtension(fileName: string): string {
+  const name = (fileName ?? '').trim();
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
+/** A real YYYY-MM-DD, not merely something shaped like one. */
+function isIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year &&
+    date.getUTCMonth() === month - 1 &&
+    date.getUTCDate() === day
+  );
+}
+
+/**
+ * The content type for a file the picker did not label.
+ *
+ * Restricted to the types the upload accepts: a file whose extension is not one
+ * of them is sent as a generic stream and refused by the server, which is the
+ * correct outcome rather than a mislabelled upload.
+ */
+function mimeTypeForName(fileName: string): string {
+  const extension = (fileName ?? '').toLowerCase().split('.').pop() ?? '';
+  switch (extension) {
+    case 'pdf':
+      return 'application/pdf';
+    case 'png':
+      return 'image/png';
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg';
+    case 'webp':
+      return 'image/webp';
+    case 'heic':
+      return 'image/heic';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
+/**
+ * A vehicle's document library.
+ *
+ * This route used to be the vehicle DETAILS page: a hero, an overview of live
+ * telemetry, and documents behind a segmented control. Everything above the
+ * documents was a slower copy of what the Vehicles list and the Live and
+ * Playback screens already show, and reaching any of it meant opening a vehicle
+ * first and then choosing again. The list now goes straight to Live or
+ * Playback, so the only thing that still needed a screen of its own is the one
+ * thing neither of those can hold.
+ */
+export default function VehicleDocumentsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { colors: c, stateColors } = useTheme();
+  const { colors: c } = useTheme();
   const styles = useMemo(() => makeStyles(c), [c]);
-  const params = useLocalSearchParams<{ id?: string; section?: string }>();
-  const id = Number(params.id);
-  const validId = Number.isSafeInteger(id) && id > 0;
-  const [section, setSection] = useState<ProfileSection>(
-    params.section === 'documents' ? 'documents' : 'overview'
-  );
+  const params = useLocalSearchParams<{ id?: string; name?: string }>();
+  const deviceId = Number(params.id);
+  const valid = Number.isSafeInteger(deviceId) && deviceId > 0;
 
-  const { data, isLoading, isFetching, isError, error, refetch } = useGetDeviceQuery(id, {
-    skip: !validId,
-    pollingInterval: 30_000,
-    skipPollingIfUnfocused: true,
-  });
+  const goBack = useCallback(() => {
+    if (router.canGoBack()) router.back();
+    else router.replace('/(app)/vehicles');
+  }, [router]);
 
-  const readiness = useMobileGpsReadiness();
-
-  if (!validId) {
-    return <ErrorRetryView message="This vehicle link is invalid." onRetry={() => router.back()} />;
+  if (!valid) {
+    return (
+      <View style={[styles.screen, { paddingTop: insets.top + spacing.md }]}>
+        <View style={styles.docHeader}>
+          <Pressable
+            accessibilityLabel="Go back"
+            accessibilityRole="button"
+            hitSlop={10}
+            onPress={goBack}
+            style={styles.docBack}>
+            <MaterialCommunityIcons color={c.textPrimary} name="arrow-left" size={22} />
+          </Pressable>
+          <Text style={styles.docTitle}>Documents</Text>
+        </View>
+        <View style={styles.documentsState}>
+          <Text style={styles.documentsStateTitle}>No vehicle selected</Text>
+          <Text style={styles.documentsStateText}>
+            Open a vehicle from the Vehicles list to see its documents.
+          </Text>
+        </View>
+      </View>
+    );
   }
-  if (isLoading) return <LoadingView label="Loading vehicle details…" />;
-  if (isError || !data) return <ErrorRetryView message={apiErrorMessage(error)} onRetry={refetch} />;
-
-  // The same resolved status the vehicle list and map show for this device.
-  const resolvedState = resolveDeviceRecordState(data, readiness);
-  const stateColor = stateColors[resolvedState.state] ?? stateColors.NO_DATA;
-  const openLiveTrack = () =>
-    router.push({
-      pathname: '/live-track',
-      params: {
-        deviceId: String(data.id),
-        name: data.name,
-        subtitle: data.address ?? '',
-        category: data.category,
-      },
-    });
-
-  /**
-   * Opens Playback for THIS vehicle.
-   *
-   * Every value is coerced to a defined string before it is handed to the
-   * router. `data` is typed as complete, but it is a network payload: a field
-   * the API omitted arrives as `undefined`, and an undefined param value throws
-   * inside expo-router's URL builder — from an onPress handler, with no error
-   * boundary above it, which exits the app rather than showing a broken screen.
-   *
-   * `deviceId` is the one param the destination cannot work without, so it is
-   * checked rather than defaulted; the rest are presentational and fall back.
-   */
-  const openPlayback = () => {
-    if (!Number.isSafeInteger(data.id) || data.id <= 0) return;
-    router.push({
-      pathname: '/trip-playback',
-      params: {
-        deviceId: String(data.id),
-        // Carried so the Playback screen can identify the vehicle on its own,
-        // without a second lookup, and so the header never falls back to a
-        // bare "#id" for a device whose name has not loaded.
-        imei: typeof data.imei === 'string' ? data.imei : '',
-        name: typeof data.name === 'string' && data.name.trim() ? data.name : `Vehicle ${data.id}`,
-        category: typeof data.category === 'string' ? data.category : '',
-        model: typeof data.model === 'string' ? data.model : '',
-        speed: String(Number.isFinite(data.speed) ? data.speed : 0),
-        heading: String(Number.isFinite(data.course) ? data.course : 0),
-      },
-    });
-  };
 
   return (
-    <View style={styles.screen}>
+    <View style={[styles.screen, { paddingTop: insets.top + spacing.sm }]}>
+      <View style={styles.docHeader}>
+        <Pressable
+          accessibilityLabel="Go back"
+          accessibilityRole="button"
+          hitSlop={10}
+          onPress={goBack}
+          style={styles.docBack}>
+          <MaterialCommunityIcons color={c.textPrimary} name="arrow-left" size={22} />
+        </Pressable>
+        <View style={styles.docHeaderCopy}>
+          <Text numberOfLines={1} style={styles.docTitle}>
+            {params.name?.trim() || `Vehicle ${deviceId}`}
+          </Text>
+          <Text style={styles.docSubtitle}>DOCUMENTS</Text>
+        </View>
+      </View>
+
       <ScrollView
         contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + spacing.xl }]}
         showsVerticalScrollIndicator={false}>
-        <VehicleHero
-          data={data}
-          isFetching={isFetching}
-          onBack={() => router.back()}
-          onRefresh={() => refetch()}
-          resolvedState={resolvedState}
-          safeTop={insets.top}
-          stateColor={stateColor}
-        />
-
-        <View style={styles.body}>
-          <View style={styles.actionDeck}>
-            <QuickAction color={c.primary} icon="crosshairs-gps" label="Live" onPress={openLiveTrack} primary />
-            <QuickAction color={c.info} icon="map-clock-outline" label="Playback" onPress={openPlayback} />
-            <QuickAction
-              color={c.warning}
-              icon="folder-multiple-outline"
-              label="Documents"
-              onPress={() => setSection('documents')}
-            />
-          </View>
-
-          <View style={styles.segmentedControl}>
-            <SegmentButton active={section === 'overview'} label="Overview" onPress={() => setSection('overview')} />
-            <SegmentButton active={section === 'documents'} label="Documents" onPress={() => setSection('documents')} />
-          </View>
-
-          {section === 'overview' ? (
-            <Overview data={data} stateColor={stateColor} />
-          ) : (
-            <DocumentLibrary deviceId={data.id} />
-          )}
-        </View>
+        <DocumentLibrary deviceId={deviceId} />
       </ScrollView>
-    </View>
-  );
-}
-
-function VehicleHero({
-  data,
-  isFetching,
-  onBack,
-  onRefresh,
-  resolvedState,
-  safeTop,
-  stateColor,
-}: {
-  data: DeviceDetail;
-  isFetching: boolean;
-  onBack: () => void;
-  onRefresh: () => void;
-  /** Resolved once by the screen so the hero cannot show a different status. */
-  resolvedState: ResolvedDeviceState;
-  safeTop: number;
-  stateColor: string;
-}) {
-  const { colors: c } = useTheme();
-  const styles = useMemo(() => makeStyles(c), [c]);
-  const hasLocation = data.latitude != null && data.longitude != null;
-  const canRenderMap = hasLocation && Platform.OS !== 'web' && nativeMapsAvailable;
-
-  return (
-    <View style={styles.hero}>
-      {canRenderMap ? (
-        <MapView
-          initialRegion={{
-            latitude: data.latitude!,
-            longitude: data.longitude!,
-            latitudeDelta: 0.008,
-            longitudeDelta: 0.008,
-          }}
-          pitchEnabled={false}
-          pointerEvents="none"
-          rotateEnabled={false}
-          scrollEnabled={false}
-          style={StyleSheet.absoluteFillObject}
-          zoomEnabled={false}>
-          <Marker
-            anchor={{ x: 0.5, y: 0.5 }}
-            coordinate={{ latitude: data.latitude!, longitude: data.longitude! }}
-            flat={false}>
-            <VehicleMarker
-              category={markerCategory(data.category)}
-              color={stateColor}
-              heading={data.course ?? 0}
-              moving={resolvedState.state === 'RUNNING' && (data.speed ?? 0) > 0}
-              selected
-              size={96}
-            />
-          </Marker>
-        </MapView>
-      ) : (
-        <LinearGradient colors={['#172235', '#07101D']} style={StyleSheet.absoluteFillObject} />
-      )}
-
-      <LinearGradient
-        colors={['rgba(5,12,23,0.04)', 'rgba(5,12,23,0.18)', 'rgba(5,12,23,0.96)']}
-        locations={[0, 0.68, 1]}
-        style={StyleSheet.absoluteFillObject}
-      />
-
-      <View style={[styles.heroToolbar, { top: Math.max(safeTop, spacing.sm) + spacing.xs }]}>
-        <GlassButton accessibilityLabel="Go back" icon="arrow-left" onPress={onBack} />
-        <GlassButton
-          accessibilityLabel="Refresh vehicle"
-          icon="refresh"
-          loading={isFetching}
-          onPress={onRefresh}
-        />
-      </View>
-
-      {!canRenderMap ? (
-        <View style={styles.noLocationIcon}>
-          <VehicleMarker
-            category={markerCategory(data.category)}
-            color={stateColor}
-            heading={0}
-            selected
-            size={118}
-          />
-        </View>
-      ) : null}
-
-      <View style={styles.heroIdentity}>
-        <View style={styles.heroEyebrowRow}>
-          <View style={[styles.heroStatus, { borderColor: hexToRgba(stateColor, 0.6) }]}>
-            <View style={[styles.heroStatusDot, { backgroundColor: stateColor }]} />
-            <Text style={[styles.heroStatusText, { color: stateColor }]}>{resolvedState.label}</Text>
-          </View>
-          <Text style={styles.heroCategory}>{formatLabel(data.category)}</Text>
-        </View>
-        <Text numberOfLines={1} style={styles.heroName}>{data.vehicleName || data.name}</Text>
-        <Text numberOfLines={1} style={styles.heroMeta}>
-          {data.model || 'Vehicle'} · IMEI {data.imei}
-        </Text>
-      </View>
-    </View>
-  );
-}
-
-function Overview({ data, stateColor }: { data: DeviceDetail; stateColor: string }) {
-  const { colors: c } = useTheme();
-  // "Updated" is a function of the timestamp AND of now. Without a clock of its
-  // own it is only recomputed when the device data changes - and a vehicle that
-  // has stopped reporting produces no new data, so the figure froze at whatever
-  // it read when the screen was opened. A device seen 15 minutes ago still
-  // showed "7m" because that was true when the screen mounted.
-  const nowMs = useNowTick();
-  const styles = useMemo(() => makeStyles(c), [c]);
-  const speedUnit = data.speedUnit === 'MPH' ? 'mph' : 'km/h';
-  // A phone acting as the tracker has no SIM, model or real IMEI of its own.
-  const isMobileGps = data.sourceType === 'MOBILE_GPS';
-
-  return (
-    <View style={styles.sectionStack}>
-      <View style={styles.kpiGrid}>
-        <Kpi icon="speedometer" label="Speed" tone={stateColor} value={`${Math.round(data.speed ?? 0)}`} unit={speedUnit} />
-        <Kpi
-          icon="engine-outline"
-          label="Ignition"
-          tone={data.ignition ? c.success : c.textMuted}
-          value={data.ignition == null ? '—' : data.ignition ? 'On' : 'Off'}
-        />
-        <Kpi
-          icon="crosshairs-gps"
-          label="GPS fix"
-          tone={data.gpsValid ? c.success : c.danger}
-          value={data.gpsValid ? 'Valid' : 'Invalid'}
-        />
-        <Kpi icon="update" label="Updated" tone={c.info} value={formatAge(data.lastUpdate, nowMs)} />
-      </View>
-
-      <DetailCard icon="map-marker-outline" title="Live location">
-        <DetailRow label="Address" value={data.address ?? 'Location unavailable'} multiline />
-        <DetailRow
-          label="Coordinates"
-          value={
-            data.latitude != null && data.longitude != null
-              ? `${data.latitude.toFixed(5)}, ${data.longitude.toFixed(5)}`
-              : 'No GPS coordinates'
-          }
-        />
-        <DetailRow label="Last update" value={formatDateTime(data.lastUpdate)} />
-      </DetailCard>
-
-      <DetailCard icon="account-outline" title="Driver details">
-        <DetailRow label="Driver" value={data.driverName ?? 'Not added'} />
-        <DetailRow label="Contact" value={data.driverPhone ?? 'Not added'} />
-        <DetailRow label="Address" value={data.driverAddress ?? 'Not added'} />
-      </DetailCard>
-
-      <DetailCard icon="car-info" title="Vehicle & tracker">
-        <DetailRow label="Vehicle" value={data.vehicleName ?? data.name} />
-        <DetailRow label="Category" value={formatLabel(data.category)} />
-        <DetailRow label="Tracking source" value={isMobileGps ? 'Mobile GPS' : 'GPS tracker'} />
-        {isMobileGps ? null : <DetailRow label="Model" value={data.model ?? 'Not added'} />}
-        {isMobileGps ? null : <DetailRow label="IMEI" value={data.imei} mono />}
-        <DetailRow label="Tracker status" value={formatDeviceState(data.status)} />
-        <DetailRow label="Subscription expiry" value={formatDate(data.expiryDate)} />
-      </DetailCard>
-
-      {/* A Mobile GPS device has no SIM of its own -- the fix comes from the
-          phone's own radio -- so SIM number, provider and APN are meaningless
-          here and only ever rendered "Not added". */}
-      {isMobileGps ? (
-        <DetailCard icon="cellphone-marker" title="Connectivity">
-          <DetailRow label="GPS source" value="Mobile device" />
-          <DetailRow label="Timezone" value={data.timezone ?? 'Asia/Kolkata'} />
-        </DetailCard>
-      ) : (
-        <DetailCard icon="sim-outline" title="Connectivity">
-          <DetailRow label="SIM number" value={data.simNumber ?? 'Not added'} mono />
-          <DetailRow label="Provider" value={data.simProvider ?? 'Not added'} />
-          <DetailRow label="APN" value={data.simApn ?? 'Not added'} mono />
-          <DetailRow label="Timezone" value={data.timezone ?? 'Asia/Kolkata'} />
-        </DetailCard>
-      )}
     </View>
   );
 }
@@ -388,6 +284,7 @@ function DocumentLibrary({ deviceId }: { deviceId: number }) {
   const [modalVisible, setModalVisible] = useState(false);
   const [openingId, setOpeningId] = useState<number | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
+  const { confirm, dialogElement, notify } = useAppDialog();
 
   const expiring = data.filter((document) => expiryTone(document.expiryDate).key !== 'valid').length;
 
@@ -398,34 +295,33 @@ function DocumentLibrary({ deviceId }: { deviceId: number }) {
       const content = await getContent({ deviceId, documentId: document.id }).unwrap();
       await openVehicleDocument(content);
     } catch (caught) {
-      Alert.alert('Document unavailable', apiErrorMessage(caught, 'The document could not be opened.'));
+      notify({
+        message: apiErrorMessage(caught, 'The document could not be opened.'),
+        title: 'Document unavailable',
+        tone: 'danger',
+      });
     } finally {
       setOpeningId(null);
     }
   };
 
   const confirmDelete = (document: VehicleDocumentDto) => {
-    Alert.alert(
-      'Delete document?',
-      `${document.name} will be permanently removed from this vehicle.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            setDeletingId(document.id);
-            try {
-              await deleteDocument({ deviceId, documentId: document.id }).unwrap();
-            } catch (caught) {
-              Alert.alert('Delete failed', apiErrorMessage(caught));
-            } finally {
-              setDeletingId(null);
-            }
-          },
-        },
-      ]
-    );
+    confirm({
+      confirmLabel: 'Delete',
+      message: `${document.name} will be permanently removed from this vehicle.`,
+      onConfirm: async () => {
+        setDeletingId(document.id);
+        try {
+          await deleteDocument({ deviceId, documentId: document.id }).unwrap();
+        } catch (caught) {
+          notify({ message: apiErrorMessage(caught), title: 'Delete failed', tone: 'danger' });
+        } finally {
+          setDeletingId(null);
+        }
+      },
+      title: 'Delete document?',
+      tone: 'danger',
+    });
   };
 
   return (
@@ -501,6 +397,8 @@ function DocumentLibrary({ deviceId }: { deviceId: number }) {
         onClose={() => setModalVisible(false)}
         visible={modalVisible}
       />
+
+      {dialogElement}
     </View>
   );
 }
@@ -581,6 +479,7 @@ function DocumentUploadModal({ deviceId, onClose, visible }: { deviceId: number;
   const [draft, setDraft] = useState<DocumentDraft>(EMPTY_DOCUMENT_DRAFT);
   const [asset, setAsset] = useState<DocumentPicker.DocumentPickerAsset | null>(null);
   const [upload, { isLoading }] = useUploadVehicleDocumentMutation();
+  const { dialogElement, notify } = useAppDialog();
 
   const close = () => {
     if (isLoading) return;
@@ -600,7 +499,11 @@ function DocumentUploadModal({ deviceId, onClose, visible }: { deviceId: number;
       if (result.canceled) return;
       const picked = result.assets[0];
       if (picked.size != null && picked.size > MAX_VEHICLE_DOCUMENT_BYTES) {
-        Alert.alert('File is too large', 'Choose a document smaller than 8 MB.');
+        notify({
+          message: 'Choose a document smaller than 8 MB.',
+          title: 'File is too large',
+          tone: 'info',
+        });
         return;
       }
       setAsset(picked);
@@ -609,21 +512,37 @@ function DocumentUploadModal({ deviceId, onClose, visible }: { deviceId: number;
         name: current.name || stripExtension(picked.name),
       }));
     } catch (caught) {
-      Alert.alert('File picker unavailable', apiErrorMessage(caught, 'Please try selecting the file again.'));
+      notify({
+        message: apiErrorMessage(caught, 'Please try selecting the file again.'),
+        title: 'File picker unavailable',
+        tone: 'danger',
+      });
     }
   };
 
   const submit = async () => {
     if (!asset) {
-      Alert.alert('Select a file', 'Choose the PDF, image, text or Word document to upload.');
+      notify({
+        message: 'Choose the PDF, image, text or Word document to upload.',
+        title: 'Select a file',
+        tone: 'info',
+      });
       return;
     }
     if (!draft.name.trim()) {
-      Alert.alert('Document name required', 'Add a short name so the file is easy to identify.');
+      notify({
+        message: 'Add a short name so the file is easy to identify.',
+        title: 'Document name required',
+        tone: 'info',
+      });
       return;
     }
     if (draft.expiryDate && !isIsoDate(draft.expiryDate)) {
-      Alert.alert('Invalid expiry date', 'Use YYYY-MM-DD, for example 2027-03-31.');
+      notify({
+        message: 'Use YYYY-MM-DD, for example 2027-03-31.',
+        title: 'Invalid expiry date',
+        tone: 'info',
+      });
       return;
     }
 
@@ -631,7 +550,11 @@ function DocumentUploadModal({ deviceId, onClose, visible }: { deviceId: number;
       const contentBase64 = await documentAssetBase64(asset);
       const estimatedBytes = Math.floor((contentBase64.length * 3) / 4);
       if (estimatedBytes > MAX_VEHICLE_DOCUMENT_BYTES) {
-        Alert.alert('File is too large', 'Choose a document smaller than 8 MB.');
+        notify({
+          message: 'Choose a document smaller than 8 MB.',
+          title: 'File is too large',
+          tone: 'info',
+        });
         return;
       }
       await upload({
@@ -649,7 +572,11 @@ function DocumentUploadModal({ deviceId, onClose, visible }: { deviceId: number;
       }).unwrap();
       close();
     } catch (caught) {
-      Alert.alert('Upload failed', apiErrorMessage(caught, 'The document could not be uploaded.'));
+      notify({
+        message: apiErrorMessage(caught, 'The document could not be uploaded.'),
+        title: 'Upload failed',
+        tone: 'danger',
+      });
     }
   };
 
@@ -752,105 +679,9 @@ function DocumentUploadModal({ deviceId, onClose, visible }: { deviceId: number;
           </KeyboardAwareForm>
         </View>
       </View>
+
+      {dialogElement}
     </Modal>
-  );
-}
-
-function QuickAction({ color, disabled, icon, label, onPress, primary = false }: {
-  color: string;
-  disabled?: boolean;
-  icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
-  label: string;
-  onPress: () => void;
-  primary?: boolean;
-}) {
-  const { colors: c } = useTheme();
-  const styles = useMemo(() => makeStyles(c), [c]);
-  return (
-    <Pressable
-      accessibilityRole="button"
-      disabled={disabled}
-      onPress={onPress}
-      style={({ pressed }) => [styles.quickAction, disabled && styles.buttonDisabled, pressed && styles.pressed]}>
-      <View style={[styles.quickActionIcon, { backgroundColor: primary ? color : hexToRgba(color, 0.12) }]}>
-        <MaterialCommunityIcons color={primary ? c.onPrimary : color} name={icon} size={22} />
-      </View>
-      <Text style={styles.quickActionText}>{label}</Text>
-    </Pressable>
-  );
-}
-
-function GlassButton({ accessibilityLabel, icon, loading, onPress }: {
-  accessibilityLabel: string;
-  icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
-  loading?: boolean;
-  onPress: () => void;
-}) {
-  const { colors: c } = useTheme();
-  const styles = useMemo(() => makeStyles(c), [c]);
-  return (
-    <Pressable accessibilityLabel={accessibilityLabel} accessibilityRole="button" disabled={loading} onPress={onPress} style={styles.glassButton}>
-      {loading ? <ActivityIndicator color="#FFFFFF" size="small" /> : <MaterialCommunityIcons color="#FFFFFF" name={icon} size={23} />}
-    </Pressable>
-  );
-}
-
-function SegmentButton({ active, label, onPress }: { active: boolean; label: string; onPress: () => void }) {
-  const { colors: c } = useTheme();
-  const styles = useMemo(() => makeStyles(c), [c]);
-  return (
-    <Pressable accessibilityState={{ selected: active }} onPress={onPress} style={[styles.segment, active && styles.segmentActive]}>
-      <Text style={[styles.segmentText, active && styles.segmentTextActive]}>{label}</Text>
-    </Pressable>
-  );
-}
-
-function Kpi({ icon, label, tone, unit, value }: {
-  icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
-  label: string;
-  tone: string;
-  unit?: string;
-  value: string;
-}) {
-  const { colors: c } = useTheme();
-  const styles = useMemo(() => makeStyles(c), [c]);
-  return (
-    <View style={styles.kpi}>
-      <View style={styles.kpiHeader}>
-        <MaterialCommunityIcons color={tone} name={icon} size={17} />
-        <Text style={styles.kpiLabel}>{label}</Text>
-      </View>
-      <Text numberOfLines={1} style={styles.kpiValue}>{value}<Text style={styles.kpiUnit}>{unit ? ` ${unit}` : ''}</Text></Text>
-    </View>
-  );
-}
-
-function DetailCard({ children, icon, title }: {
-  children: React.ReactNode;
-  icon: React.ComponentProps<typeof MaterialCommunityIcons>['name'];
-  title: string;
-}) {
-  const { colors: c } = useTheme();
-  const styles = useMemo(() => makeStyles(c), [c]);
-  return (
-    <View style={styles.detailCard}>
-      <View style={styles.detailCardHeader}>
-        <View style={styles.detailCardIcon}><MaterialCommunityIcons color={c.primary} name={icon} size={20} /></View>
-        <Text style={styles.detailCardTitle}>{title}</Text>
-      </View>
-      <View style={styles.detailRows}>{children}</View>
-    </View>
-  );
-}
-
-function DetailRow({ label, mono, multiline, value }: { label: string; mono?: boolean; multiline?: boolean; value: string }) {
-  const { colors: c } = useTheme();
-  const styles = useMemo(() => makeStyles(c), [c]);
-  return (
-    <View style={[styles.detailRow, multiline && styles.detailRowMultiline]}>
-      <Text style={styles.detailLabel}>{label}</Text>
-      <Text numberOfLines={multiline ? 3 : 1} style={[styles.detailValue, mono && styles.monoValue]}>{value}</Text>
-    </View>
   );
 }
 
@@ -863,88 +694,6 @@ function FieldLabel({ label, optional, required }: { label: string; optional?: b
       {optional ? <Text style={styles.optionalText}>Optional</Text> : null}
     </View>
   );
-}
-
-function documentTypeIcon(type: string): React.ComponentProps<typeof MaterialCommunityIcons>['name'] {
-  return DOCUMENT_TYPES.find((item) => item.key === type)?.icon ?? 'file-outline';
-}
-
-function documentTypeColor(type: string, c: ThemeColors) {
-  if (type === 'INSURANCE') return c.info;
-  if (type === 'PERMIT') return c.warning;
-  if (type === 'POLLUTION') return c.success;
-  if (type === 'SERVICE') return c.secondary;
-  return c.primary;
-}
-
-function expiryTone(value?: string | null): { key: 'valid' | 'soon' | 'expired'; label: string } {
-  if (!value) return { key: 'valid', label: 'No expiry' };
-  const time = new Date(`${value}T23:59:59`).getTime();
-  if (Number.isNaN(time)) return { key: 'valid', label: 'No expiry' };
-  const days = Math.ceil((time - Date.now()) / 86_400_000);
-  if (days < 0) return { key: 'expired', label: `Expired ${formatDate(value)}` };
-  if (days <= 30) return { key: 'soon', label: days === 0 ? 'Expires today' : `Expires in ${days}d` };
-  return { key: 'valid', label: `Valid until ${formatDate(value)}` };
-}
-
-function formatLabel(value?: string | null) {
-  if (!value) return 'Not available';
-  return value.toLowerCase().replace(/_/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
-}
-
-function formatDate(value?: string | null) {
-  if (!value) return 'Not set';
-  const date = new Date(`${value}T00:00:00`);
-  return Number.isNaN(date.getTime())
-    ? 'Not set'
-    : date.toLocaleDateString([], { day: '2-digit', month: 'short', year: 'numeric' });
-}
-
-function formatDateTime(value?: string | null) {
-  if (!value) return 'No data received';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? 'No data received'
-    : date.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-}
-
-function formatAge(value?: string | null, nowMs?: number) {
-  if (!value) return 'Never';
-  const time = new Date(value).getTime();
-  if (Number.isNaN(time)) return 'Never';
-  const now = nowMs != null && Number.isFinite(nowMs) ? nowMs : Date.now();
-  const minutes = Math.max(0, Math.floor((now - time) / 60_000));
-  if (minutes < 1) return 'Now';
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`;
-}
-
-function formatBytes(bytes: number) {
-  if (!Number.isFinite(bytes) || bytes <= 0) return 'Size unavailable';
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function stripExtension(fileName: string) {
-  return fileName.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' ').trim();
-}
-
-function isIsoDate(value: string) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(new Date(`${value}T00:00:00`).getTime());
-}
-
-function mimeTypeForName(fileName: string) {
-  const extension = fileName.split('.').pop()?.toLowerCase();
-  if (extension === 'pdf') return 'application/pdf';
-  if (extension === 'jpg' || extension === 'jpeg') return 'image/jpeg';
-  if (extension === 'png') return 'image/png';
-  if (extension === 'webp') return 'image/webp';
-  if (extension === 'txt') return 'text/plain';
-  if (extension === 'doc') return 'application/msword';
-  if (extension === 'docx') return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-  return 'application/pdf';
 }
 
 const makeStyles = (c: ThemeColors) =>
@@ -1008,6 +757,32 @@ const makeStyles = (c: ThemeColors) =>
     retryDocumentText: { color: c.primary, fontSize: typography.label, fontWeight: '900' },
     emptyAddButton: { alignItems: 'center', borderColor: hexToRgba(c.primary, 0.35), borderRadius: radius.sm, borderWidth: 1, flexDirection: 'row', gap: 7, marginTop: 7, paddingHorizontal: spacing.md, paddingVertical: 10 },
     emptyAddText: { color: c.primary, fontSize: typography.label, fontWeight: '900' },
+    docHeader: {
+      alignItems: 'center',
+      backgroundColor: c.surface,
+      borderBottomColor: c.border,
+      borderBottomWidth: StyleSheet.hairlineWidth,
+      flexDirection: 'row',
+      gap: spacing.sm,
+      paddingBottom: spacing.sm,
+      paddingHorizontal: spacing.sm,
+    },
+    docBack: {
+      alignItems: 'center',
+      borderRadius: radius.sm,
+      height: 40,
+      justifyContent: 'center',
+      width: 40,
+    },
+    docHeaderCopy: { flex: 1, minWidth: 0 },
+    docTitle: { color: c.textPrimary, fontSize: 17, fontWeight: '900', letterSpacing: -0.3 },
+    docSubtitle: {
+      color: c.textMuted,
+      fontSize: 9,
+      fontWeight: '800',
+      letterSpacing: 1.3,
+      marginTop: 1,
+    },
     documentList: { backgroundColor: c.surface, borderColor: c.border, borderRadius: radius.lg, borderWidth: StyleSheet.hairlineWidth, overflow: 'hidden' },
     documentRow: { alignItems: 'center', borderBottomColor: c.divider, borderBottomWidth: StyleSheet.hairlineWidth, flexDirection: 'row', gap: 10, minHeight: 90, padding: 12 },
     documentTypeIcon: { alignItems: 'center', borderRadius: radius.md, height: 46, justifyContent: 'center', width: 46 },

@@ -128,7 +128,7 @@ const DEMO_NOTIFICATIONS: Omit<Notification, 'read'>[] = [
     key: 'demo:ignition-1',
     kind: 'event',
     icon: 'key-variant',
-    tone: '#10B981',
+    tone: '#1A73E8',
     title: 'Ignition On',
     vehicleName: 'TN01AB1234',
     detail: 'Engine ignition switched ON at Depot Alpha.',

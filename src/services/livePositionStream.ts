@@ -5,6 +5,7 @@ import { traceGps } from '@/src/services/gpsDiagnostics';
 import { toFiniteNumber } from '@/src/services/gpsPipeline';
 import { useAppSelector } from '@/src/store/hooks';
 import type { MapMatchStatus } from '@/src/types/api';
+import type { LiveMatchedSource } from './liveRouteTrail';
 import { openSse, type SseConnection } from './sseClient';
 
 /**
@@ -117,7 +118,7 @@ export type LivePositionEvent = {
    *
    * Null for a backend that predates the field.
    */
-  matchedSource: 'SOLVED' | 'HELD' | 'CARRIED' | 'NONE' | null;
+  matchedSource: LiveMatchedSource | null;
   /** Road vertices covered since the previous update, as [lat, lng] pairs. */
   matchedGeometry: [number, number][];
   /** Canonical km/h. The backend converted it exactly once, at ingest. */
@@ -199,7 +200,7 @@ export type LiveRoadMatchEvent = {
   matchedLongitude: number | null;
   roadBearing: number | null;
   matchConfidence: number | null;
-  matchedSource: 'SOLVED' | 'HELD' | 'CARRIED' | 'NONE';
+  matchedSource: LiveMatchedSource;
   /** Road vertices travelled since the previous matched position, `[lat, lng]`. */
   matchedGeometry: [number, number][];
   matchStatus: MapMatchStatus | null;
@@ -270,11 +271,18 @@ function finiteNumber(value: unknown): number | null {
   return toFiniteNumber(value);
 }
 
-const MATCHED_SOURCES = ['SOLVED', 'HELD', 'CARRIED', 'NONE'] as const;
+const MATCHED_SOURCES = [
+  'SOLVED',
+  'HELD_STATIONARY',
+  'PREVIOUS_TRUSTED',
+  'HELD',
+  'CARRIED',
+  'NONE',
+] as const satisfies readonly LiveMatchedSource[];
 
-function matchedSourceOf(value: unknown): 'SOLVED' | 'HELD' | 'CARRIED' | 'NONE' | null {
+function matchedSourceOf(value: unknown): LiveMatchedSource | null {
   return typeof value === 'string' && (MATCHED_SOURCES as readonly string[]).includes(value)
-    ? (value as 'SOLVED' | 'HELD' | 'CARRIED' | 'NONE')
+    ? (value as LiveMatchedSource)
     : null;
 }
 

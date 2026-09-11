@@ -1,10 +1,11 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import React from 'react';
-import { Alert, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 import { Button } from '@/src/components/ui/Button';
 import { Card } from '@/src/components/ui/Card';
+import { useAppDialog } from '@/src/components/ui/useAppDialog';
 import { KeyboardAwareForm } from '@/src/components/ui/KeyboardAwareForm';
 import { TextField } from '@/src/components/ui/TextField';
 import { apiErrorMessage } from '@/src/services/apiError';
@@ -42,6 +43,7 @@ export default function ChangePasswordScreen() {
   const [confirmPassword, setConfirmPassword] = React.useState('');
   const [formError, setFormError] = React.useState<string | null>(null);
   const [changePassword, { isLoading }] = useChangePasswordMutation();
+  const { dialogElement, notify } = useAppDialog();
   const busyRef = React.useRef(false);
 
   const mismatch = Boolean(confirmPassword) && confirmPassword !== newPassword;
@@ -97,11 +99,13 @@ export default function ChangePasswordScreen() {
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
-      Alert.alert(
-        'Password changed',
-        'Your password has been updated. Other devices will need to sign in again.',
-        [{ text: 'Done', onPress: () => router.back() }]
-      );
+      notify({
+        confirmLabel: 'Done',
+        message: 'Your password has been updated. Other devices will need to sign in again.',
+        onDismiss: () => router.back(),
+        title: 'Password changed',
+        tone: 'success',
+      });
     } catch (err) {
       setFormError(apiErrorMessage(err, 'Could not change your password.'));
     } finally {
@@ -173,6 +177,7 @@ export default function ChangePasswordScreen() {
           />
         </View>
       </Card>
+      {dialogElement}
     </KeyboardAwareForm>
   );
 }
